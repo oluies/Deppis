@@ -28,5 +28,6 @@ message RetrieveResponse {
   // Each entry is a fixed-size, client-sealed blob (mirrors store.proto ReadResult.sealed_result):
   // a real frame and a carrier miss are byte-uniform on the wire, so neither the server nor an
   // observer learns hit-vs-miss. Only the client, after decrypting, recovers the 256-byte frame.
-  repeated bytes frames = 2;    // fixed-length sealed blobs; count is uniform/padded
+  // Named `sealed_frames` (not `frames`) to match the sealed semantics and store.proto.
+  repeated bytes sealed_frames = 2;    // fixed-length sealed blobs; count is uniform/padded
 }

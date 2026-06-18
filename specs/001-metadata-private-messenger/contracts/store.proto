@@ -39,10 +39,14 @@ message ReadBatchRequest {
   repeated ReadEntry entries = 3;
 }
 message ReadResult {
+  // Retired the pre-implementation cleartext fields; reserve their numbers AND names so no
+  // peer built from an earlier revision can silently reuse them (proto convention).
+  reserved 1, 2;
+  reserved "found", "frame";
   // Single fixed-size, client-sealed blob. Decrypts (client-side only) to {found, frame}.
   // Byte-uniform whether the token hit or missed, so the store host learns nothing beyond
   // batch size (no cleartext `found`; see invariants above).
-  bytes sealed_result = 1;     // fixed length = sealed(256-byte frame + 1-byte found tag)
+  bytes sealed_result = 3;     // fixed length = sealed(256-byte frame + 1-byte found tag)
 }
 message ReadBatchResponse {
   uint64 round_id = 1;
