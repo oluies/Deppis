@@ -1,0 +1,29 @@
+agent = "claude-code"
+review_types = ["security", "architecture"]
+
+review_guidelines = """
+This is a metadata-private messenger. Hold every commit to these rules:
+
+- No hand-rolled cryptographic primitives. Flag any AEAD, KEM, signature, hash, or PRF
+  implemented in-repo rather than called from a vetted library. ML-KEM and ML-DSA must
+  come from a recognized library, never from local code.
+- Constant-time discipline. Flag secret-dependent branches, secret-dependent array
+  indexing or table lookups, and comparisons of secrets with non-constant-time equality.
+  Flag logging or error messages that vary on secret values.
+- Oblivious-access invariants. In the store and notification code, flag any access whose
+  pattern depends on data content rather than only on public batch sizes. Flag a retrieval
+  token reused for two different messages (tokens must be non-recurrent).
+- Labeling rule. Flag any build path that uses the dev store or the single-shuffler stub
+  but does not surface the no-metadata-privacy label in code, logs, and UI.
+- Key handling. Flag keys that outlive their epoch, missing erasure of evolved keys, and
+  any path that lets an old key roll forward past the allowed window.
+- Attestation versus identity. On the PING or PONG path, flag any code that accepts a
+  SPIFFE SVID, mesh certificate, or service identity as proof that a server is trustworthy
+  without a verified attestation result appraised against the reference-value log. Flag an
+  enclave public key accepted before attestation, a missing freshness nonce, and any
+  enclave-workload SVID issued without a passing attestation result.
+- Cover traffic. Flag client send or fetch logic whose timing or volume depends on whether
+  a real message exists.
+- Dependencies pinned, no secrets committed, FIPS and library known-answer tests present
+  for every crypto path.
+"""

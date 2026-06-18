@@ -1,0 +1,29 @@
+syntax = "proto3";
+package metadatamessenger.messaging.v1;
+
+// Client <-> server round protocol (over gRPC/TLS 1.3). Asynchronous, batched rounds.
+// INVARIANT (FR-012): every device emits the SAME shape each round whether or not it has a
+// real message — SendFrame is always called once per round with a real or carrier frame.
+service RoundService {
+  // Submit this device's frame for the round (real or cover). Always exactly one per round.
+  rpc SendFrame(SendFrameRequest) returns (SendFrameResponse);
+  // Retrieve frames this device is entitled to this round (count is uniform/padded).
+  rpc Retrieve(RetrieveRequest) returns (RetrieveResponse);
+}
+
+message SendFrameRequest {
+  uint64 round_id = 1;          // public
+  bytes write_token = 2;        // protocol-core derived
+  bytes frame = 3;              // EXACTLY 256 bytes; carrier zero-frame when idle
+  bool is_carrier = 4;          // server-blind; for client-side accounting only, never trusted
+}
+message SendFrameResponse { uint64 round_id = 1; }
+
+message RetrieveRequest {
+  uint64 round_id = 1;
+  repeated bytes retrieval_tokens = 2;  // single-use; padded to uniform count
+}
+message RetrieveResponse {
+  uint64 round_id = 1;
+  repeated bytes frames = 2;    // 256-byte frames; carriers indistinguishable on the wire
+}

@@ -1,0 +1,42 @@
+syntax = "proto3";
+package metadatamessenger.store.v1;
+
+// ObliviousStore (PONG role) contract. Dev and target (enclave sidecar) impls satisfy this.
+// INVARIANTS (enforced in review, Constitution VIII + security section):
+//   - Access pattern depends ONLY on public batch size, never on data content.
+//   - retrieval_token is non-recurrent (single-use); reuse MUST fail.
+//   - Writes are unlinkable from reads in the target impl.
+service ObliviousStore {
+  // Write one fixed-size frame under a write token. Batched per round.
+  rpc WriteBatch(WriteBatchRequest) returns (WriteBatchResponse);
+  // Read by single-use retrieval token. Batched per round; batch size is public.
+  rpc ReadBatch(ReadBatchRequest) returns (ReadBatchResponse);
+}
+
+message WriteEntry {
+  bytes write_token = 1;        // derived in protocol-core; opaque
+  bytes frame = 2;              // EXACTLY 256 bytes (FR-015a); padded
+}
+message WriteBatchRequest {
+  uint64 round_id = 1;          // public
+  uint32 batch_size = 2;        // public; padded with carriers to fixed size
+  repeated WriteEntry entries = 3;
+}
+message WriteBatchResponse { uint64 round_id = 1; }
+
+message ReadEntry {
+  bytes retrieval_token = 1;    // single-use, non-recurrent (FR-014)
+}
+message ReadBatchRequest {
+  uint64 round_id = 1;          // public
+  uint32 batch_size = 2;        // public; padded to fixed size
+  repeated ReadEntry entries = 3;
+}
+message ReadResult {
+  bool found = 1;
+  bytes frame = 2;              // 256 bytes if found; carrier zero-frame otherwise
+}
+message ReadBatchResponse {
+  uint64 round_id = 1;
+  repeated ReadResult results = 2;  // same length as request (uniform)
+}
