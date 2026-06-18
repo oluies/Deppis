@@ -6,6 +6,12 @@ package metadatamessenger.store.v1;
 //   - Access pattern depends ONLY on public batch size, never on data content.
 //   - retrieval_token is non-recurrent (single-use); reuse MUST fail.
 //   - Writes are unlinkable from reads in the target impl.
+//   - NO per-entry output may be content-dependent in cleartext. The hit/miss outcome
+//     (whether a token matched) is itself metadata: in the target impl the store host MUST
+//     learn nothing beyond batch size. Therefore `ReadResult` carries a single fixed-size
+//     opaque `sealed_result` blob — client-sealed end to end — and there is NO cleartext
+//     `found` flag for the host to observe. A real hit and a carrier miss are byte-uniform
+//     on the wire; only the client, after decrypting, learns hit-vs-miss and the frame.
 service ObliviousStore {
   // Write one fixed-size frame under a write token. Batched per round.
   rpc WriteBatch(WriteBatchRequest) returns (WriteBatchResponse);
@@ -33,10 +39,12 @@ message ReadBatchRequest {
   repeated ReadEntry entries = 3;
 }
 message ReadResult {
-  bool found = 1;
-  bytes frame = 2;              // 256 bytes if found; carrier zero-frame otherwise
+  // Single fixed-size, client-sealed blob. Decrypts (client-side only) to {found, frame}.
+  // Byte-uniform whether the token hit or missed, so the store host learns nothing beyond
+  // batch size (no cleartext `found`; see invariants above).
+  bytes sealed_result = 1;     // fixed length = sealed(256-byte frame + 1-byte found tag)
 }
 message ReadBatchResponse {
   uint64 round_id = 1;
-  repeated ReadResult results = 2;  // same length as request (uniform)
+  repeated ReadResult results = 2;  // same length as request; every entry byte-uniform
 }

@@ -25,5 +25,8 @@ message RetrieveRequest {
 }
 message RetrieveResponse {
   uint64 round_id = 1;
-  repeated bytes frames = 2;    // 256-byte frames; carriers indistinguishable on the wire
+  // Each entry is a fixed-size, client-sealed blob (mirrors store.proto ReadResult.sealed_result):
+  // a real frame and a carrier miss are byte-uniform on the wire, so neither the server nor an
+  // observer learns hit-vs-miss. Only the client, after decrypting, recovers the 256-byte frame.
+  repeated bytes frames = 2;    // fixed-length sealed blobs; count is uniform/padded
 }
