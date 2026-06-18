@@ -45,14 +45,14 @@ Multi-component layout (plan.md): `protocol-core/`, `crypto/`, `server/`, `obliv
 `protocol-core` + `crypto` nucleus and the pluggable-backend interfaces every story builds on.
 
 - [ ] T009 [P] KAT harness + FIPS/library vectors for AEAD (ChaCha20-Poly1305) and Blake2b in `crypto/jvm/src/test/scala/kat/` (write first; MUST fail before T011)
-- [ ] T010 [P] Property-test skeleton (ScalaCheck) for protocol state machines + framing in `protocol-core/shared/src/test/scala/` (write first; MUST fail before T013–T016)
+- [X] T010 [P] Property-test skeleton (ScalaCheck) for protocol state machines + framing in `protocol-core/shared/src/test/scala/` (write first; MUST fail before T013–T016) — 11 props green (Frame/Token/Schedule/Privacy)
 - [ ] T011 [P] Implement `crypto` AEAD + KDF wrappers over libsodium (ChaCha20-Poly1305, Blake2b) in `crypto/jvm/src/main/scala/`, with `mcrypto aead-seal|aead-open|kdf|kat` CLI (Constitution I/II/V); make T009 pass
 - [ ] T012 [P] Wrap an audited Signal double-ratchet implementation in `crypto/jvm/src/main/scala/ratchet/` (no hand-rolled ratchet — Constitution I)
-- [ ] T013 Implement message framing (fixed 256-byte frames, padding) in `protocol-core/shared/src/main/scala/frame/` (FR-015a)
-- [ ] T014 Implement retrieval-token PRF = keyed Blake2b/HMAC over (senderId, receiverId, counter) with monotone counter (non-recurrent) in `protocol-core/shared/src/main/scala/token/` + `pcore retrieval-token` CLI (FR-014)
-- [ ] T015 Implement the client schedule (uniform per-round send/retrieve/carrier decisions, cover traffic) in `protocol-core/shared/src/main/scala/schedule/` (FR-012) + `pcore schedule-next` CLI
+- [X] T013 Implement message framing (fixed 256-byte frames, padding) in `protocol-core/shared/src/main/scala/frame/` (FR-015a)
+- [X] T014 Implement retrieval-token PRF = keyed Blake2b/HMAC over (senderId, receiverId, counter) with monotone counter (non-recurrent) in `protocol-core/shared/src/main/scala/token/` + `pcore retrieval-token` CLI (FR-014) — JCA HMAC-SHA256 (not hand-rolled), length-prefixed fields, constant-time compare
+- [X] T015 Implement the client schedule (uniform per-round send/retrieve/carrier decisions, cover traffic) in `protocol-core/shared/src/main/scala/schedule/` (FR-012) + `pcore schedule-next` CLI
 - [ ] T016 Define the `ObliviousStore` and `AnonymityLayer` interfaces (config-switchable backends) in `server/pong/src/main/scala/store/` and `anonymity/src/main/scala/` (Constitution VIII)
-- [ ] T017 [P] Implement `BuildPrivacyStatus` + `pstatus show` CLI emitting `{backend, metadataPrivate, label}` in `protocol-core/shared/src/main/scala/privacy/` (FR-016, Constitution IV)
+- [X] T017 [P] Implement `BuildPrivacyStatus` + `pstatus show` CLI emitting `{backend, metadataPrivate, label}` in `protocol-core/shared/src/main/scala/privacy/` (FR-016, Constitution IV)
 - [ ] T018 [P] Configure error handling/logging that never varies on secret values (Constitution II) in `server/src/main/scala/obs/`
 - [ ] T019 Scaffold the Scala.js engine bundle + versioned Dart platform-channel API per `contracts/engine-api.md` in `protocol-core/js/` (Constitution VII)
 - [ ] T020 [P] Stand up the Pekko/Akka server skeleton with gRPC/TLS 1.3 round orchestration in `server/src/main/scala/round/` (per `contracts/messaging.proto`)
