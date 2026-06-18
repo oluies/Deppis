@@ -71,8 +71,8 @@ buddy; a tampered secret fails the comparison and is rejected; re-adding is reco
 - [ ] T021 [P] [US1] Property test for the add-friend handshake (match → Confirmed; mismatch → rejected; idempotent dup) in `protocol-core/shared/src/test/scala/handshake/` (write first, MUST fail)
 - [ ] T022 [P] [US1] Contract test for engine `addBuddy`/`confirmBuddy` per `contracts/engine-api.md` in `protocol-core/js/src/test/`
 - [ ] T023 [US1] Implement the add-friend handshake + safety-number derivation in `protocol-core/shared/src/main/scala/handshake/` + `pcore handshake-init` CLI (FR-001)
-- [ ] T024 [US1] Implement `BuddyRelationship` state (`Pending→Confirmed→Removed`), uniqueness/no-dup, removal, AND enforcement of the **512-buddy cap** (reject the 513th predictably) in `protocol-core/shared/src/main/scala/buddy/` (FR-002, FR-015, FR-018)
 - [ ] T024a [P] [US1] Boundary test for the 512-buddy cap (accept up to 512; 513th rejected predictably; count correct after removals) in `protocol-core/shared/src/test/scala/buddy/` (FR-015) — write first, MUST fail [analyze C1]
+- [ ] T024 [US1] Implement `BuddyRelationship` state (`Pending→Confirmed→Removed`), uniqueness/no-dup, removal, AND enforcement of the **512-buddy cap** (reject the 513th predictably) in `protocol-core/shared/src/main/scala/buddy/` (FR-002, FR-015, FR-018)
 - [ ] T025 [US1] Wire `addBuddy`/`confirmBuddy`/`removeBuddy` engine commands + `buddyConfirmed` event in `protocol-core/js/` (FR-001/FR-002/FR-018)
 - [ ] T026 [US1] Flutter add-buddy + safety-number-compare UI in `clients/flutter/lib/buddy/`, showing the privacy-status label (FR-016)
 
@@ -107,10 +107,10 @@ three with no ordering constraint between conversations.
 
 - [ ] T033 [P] [US3] Integration test: 3 concurrent conversations in one round, none blocked, in `server/src/test/scala/integration/concurrency/` (write first, MUST fail)
 - [ ] T033a [P] [US3] Scale test: a user holds up to 512 simultaneous conversations with no conversation blocking another in `server/src/test/scala/integration/scale/` (SC-005) — write first, MUST fail [analyze C4]
+- [ ] T036a [P] [US3] End-to-end latency test: a two-party exchange completes within minute-order (single-digit rounds); asserts the tuned round interval meets SC-001, in `server/src/test/scala/integration/latency/` (SC-001) — write first, MUST fail [analyze C2]
 - [ ] T034 [US3] Implement per-buddy independent send/retrieve state (no cross-conversation blocking) in `protocol-core/shared/src/main/scala/session/` (FR-006)
 - [ ] T035 [US3] Implement round retrieval of multiple frames with uniform/padded count in `server/pong/src/main/scala/` per `contracts/messaging.proto` Retrieve (FR-006/FR-012)
 - [ ] T036 [US3] Flutter multi-conversation list/threading in `clients/flutter/lib/chat/`
-- [ ] T036a [US3] End-to-end latency test: a two-party exchange completes within minute-order (single-digit rounds); asserts the tuned round interval meets SC-001, in `server/src/test/scala/integration/latency/` (SC-001) — write first, MUST fail [analyze C2]
 
 **Checkpoint**: US1–US3 (all P1) complete — Phase B UX done over the labeled dev backend.
 
@@ -189,7 +189,7 @@ US2/US3/US5/US6's real guarantee.)
 - [ ] T051 Implement constant-time oblivious primitives in `oblivious-sidecar/src/primitives/` (Constitution II) [native sidecar after dev store]
 - [ ] T052 Implement the PONG oblivious store (stash + bins + message tables, deamortized builds, unlinkable write/read, non-recurrent tokens) in `oblivious-sidecar/src/store/` + `obsx store-write|store-read` CLI (D7/FR-014)
 - [ ] T053 Implement the PING sealed-notification aggregation (OR + oblivious sort/scan/compaction, carrier injection) in `oblivious-sidecar/src/notify/` + `obsx notify-aggregate` CLI (D8)
-- [ ] T053a [P] Which-buddy anonymity test against the real enclave backend: with N buddies and one real sender, an observer (incl. the store/notify host) cannot identify the sending buddy better than 1/N in `server/src/test/scala/integration/anonymity/` (SC-002) — write first, MUST fail [analyze C3]
+- [ ] T053a [P] Which-buddy anonymity test against the real enclave backend: with N buddies and one real sender, an observer (incl. the store/notify host) cannot identify the sending buddy better than 1/N in `server/src/test/scala/integration/anonymity/` (SC-002) — acceptance test; written up front, stays failing until the Phase C backend (T051–T056) is assembled [analyze C3]
 - [ ] T054 Implement the enclave-target `ObliviousStore`/notification fronts in `server/{pong,ping}/src/main/scala/.../enclave/` calling the sidecar over gRPC (Constitution VIII)
 - [ ] T055 [P] Contract test for `attestation.proto` (stale nonce / unpinned measurement / bad signature ⇒ rejected, no enclave key) in `server/attestation/src/test/scala/` (write first, MUST fail)
 - [ ] T056 Implement the RATS relying-party + Veraison verifier client: appraise evidence vs CoRIM reference values, check freshness nonce, accept enclave key ONLY on pass, in `server/attestation/src/main/scala/` + `attest verify` CLI (Constitution IX/X)
