@@ -14,6 +14,13 @@ lazy val V = new {
   val upickle        = "4.0.2"
 }
 
+lazy val testDeps = Seq(
+  "org.scalatest"     %% "scalatest"       % V.scalatest     % Test,
+  "org.scalatestplus" %% "scalacheck-1-18" % V.scalatestPlus % Test
+)
+
+lazy val commonScalac = Seq("-deprecation", "-feature", "-unchecked", "-Wunused:all")
+
 lazy val protocolCore = (project in file("protocol-core"))
   .settings(
     name := "protocol-core",
@@ -31,6 +38,29 @@ lazy val protocolCore = (project in file("protocol-core"))
     )
   )
 
+// anonymity layer: AnonymityLayer interface (+ Groove stub later). Standard layout.
+lazy val anonymity = (project in file("anonymity"))
+  .dependsOn(protocolCore)
+  .settings(
+    name := "anonymity",
+    scalacOptions ++= commonScalac,
+    libraryDependencies ++= testDeps
+  )
+
+// server: PING/PONG/provider/attestation fronts. Sources live in per-role subdirs to match the
+// plan structure (server/pong/..., server/ping/..., etc.).
+lazy val server = (project in file("server"))
+  .dependsOn(protocolCore)
+  .settings(
+    name := "server",
+    scalacOptions ++= commonScalac,
+    Compile / unmanagedSourceDirectories := Seq("pong", "ping", "provider", "attestation")
+      .map(d => baseDirectory.value / d / "src" / "main" / "scala"),
+    Test / unmanagedSourceDirectories := Seq("pong", "ping", "provider", "attestation")
+      .map(d => baseDirectory.value / d / "src" / "test" / "scala"),
+    libraryDependencies ++= testDeps
+  )
+
 lazy val root = (project in file("."))
-  .aggregate(protocolCore)
+  .aggregate(protocolCore, anonymity, server)
   .settings(name := "metadata-messenger", publish / skip := true)

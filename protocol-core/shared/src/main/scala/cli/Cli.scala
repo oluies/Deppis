@@ -4,6 +4,7 @@ import java.util.Base64
 import frame.Frame
 import token.RetrievalToken
 import schedule.Schedule
+import handshake.Handshake
 import privacy.Privacy
 import privacy.Privacy.{Backend, BuildPrivacyStatus}
 
@@ -31,6 +32,13 @@ object Pcore:
       try
         val j = if in.trim.isEmpty then ujson.Obj() else ujson.read(in)
         sub match
+          case "handshake-init" =>
+            val pi = Handshake.init(b64d(j("sharedSecret").str))
+            ujson.Obj(
+              "pairId"       -> pi.pairId,
+              "safetyNumber" -> pi.safetyNumber,
+              "pairKey"      -> b64e(pi.pairKey)
+            )
           case "retrieval-token" =>
             val key = j.obj.get("key").map(k => b64d(k.str)).getOrElse("dev-key".getBytes)
             val tok = RetrievalToken.derive(key, j("senderId").str, j("receiverId").str, exactLong(j("counter")))

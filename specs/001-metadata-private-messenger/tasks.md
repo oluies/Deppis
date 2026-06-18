@@ -51,7 +51,7 @@ Multi-component layout (plan.md): `protocol-core/`, `crypto/`, `server/`, `obliv
 - [X] T013 Implement message framing (fixed 256-byte frames, padding) in `protocol-core/shared/src/main/scala/frame/` (FR-015a)
 - [X] T014 Implement retrieval-token PRF = keyed Blake2b/HMAC over (senderId, receiverId, counter) with monotone counter (non-recurrent) in `protocol-core/shared/src/main/scala/token/` + `pcore retrieval-token` CLI (FR-014) — JCA HMAC-SHA256 (not hand-rolled), length-prefixed fields, constant-time compare
 - [X] T015 Implement the client schedule (uniform per-round send/retrieve/carrier decisions, cover traffic) in `protocol-core/shared/src/main/scala/schedule/` (FR-012) + `pcore schedule-next` CLI
-- [ ] T016 Define the `ObliviousStore` and `AnonymityLayer` interfaces (config-switchable backends) in `server/pong/src/main/scala/store/` and `anonymity/src/main/scala/` (Constitution VIII)
+- [X] T016 Define the `ObliviousStore` and `AnonymityLayer` interfaces (config-switchable backends) in `server/pong/src/main/scala/store/` and `anonymity/src/main/scala/` (Constitution VIII)
 - [X] T017 [P] Implement `BuildPrivacyStatus` + `pstatus show` CLI emitting `{backend, metadataPrivate, label}` in `protocol-core/shared/src/main/scala/privacy/` (FR-016, Constitution IV)
 - [ ] T018 [P] Configure error handling/logging that never varies on secret values (Constitution II) in `server/src/main/scala/obs/`
 - [ ] T019 Scaffold the Scala.js engine bundle + versioned Dart platform-channel API per `contracts/engine-api.md` in `protocol-core/js/` (Constitution VII)
@@ -68,11 +68,11 @@ Multi-component layout (plan.md): `protocol-core/`, `crypto/`, `server/`, `obliv
 **Independent Test**: Two engines pair, compare matching safety numbers, both list a Confirmed
 buddy; a tampered secret fails the comparison and is rejected; re-adding is recognized as a dup.
 
-- [ ] T021 [P] [US1] Property test for the add-friend handshake (match → Confirmed; mismatch → rejected; idempotent dup) in `protocol-core/shared/src/test/scala/handshake/` (write first, MUST fail)
+- [X] T021 [P] [US1] Property test for the add-friend handshake (match → Confirmed; mismatch → rejected; idempotent dup) in `protocol-core/shared/src/test/scala/handshake/` (write first, MUST fail) — HandshakeSpec + BuddySpec, green
 - [ ] T022 [P] [US1] Contract test for engine `addBuddy`/`confirmBuddy` per `contracts/engine-api.md` in `protocol-core/js/src/test/`
-- [ ] T023 [US1] Implement the add-friend handshake + safety-number derivation in `protocol-core/shared/src/main/scala/handshake/` + `pcore handshake-init` CLI (FR-001)
-- [ ] T024a [P] [US1] Boundary test for the 512-buddy cap (accept up to 512; 513th rejected predictably; count correct after removals) in `protocol-core/shared/src/test/scala/buddy/` (FR-015) — write first, MUST fail [analyze C1]
-- [ ] T024 [US1] Implement `BuddyRelationship` state (`Pending→Confirmed→Removed`), uniqueness/no-dup, removal, AND enforcement of the **512-buddy cap** (reject the 513th predictably) in `protocol-core/shared/src/main/scala/buddy/` (FR-002, FR-015, FR-018)
+- [X] T023 [US1] Implement the add-friend handshake + safety-number derivation in `protocol-core/shared/src/main/scala/handshake/` + `pcore handshake-init` CLI (FR-001) — symmetric HMAC-derived pairId/safetyNumber/pairKey; tamper ⇒ mismatch
+- [X] T024a [P] [US1] Boundary test for the 512-buddy cap (accept up to 512; 513th rejected predictably; count correct after removals) in `protocol-core/shared/src/test/scala/buddy/` (FR-015) — write first, MUST fail [analyze C1]
+- [X] T024 [US1] Implement `BuddyRelationship` state (`Pending→Confirmed→Removed`), uniqueness/no-dup, removal, AND enforcement of the **512-buddy cap** (reject the 513th predictably) in `protocol-core/shared/src/main/scala/buddy/` (FR-002, FR-015, FR-018)
 - [ ] T025 [US1] Wire `addBuddy`/`confirmBuddy`/`removeBuddy` engine commands + `buddyConfirmed` event in `protocol-core/js/` (FR-001/FR-002/FR-018)
 - [ ] T026 [US1] Flutter add-buddy + safety-number-compare UI in `clients/flutter/lib/buddy/`, showing the privacy-status label (FR-016)
 
@@ -91,7 +91,7 @@ notification server cannot determine the sender; receiver retrieves on its own s
 - [ ] T028 [P] [US2] Contract test for `notify.proto` Signal/FetchDigest in `server/ping/src/test/scala/`
 - [ ] T029 [US2] Implement receiver-generated sealed notification-token codec (one-hot position + aggregation label) in `protocol-core/shared/src/main/scala/notify/` (FR-003, token direction receiver→sender)
 - [ ] T030 [US2] Implement the **dev** notification aggregation (bitwise-OR + carrier injection) behind the PING front in `server/ping/src/main/scala/` over the dev store, labeled `DEV, NO METADATA PRIVACY` (FR-004/FR-012/Constitution IV) [Phase B]
-- [ ] T031 [US2] Implement the **dev** `ObliviousStore` (in-memory/Postgres KV, no access-pattern privacy, labeled) in `server/pong/src/main/scala/store/dev/` (Constitution VIII/IV) [dev store before sidecar]
+- [X] T031 [US2] Implement the **dev** `ObliviousStore` (in-memory/Postgres KV, no access-pattern privacy, labeled) in `server/pong/src/main/scala/store/dev/` (Constitution VIII/IV) [dev store before sidecar] — in-memory; enforces 256-byte frames, single-use non-recurrent tokens, no-token-reuse
 - [ ] T032 [US2] Wire `sendMessage` (frame+enqueue) and the `notified` engine event in `protocol-core/js/` + Flutter notification indicator in `clients/flutter/lib/notify/` (FR-004)
 
 **Checkpoint**: US1+US2 work; notify-before-retrieval UX over the labeled dev backend.
