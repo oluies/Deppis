@@ -48,7 +48,11 @@ lazy val crypto = (project in file("crypto"))
     Test / fork := true,
     run / javaOptions += "--enable-native-access=ALL-UNNAMED",
     Test / javaOptions += "--enable-native-access=ALL-UNNAMED",
-    libraryDependencies ++= testDeps :+ ("com.lihaoyi" %% "upickle" % V.upickle)
+    libraryDependencies ++= testDeps ++ Seq(
+      "com.lihaoyi"      %% "upickle"        % V.upickle,
+      // independent vetted Blake2b impl, used only to cross-validate libsodium in KATs
+      "org.bouncycastle"  % "bcprov-jdk18on" % "1.78.1" % Test
+    )
   )
 
 // anonymity layer: AnonymityLayer interface (+ Groove stub later). Standard layout.

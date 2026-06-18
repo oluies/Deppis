@@ -11,6 +11,8 @@ object Mcrypto:
     j.obj.get(k).map(v => b64d(v.str)).getOrElse(Array.emptyByteArray)
   private def fail(msg: String): Nothing =
     System.err.println(s"error: $msg"); sys.exit(1)
+  private def hex(s: String): Array[Byte] =
+    s.grouped(2).map(Integer.parseInt(_, 16).toByte).toArray
 
   def main(args: Array[String]): Unit =
     val sub = args.headOption.getOrElse("")
@@ -29,13 +31,13 @@ object Mcrypto:
             val okm = Crypto.kdf(b64d(j("ikm").str), optBytes(j, "salt"), optBytes(j, "info"), j("len").num.toInt)
             ujson.Obj("okm" -> b64e(okm))
           case "kat" =>
-            // Self-test: AEAD round-trip over a fixed input proves the libsodium binding works.
-            val key = Array.tabulate(Crypto.KeyBytes)(i => (0x80 + i).toByte)
-            val non = Array[Byte](7, 0, 0, 0, 64, 65, 66, 67, 68, 69, 70, 71)
-            val ad  = Array[Byte](80, 81, 82, 83)
-            val pt  = "metadata-messenger KAT".getBytes
-            val ok  = Crypto.aeadOpen(key, non, ad, Crypto.aeadSeal(key, non, ad, pt)).exists(_.sameElements(pt))
-            ujson.Obj("suite" -> "chacha20poly1305-ietf", "pass" -> ok, "vectors" -> 1)
+            // Real published vector: RFC 7693 BLAKE2b-512("abc").
+            val rfc7693 = hex(
+              "ba80a53f981c4d0d6a2797b69f12f6e94c212f14685ac4b74b12bb6fdbffa2d1" +
+                "7d87c5392aab792dc252d5de4533cc9518d38aa8dbf1925ab92386edd4009923"
+            )
+            val pass = Crypto.blake2b("abc".getBytes, 64).sameElements(rfc7693)
+            ujson.Obj("suite" -> "blake2b-512 (RFC 7693)", "pass" -> pass, "vectors" -> 1)
           case other => fail(s"unknown subcommand: $other")
       catch case e: Throwable => fail(e.getMessage)
     println(ujson.write(out))
