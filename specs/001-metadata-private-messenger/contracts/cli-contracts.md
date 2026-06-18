@@ -14,6 +14,9 @@ respect to the protocol/crypto logic in `protocol-core` / `crypto`.
 | `retrieval-token` | `{ senderId, receiverId, counter }` | `{ token }`  (keyed-PRF; non-recurrent) |
 | `schedule-next` | `{ scheduleState, now }` | `{ roundId, action: send|retrieve|carrier }` |
 
+`counter` MAY be a JSON string (recommended) to preserve the full 64-bit range; JSON numbers
+lose integer precision above 2^53, which would weaken retrieval-token non-recurrence (FR-014).
+
 ## `crypto` CLI (`mcrypto`)
 
 | Subcommand | Input | Output | Notes |

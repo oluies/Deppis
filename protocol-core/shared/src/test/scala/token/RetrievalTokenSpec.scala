@@ -15,12 +15,12 @@ class RetrievalTokenSpec extends AnyFunSuite with ScalaCheckDrivenPropertyChecks
     }
 
   test("distinct counters yield distinct tokens (non-recurrence, FR-014)"):
-    forAll { (s: String, r: String, c: Long) =>
-      whenever(c != c + 1L):
+    forAll { (s: String, r: String, c1: Long, c2: Long) =>
+      whenever(c1 != c2):
         assert(
           !RetrievalToken.equalsCT(
-            RetrievalToken.derive(key, s, r, c),
-            RetrievalToken.derive(key, s, r, c + 1L)
+            RetrievalToken.derive(key, s, r, c1),
+            RetrievalToken.derive(key, s, r, c2)
           )
         )
     }

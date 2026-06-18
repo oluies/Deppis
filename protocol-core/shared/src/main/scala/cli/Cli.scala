@@ -15,6 +15,13 @@ private def fail(msg: String): Nothing =
   System.err.println(s"error: $msg")
   sys.exit(1)
 
+/** Parse a JSON counter as an exact 64-bit Long. JSON numbers are Doubles in upickle and lose
+  * integer precision above 2^53, which would weaken retrieval-token non-recurrence (FR-014);
+  * pass the counter as a JSON string to preserve the full range. */
+private def exactLong(v: ujson.Value): Long = v match
+  case ujson.Str(s) => s.toLong
+  case other        => other.num.toLong
+
 /** `pcore <subcommand>` — retrieval-token | frame | deframe | schedule-next (T013/T014/T015). */
 object Pcore:
   def main(args: Array[String]): Unit =
@@ -26,7 +33,7 @@ object Pcore:
         sub match
           case "retrieval-token" =>
             val key = j.obj.get("key").map(k => b64d(k.str)).getOrElse("dev-key".getBytes)
-            val tok = RetrievalToken.derive(key, j("senderId").str, j("receiverId").str, j("counter").num.toLong)
+            val tok = RetrievalToken.derive(key, j("senderId").str, j("receiverId").str, exactLong(j("counter")))
             ujson.Obj("token" -> b64e(tok))
           case "frame" =>
             Frame.pad(b64d(j("payload").str)).fold(fail, f => ujson.Obj("frame" -> b64e(f)))

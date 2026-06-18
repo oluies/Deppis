@@ -25,6 +25,7 @@ object Frame:
       if len > MaxPayload then Left(s"declared length $len > max $MaxPayload")
       else Right(fr.slice(2, 2 + len))
 
-  /** A carrier (cover) frame: a valid 256-byte frame with an empty payload, wire-
-    * indistinguishable in size from a real frame (FR-012). */
-  def carrier(): Array[Byte] = pad(Array.emptyByteArray).toOption.get
+  /** A carrier (cover) frame: a 256-byte all-zero frame. The leading 2-byte length prefix is
+    * 0, so it decodes to an empty payload; wire-indistinguishable in size from a real frame
+    * (FR-012). Constructed directly to avoid an Option#get on the cover-traffic path. */
+  def carrier(): Array[Byte] = new Array[Byte](Size)
