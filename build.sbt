@@ -54,9 +54,11 @@ lazy val server = (project in file("server"))
   .settings(
     name := "server",
     scalacOptions ++= commonScalac,
-    Compile / unmanagedSourceDirectories := Seq("pong", "ping", "provider", "attestation")
+    // ++= keeps the default server/src/main/scala root (where T018 obs/logging will live)
+    // alongside the per-role dirs.
+    Compile / unmanagedSourceDirectories ++= Seq("pong", "ping", "provider", "attestation")
       .map(d => baseDirectory.value / d / "src" / "main" / "scala"),
-    Test / unmanagedSourceDirectories := Seq("pong", "ping", "provider", "attestation")
+    Test / unmanagedSourceDirectories ++= Seq("pong", "ping", "provider", "attestation")
       .map(d => baseDirectory.value / d / "src" / "test" / "scala"),
     libraryDependencies ++= testDeps
   )

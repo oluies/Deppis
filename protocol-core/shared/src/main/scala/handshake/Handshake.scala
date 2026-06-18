@@ -22,11 +22,13 @@ object Handshake:
 
   private def hex(b: Array[Byte]): String = b.map(x => f"${x & 0xff}%02x").mkString
 
-  /** Six space-separated 5-digit groups (Signal-style human comparison code). */
+  /** Six space-separated 5-digit groups (Signal-style human comparison code). Each group draws
+    * 3 HMAC bytes (24 bits) before reducing mod 100000, so the full 00000–99999 range is used
+    * (18 of the 32 HMAC-SHA256 output bytes). */
   private def safetyNumber(b: Array[Byte]): String =
     (0 until 6)
       .map { i =>
-        val v = (((b(2 * i) & 0xff) << 8) | (b(2 * i + 1) & 0xff)) % 100000
+        val v = (((b(3 * i) & 0xff) << 16) | ((b(3 * i + 1) & 0xff) << 8) | (b(3 * i + 2) & 0xff)) % 100000
         f"$v%05d"
       }
       .mkString(" ")
