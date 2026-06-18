@@ -44,9 +44,9 @@ Multi-component layout (plan.md): `protocol-core/`, `crypto/`, `server/`, `obliv
 **⚠️ CRITICAL**: No user-story work begins until this phase is complete. This is the
 `protocol-core` + `crypto` nucleus and the pluggable-backend interfaces every story builds on.
 
-- [ ] T009 [P] KAT harness + FIPS/library vectors for AEAD (ChaCha20-Poly1305) and Blake2b in `crypto/jvm/src/test/scala/kat/` (write first; MUST fail before T011)
+- [~] T009 [P] KAT harness + FIPS/library vectors for AEAD (ChaCha20-Poly1305) and Blake2b in `crypto/jvm/src/test/scala/kat/` (write first; MUST fail before T011) — PARTIAL: harness in `crypto/src/test/scala/crypto/CryptoSpec.scala`; AEAD has a real KAT (libsodium byte-identical to JDK ChaCha20-Poly1305). TODO: add static published vectors — RFC 8439 (AEAD) + RFC 7693 (Blake2b) — from a vectors file rather than memory
 - [X] T010 [P] Property-test skeleton (ScalaCheck) for protocol state machines + framing in `protocol-core/shared/src/test/scala/` (write first; MUST fail before T013–T016) — 11 props green (Frame/Token/Schedule/Privacy)
-- [ ] T011 [P] Implement `crypto` AEAD + KDF wrappers over libsodium (ChaCha20-Poly1305, Blake2b) in `crypto/jvm/src/main/scala/`, with `mcrypto aead-seal|aead-open|kdf|kat` CLI (Constitution I/II/V); make T009 pass
+- [X] T011 [P] Implement `crypto` AEAD + KDF wrappers over libsodium (ChaCha20-Poly1305, Blake2b) in `crypto/jvm/src/main/scala/`, with `mcrypto aead-seal|aead-open|kdf|kat` CLI (Constitution I/II/V); make T009 pass — JDK FFM (Panama) binding to libsodium; `crypto/src/main/scala/crypto/`; 6 tests green
 - [ ] T012 [P] Wrap an audited Signal double-ratchet implementation in `crypto/jvm/src/main/scala/ratchet/` (no hand-rolled ratchet — Constitution I)
 - [X] T013 Implement message framing (fixed 256-byte frames, padding) in `protocol-core/shared/src/main/scala/frame/` (FR-015a)
 - [X] T014 Implement retrieval-token PRF = keyed Blake2b/HMAC over (senderId, receiverId, counter) with monotone counter (non-recurrent) in `protocol-core/shared/src/main/scala/token/` + `pcore retrieval-token` CLI (FR-014) — JCA HMAC-SHA256 (not hand-rolled), length-prefixed fields, constant-time compare

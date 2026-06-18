@@ -38,6 +38,19 @@ lazy val protocolCore = (project in file("protocol-core"))
     )
   )
 
+// crypto: thin wrappers over libsodium via the JDK Foreign Function & Memory API (Panama).
+// No hand-rolled primitives (Constitution I). Forked with native access enabled.
+lazy val crypto = (project in file("crypto"))
+  .settings(
+    name := "crypto",
+    scalacOptions ++= commonScalac,
+    run / fork := true,
+    Test / fork := true,
+    run / javaOptions += "--enable-native-access=ALL-UNNAMED",
+    Test / javaOptions += "--enable-native-access=ALL-UNNAMED",
+    libraryDependencies ++= testDeps :+ ("com.lihaoyi" %% "upickle" % V.upickle)
+  )
+
 // anonymity layer: AnonymityLayer interface (+ Groove stub later). Standard layout.
 lazy val anonymity = (project in file("anonymity"))
   .dependsOn(protocolCore)
@@ -64,5 +77,5 @@ lazy val server = (project in file("server"))
   )
 
 lazy val root = (project in file("."))
-  .aggregate(protocolCore, anonymity, server)
+  .aggregate(protocolCore, crypto, anonymity, server)
   .settings(name := "metadata-messenger", publish / skip := true)
