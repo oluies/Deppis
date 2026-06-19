@@ -36,9 +36,10 @@ SPIFFE SVID or mesh certificate. An enclave public key MUST NOT be accepted befo
                  ┌──────── fresh nonce  (per attempt, never reused) ────────┐
                  ▼                                                          │
   Enclave (SGX) ── DCAP quote {measurement, ephemeral pubkey, nonce}sig ──► Verifier (Scala)
-  oblivious-sidecar                                                          │  appraise:
-                 ▲                                                           │   1. nonce == expected   (replay)
-                 │                                                           │   2. quote signature     (DCAP, TEE-gated)
+  oblivious-sidecar                                                          │  appraise (in order):
+                 ▲                                                           │   0. expected nonce len ≥ 16 (guard)
+                 │                                                           │   1. quote signature     (DCAP, TEE-gated)
+                 │                                                           │   2. nonce == expected   (replay, const-time)
                  │                                                           │   3. measurement ∈ ref set (transparency log)
                  │                                                           │   4. ephemeral pubkey present
                  │                                                           ▼
@@ -84,7 +85,9 @@ The security-critical appraisal + gate are implemented and unit-tested today:
 ## Threat model notes
 
 - **Replay** — a captured quote is bound to a one-time `nonce`; a fresh nonce per attempt makes
-  replay fail at check 1.
+  replay fail at the nonce check. A degenerate (empty/short) expected nonce, which would silently
+  weaken this, is itself rejected by guard 0 (`MinNonceBytes`). The signature is verified before
+  the nonce, so the nonce is only ever compared against an authenticated quote body.
 - **Key substitution** — the ephemeral pubkey is inside the signed quote body; an attacker cannot
   swap in their own key without invalidating the signature (check 2).
 - **Fake/old code** — only measurements in the transparency-logged reference set pass (check 3);

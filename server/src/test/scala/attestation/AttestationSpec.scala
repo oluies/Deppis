@@ -13,7 +13,8 @@ class AttestationSpec extends AnyFunSuite:
     allowedMrEnclave = Set(mrEnclave),
     allowedMrSigner = Set(mrSigner)
   )
-  private val nonce     = bytes(0xa, 0xb, 0xc, 0xd)
+  // >= MinNonceBytes (16) so the freshness guard passes; replay defence leans on this.
+  private val nonce      = (0 until 16).map(i => (0xa0 + i).toByte).toVector
   private val enclaveKey = bytes(0x42, 0x43, 0x44)
 
   private def quote(
@@ -70,7 +71,19 @@ class AttestationSpec extends AnyFunSuite:
     val out = AttestationGate.provision(SoftwareAttestationVerifier(), quote(n = bytes(0)), nonce, refs)
     assert(out === Left(AttestationResult.NonceMismatch))
 
+  test("a too-short expected nonce is rejected outright (replay-protection guard)"):
+    // A degenerate nonce must not silently pass; an empty/short one is rejected before appraisal.
+    val short = SoftwareAttestationVerifier().verify(quote(n = Vector.empty), Vector.empty, refs)
+    assert(short == AttestationResult.Failed(AttestationResult.WeakNonce))
+    val out = AttestationGate.provision(SoftwareAttestationVerifier(), quote(), expectedNonce = bytes(1, 2, 3), refs)
+    assert(out === Left(AttestationResult.WeakNonce))
+
+  test("signature is verified before the body is appraised (bad sig wins over bad nonce)"):
+    // Wrong nonce AND bad signature → SignatureInvalid, proving the body is authenticated first.
+    val r = new TestVerifier(sigOk = false, hw = true).verify(quote(n = bytes(7, 7, 7, 7)), nonce, refs)
+    assert(r == AttestationResult.Failed(AttestationResult.SignatureInvalid))
+
   test("constant-time nonce compare agrees with value equality"):
-    assert(Attestation.constTimeEq(nonce, bytes(0xa, 0xb, 0xc, 0xd)))
-    assert(!Attestation.constTimeEq(nonce, bytes(0xa, 0xb, 0xc, 0x0)))
-    assert(!Attestation.constTimeEq(nonce, bytes(0xa, 0xb))) // length differs
+    assert(Attestation.constTimeEq(nonce, nonce))
+    assert(!Attestation.constTimeEq(nonce, nonce.updated(0, 0.toByte)))
+    assert(!Attestation.constTimeEq(nonce, nonce.drop(1))) // length differs

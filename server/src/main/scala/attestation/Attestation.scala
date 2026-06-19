@@ -50,11 +50,17 @@ enum AttestationResult:
 
 object AttestationResult:
   // Fixed, value-independent reasons (Constitution II — logs/errors must not vary on secrets).
+  val WeakNonce        = "attestation: expected freshness nonce too short"
   val NonceMismatch    = "attestation: freshness nonce mismatch"
   val SignatureInvalid = "attestation: quote signature invalid"
   val MeasurementUntrusted =
     "attestation: measurement not in transparency-logged reference set"
   val MissingKey = "attestation: enclave public key absent"
+
+  /** Minimum freshness-nonce length. Replay protection is only as strong as the nonce; an empty or
+    * trivially short nonce (a caller misconfiguration) would silently defeat it, so the verifier
+    * rejects it outright rather than appraising against a degenerate value. */
+  val MinNonceBytes = 16
 
 /** Appraises a quote. Trust derives only from the quote (Constitution IX) — this interface has no
   * notion of, and never consults, service identity. */
@@ -86,10 +92,17 @@ abstract class AppraisingVerifier extends AttestationVerifier:
       refs: ReferenceValues
   ): AttestationResult =
     import AttestationResult.*
-    // Order matters only for which fixed reason is reported; all checks run on every path that
-    // reaches them and compare non-secret material, so this leaks nothing about secrets.
-    if !Attestation.constTimeEq(quote.nonce, expectedNonce) then Failed(NonceMismatch)
+    // 1. Reject a degenerate expected nonce (our own misconfiguration) before anything else, so a
+    //    weak nonce cannot silently disable replay protection.
+    // 2. Verify the signature FIRST: in a real DCAP quote the nonce, measurement, and pubkey all
+    //    live inside the signed body, so appraising them is only meaningful once the body is
+    //    authenticated. Checking signature first also keeps the reported reason from distinguishing
+    //    a nonce match on an unsigned/attacker-controlled quote.
+    // 3. Only then appraise the now-authenticated nonce, measurement, and key. These compare
+    //    non-secret material (nonce via constant-time compare), so ordering leaks nothing.
+    if expectedNonce.length < MinNonceBytes then Failed(WeakNonce)
     else if !signatureValid(quote) then Failed(SignatureInvalid)
+    else if !Attestation.constTimeEq(quote.nonce, expectedNonce) then Failed(NonceMismatch)
     else if !appraised(quote.measurement, refs) then Failed(MeasurementUntrusted)
     else if quote.enclavePublicKey.isEmpty then Failed(MissingKey)
     else Passed(quote.measurement, quote.enclavePublicKey)
