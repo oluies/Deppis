@@ -3,6 +3,7 @@
 //! (the `subtle` crate + a data-independent network); the self-test validates correctness.
 
 use oblivious_sidecar::primitives::{ct_select_u64, oblivious_compact, oblivious_sort, Record};
+use oblivious_sidecar::store::ObliviousStore;
 use std::io::Read;
 use subtle::Choice;
 
@@ -27,6 +28,11 @@ fn main() {
             oblivious_compact(&mut c, &keep);
             let compacted = c.iter().take(3).map(|r| r.payload[0]).collect::<Vec<_>>() == vec![0u8, 2, 4];
 
+            // oblivious store round-trip: write -> read (hit) -> read again (single-use carrier)
+            let mut store = ObliviousStore::with_capacity(4);
+            store.write(&[3u8; 32], &[42u8; 256]);
+            let store_ok = store.read(&[3u8; 32]) == [42u8; 256] && store.read(&[3u8; 32]) == [0u8; 256];
+
             // `constantTime` reflects an actual functional check of the ct primitive (its
             // constant-timeness is by construction via `subtle`; this validates correctness).
             let constant_time =
@@ -35,7 +41,7 @@ fn main() {
             println!(
                 "{{\"constantTime\":{},\"obliviousInvariants\":{}}}",
                 constant_time,
-                sorted && compacted
+                sorted && compacted && store_ok
             );
         }
         other => {

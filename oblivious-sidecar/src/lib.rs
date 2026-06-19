@@ -10,3 +10,4 @@
 //! crate is the dev/testable component the Scala server calls, labeled accordingly.
 
 pub mod primitives;
+pub mod store;
