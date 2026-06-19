@@ -1,0 +1,21 @@
+[package]
+name = "oblivious-sidecar"
+version = "0.1.0"
+edition = "2021"
+description = "Constant-time oblivious primitives for the PONG store / PING aggregation (dev; the privacy claim requires the SGX enclave)."
+
+# Pinned (Constitution XI). subtle is a vetted constant-time primitives library — Constitution I
+# (no hand-rolled constant-time code).
+[dependencies]
+subtle = "=2.6.1"
+
+[dev-dependencies]
+proptest = "=1.5.0"
+
+[lib]
+name = "oblivious_sidecar"
+path = "src/lib.rs"
+
+[[bin]]
+name = "obsx"
+path = "src/bin/obsx.rs"

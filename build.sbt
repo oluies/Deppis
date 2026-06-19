@@ -1,0 +1,109 @@
+import scalapb.compiler.Version.{scalapbVersion, grpcJavaVersion}
+
+// Metadata-Private Messenger — JVM build (Phase 1/2 foundational slice).
+// protocol-core is the single source of truth (Constitution VII). This build currently
+// compiles it for the JVM; the Scala.js cross-build (T019) and the server/sidecar/client
+// modules are added in later phases as their toolchains land.
+
+ThisBuild / scalaVersion := "3.3.4" // LTS
+ThisBuild / organization := "io.deppis.messenger"
+ThisBuild / version      := "0.1.0-SNAPSHOT"
+
+// Dependency versions pinned (Constitution XI).
+lazy val V = new {
+  val scalatest      = "3.2.19"
+  val scalatestPlus  = "3.2.19.0"
+  val upickle        = "4.0.2"
+}
+
+lazy val testDeps = Seq(
+  "org.scalatest"     %% "scalatest"       % V.scalatest     % Test,
+  "org.scalatestplus" %% "scalacheck-1-18" % V.scalatestPlus % Test
+)
+
+lazy val commonScalac = Seq("-deprecation", "-feature", "-unchecked", "-Wunused:all")
+
+lazy val protocolCore = (project in file("protocol-core"))
+  .settings(
+    name := "protocol-core",
+    // Sources live under shared/ so the later Scala.js cross-build reuses them verbatim.
+    Compile / scalaSource := baseDirectory.value / "shared" / "src" / "main" / "scala",
+    Test / scalaSource    := baseDirectory.value / "shared" / "src" / "test" / "scala",
+    scalacOptions ++= Seq("-deprecation", "-feature", "-unchecked", "-Wunused:all"),
+    // CLIs read JSON from stdin (Constitution V); fork and connect stdin so `run` forwards it.
+    run / fork         := true,
+    run / connectInput := true,
+    libraryDependencies ++= Seq(
+      "com.lihaoyi"       %% "upickle"          % V.upickle,
+      "org.scalatest"     %% "scalatest"        % V.scalatest     % Test,
+      "org.scalatestplus" %% "scalacheck-1-18"  % V.scalatestPlus % Test
+    )
+  )
+
+// crypto: thin wrappers over libsodium via the JDK Foreign Function & Memory API (Panama).
+// No hand-rolled primitives (Constitution I). Forked with native access enabled.
+lazy val crypto = (project in file("crypto"))
+  .settings(
+    name := "crypto",
+    scalacOptions ++= commonScalac,
+    run / fork := true,
+    Test / fork := true,
+    run / javaOptions += "--enable-native-access=ALL-UNNAMED",
+    Test / javaOptions += "--enable-native-access=ALL-UNNAMED",
+    libraryDependencies ++= testDeps ++ Seq(
+      "com.lihaoyi"      %% "upickle"        % V.upickle,
+      // independent vetted Blake2b impl, used only to cross-validate libsodium in KATs
+      "org.bouncycastle"  % "bcprov-jdk18on" % "1.78.1" % Test
+    )
+  )
+
+// anonymity layer: AnonymityLayer interface (+ Groove stub later). Standard layout.
+lazy val anonymity = (project in file("anonymity"))
+  .dependsOn(protocolCore)
+  .settings(
+    name := "anonymity",
+    scalacOptions ++= commonScalac,
+    libraryDependencies ++= testDeps
+  )
+
+// server: PING/PONG/provider/attestation fronts. Sources live in per-role subdirs to match the
+// plan structure (server/pong/..., server/ping/..., etc.).
+lazy val server = (project in file("server"))
+  .dependsOn(protocolCore, crypto)
+  .settings(
+    name := "server",
+    scalacOptions ++= commonScalac,
+    // ping aggregation seals tokens via libsodium (crypto, FFM) -> fork tests w/ native access.
+    Test / fork := true,
+    Test / javaOptions += "--enable-native-access=ALL-UNNAMED",
+    // ++= keeps the default server/src/main/scala root (where T018 obs/logging will live)
+    // alongside the per-role dirs.
+    Compile / unmanagedSourceDirectories ++= Seq("pong", "ping", "provider", "attestation")
+      .map(d => baseDirectory.value / d / "src" / "main" / "scala"),
+    Test / unmanagedSourceDirectories ++= Seq("pong", "ping", "provider", "attestation")
+      .map(d => baseDirectory.value / d / "src" / "test" / "scala"),
+    libraryDependencies ++= testDeps
+  )
+
+// transport: gRPC contracts compiled by ScalaPB + the round service/client over them. Generated
+// code lives under sourceManaged; we drop -Wunused here so codegen doesn't produce noise.
+lazy val transport = (project in file("transport"))
+  .dependsOn(protocolCore, server)
+  .settings(
+    name := "transport",
+    scalacOptions ++= Seq("-deprecation", "-feature"),
+    // the notification service front loads libsodium (crypto, FFM) -> fork w/ native access.
+    Test / fork := true,
+    Test / javaOptions += "--enable-native-access=ALL-UNNAMED",
+    Compile / PB.targets := Seq(scalapb.gen(grpc = true) -> (Compile / sourceManaged).value / "scalapb"),
+    libraryDependencies ++= Seq(
+      "com.thesamet.scalapb" %% "scalapb-runtime"      % scalapbVersion % "protobuf",
+      "com.thesamet.scalapb" %% "scalapb-runtime-grpc" % scalapbVersion,
+      "io.grpc"               % "grpc-netty-shaded"     % grpcJavaVersion,
+      "io.grpc"               % "grpc-inprocess"        % grpcJavaVersion % Test
+    ) ++ testDeps
+  )
+
+lazy val root = (project in file("."))
+  .aggregate(protocolCore, crypto, anonymity, server, transport)
+  .settings(name := "metadata-messenger", publish / skip := true)

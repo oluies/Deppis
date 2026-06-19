@@ -1,0 +1,31 @@
+syntax = "proto3";
+package metadatamessenger.notify.v1;
+
+// PING notification subsystem contract.
+// INVARIANTS (Constitution security section, FR-003/FR-004/FR-012):
+//   - Sealed tokens are RECEIVER-generated and given to the sender at add-buddy time.
+//   - A sender can flip ONLY its own one-hot bit; cannot forge another's bit or flood.
+//   - Server injects an all-zero carrier per client; aggregation is bitwise-OR over a label;
+//     oblivious sort + linear scan + oblivious compaction emit one digest per client.
+//   - Output digest reveals THAT mail waits, never WHICH buddy (no learning of the sender).
+service NotificationService {
+  // A sender flips its bit by submitting its receiver-issued sealed token for this round.
+  rpc Signal(SignalRequest) returns (SignalResponse);
+  // A receiver fetches its per-round digest (one-hot OR over its buddies' bits).
+  rpc FetchDigest(FetchDigestRequest) returns (FetchDigestResponse);
+}
+
+message SignalRequest {
+  uint64 round_id = 1;          // public
+  bytes sealed_token = 2;       // receiver-issued; encrypts bit position + aggregation label
+}
+message SignalResponse { uint64 round_id = 1; }
+
+message FetchDigestRequest {
+  uint64 round_id = 1;          // public
+  bytes client_label = 2;       // aggregation label; carrier injected for uniformity
+}
+message FetchDigestResponse {
+  uint64 round_id = 1;
+  bytes digest = 2;             // bit-vector; set bits => "some buddy has mail" (which is hidden)
+}
