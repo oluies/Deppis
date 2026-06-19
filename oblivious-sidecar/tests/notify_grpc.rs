@@ -120,6 +120,47 @@ async fn out_of_range_bit_is_dropped_not_panicked() {
 }
 
 #[tokio::test]
+async fn fifo_eviction_drops_the_oldest_round() {
+    let svc = NotificationServer::with_limits(KEY, 2, 100); // keep only 2 rounds
+    for r in 1..=3u64 {
+        svc.signal(Request::new(SignalRequest {
+            round_id: r,
+            sealed_token: seal(3, b"alice", r as u8),
+        }))
+        .await
+        .unwrap();
+    }
+    assert!(fetch(&svc, 1, b"alice").await.iter().all(|&b| b == 0)); // oldest evicted
+    assert!(bit_set(&fetch(&svc, 2, b"alice").await, 3));
+    assert!(bit_set(&fetch(&svc, 3, b"alice").await, 3));
+}
+
+#[tokio::test]
+async fn per_round_cap_drops_excess_signals() {
+    let svc = NotificationServer::with_limits(KEY, 100, 2); // cap 2 signals per round
+    svc.signal(Request::new(SignalRequest {
+        round_id: 1,
+        sealed_token: seal(3, b"alice", 1),
+    }))
+    .await
+    .unwrap();
+    svc.signal(Request::new(SignalRequest {
+        round_id: 1,
+        sealed_token: seal(5, b"alice", 2),
+    }))
+    .await
+    .unwrap();
+    svc.signal(Request::new(SignalRequest {
+        round_id: 1,
+        sealed_token: seal(7, b"alice", 3),
+    }))
+    .await
+    .unwrap();
+    let d = fetch(&svc, 1, b"alice").await;
+    assert!(bit_set(&d, 3) && bit_set(&d, 5) && !bit_set(&d, 7)); // 3rd signal dropped by the cap
+}
+
+#[tokio::test]
 async fn rounds_are_isolated() {
     let svc = NotificationServer::new(KEY);
     svc.signal(Request::new(SignalRequest {

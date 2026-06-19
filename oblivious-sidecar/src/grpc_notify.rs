@@ -49,21 +49,42 @@ struct State {
 }
 
 /// PING notification server. Holds the server key (to open sealed tokens) and per-round decoded
-/// signals; aggregation is recomputed obliviously on fetch. Map growth is bounded by a sliding
-/// retention window.
+/// signals; aggregation is recomputed obliviously on fetch. Map growth is bounded by insertion-order
+/// round eviction + a per-round signal cap.
+///
+/// RESIDUAL (dev-path) DoS, tracked: `round_id` is unauthenticated cleartext (it is not bound into
+/// the sealed token) and a valid token is replayable, so an attacker who captures one token can
+/// replay it across `max_rounds` distinct ids to FIFO-evict the oldest legitimate rounds before
+/// receivers fetch. Fully closing this needs round AUTHENTICATION — binding `round_id` into the
+/// sealed token (which conflicts with the issue-once-reuse-across-rounds model) or a server-clock
+/// round window — a protocol decision deferred to the real (enclave + attested-key) backend. The
+/// dev build is labeled `DEV, NO METADATA PRIVACY` accordingly.
 pub struct NotificationServer {
     cipher: ChaCha20Poly1305,
     state: Mutex<State>,
+    max_rounds: usize,
+    max_signals_per_round: usize,
 }
 
 impl NotificationServer {
     pub fn new(server_key: [u8; 32]) -> Self {
+        Self::with_limits(server_key, MAX_ROUNDS, MAX_SIGNALS_PER_ROUND)
+    }
+
+    /// Construct with explicit bounds (used by tests to exercise eviction/cap cheaply).
+    pub fn with_limits(
+        server_key: [u8; 32],
+        max_rounds: usize,
+        max_signals_per_round: usize,
+    ) -> Self {
         NotificationServer {
             cipher: ChaCha20Poly1305::new(Key::from_slice(&server_key)),
             state: Mutex::new(State {
                 rounds: HashMap::new(),
                 order: VecDeque::new(),
             }),
+            max_rounds,
+            max_signals_per_round,
         }
     }
 }
@@ -92,14 +113,14 @@ impl NotificationSvcTrait for NotificationServer {
                             .map_err(|_| Status::internal("unavailable"))?;
                         if let Some(sigs) = st.rounds.get_mut(&req.round_id) {
                             // existing round: cap signals per round (replay/flood bound)
-                            if sigs.len() < MAX_SIGNALS_PER_ROUND {
+                            if sigs.len() < self.max_signals_per_round {
                                 sigs.push(Signal { label, bit });
                             }
                         } else {
                             // new round: insert and evict the oldest-inserted round if over the cap
                             st.rounds.insert(req.round_id, vec![Signal { label, bit }]);
                             st.order.push_back(req.round_id);
-                            if st.order.len() > MAX_ROUNDS {
+                            if st.order.len() > self.max_rounds {
                                 if let Some(old) = st.order.pop_front() {
                                     st.rounds.remove(&old);
                                 }
