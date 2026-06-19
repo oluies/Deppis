@@ -38,7 +38,7 @@ class EnclaveNotificationClientSpec extends AnyFunSuite:
 
   test("signal then fetchDigest reports the buddy's bit over gRPC; fetch consumes it"):
     withClient(attested = true) { (client, ns) =>
-      assert(client.signal(1L, ns.issueToken(5, label)).isRight)
+      assert(client.signal(1L, ns.issueToken(1L, 5, label)).isRight)
       val d = client.fetchDigest(1L, label).toOption.get
       assert(bit(d, 5))
       assert(client.fetchDigest(1L, label).toOption.get.forall(_ == 0)) // consumed -> carrier

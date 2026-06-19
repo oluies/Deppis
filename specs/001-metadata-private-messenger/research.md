@@ -165,3 +165,20 @@ Numeric targets and backend choice are fixed by the spec Clarifications (PingPon
   test for cover traffic (active vs. idle traces).
 - **Rationale**: Constitution VI (NON-NEGOTIABLE).
 - **Alternatives**: example-based only — insufficient for state machines/primitives.
+
+## D16. Notification-token round binding (per-round tokens)
+
+- **Decision**: Bind `round_id` into the AEAD-sealed notification token plaintext
+  (`[round(8 BE)][bit(2 BE)][label]`); the opener (Scala `DevNotificationServer` and the Rust
+  sidecar) validates the bound round equals the signal's `round_id` and drops the token otherwise.
+- **Rationale**: `round_id` is otherwise attacker-controlled cleartext, so a captured-and-replayed
+  token could be submitted across many rounds to evict legitimate pending notifications (a
+  notification-loss DoS, found by review). Binding the round into the authenticated plaintext makes
+  cross-round replay impossible. Per-round signal caps + insertion-order round eviction remain as
+  memory/CPU backstops (same-round replay is idempotent OR'ing).
+- **Model change (amends FR-003)**: tokens are now **per-round** (round-bound) rather than issued
+  once at add-buddy time and reused across rounds. The receiver issues a token for a specific round;
+  a deployment provisions per-round tokens (this also fits attestation-gated key provisioning, D11).
+- **Alternatives considered**: a server-clock round window (reject ids far from the sidecar's wall
+  clock) — rejected as it commits `round_id` to being time-derived and needs a trusted clock;
+  accepting the residual under the dev label — rejected in favor of closing it.

@@ -38,7 +38,7 @@ class NotificationServiceSpec extends AnyFunSuite:
   test("signal then fetchDigest over gRPC reports the buddy's bit; fetch consumes it"):
     val ns = DevNotificationServer(key)
     withClient(ns) { client =>
-      client.signal(SignalRequest(roundId = 1L, sealedToken = bs(ns.issueToken(5, label))))
+      client.signal(SignalRequest(roundId = 1L, sealedToken = bs(ns.issueToken(1L, 5, label))))
       val d1 = digestOf(client.fetchDigest(FetchDigestRequest(roundId = 1L, clientLabel = bs(label))).digest)
       assert(d1.get(5) && d1.popcount == 1)
       // consumed: a second fetch is an all-zero carrier

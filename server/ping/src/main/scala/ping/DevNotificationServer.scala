@@ -39,16 +39,18 @@ final class DevNotificationServer(serverKey: Array[Byte]):
   val label: String            = Privacy.DevLabel
   def metadataPrivate: Boolean = false
 
-  /** Receiver-side: seal a one-hot token for a buddy. sealed = nonce ‖ AEAD(serverKey, token). */
-  def issueToken(bitPosition: Int, aggLabel: Array[Byte]): Array[Byte] =
+  /** Receiver-side: seal a one-hot token BOUND to a round. sealed = nonce ‖ AEAD(serverKey,
+    * serialize(roundId, token)). The round binding stops the token from being replayed into a
+    * different round. */
+  def issueToken(roundId: Long, bitPosition: Int, aggLabel: Array[Byte]): Array[Byte] =
     val nonce = new Array[Byte](Crypto.NonceBytes)
     rng.nextBytes(nonce)
     val ct = Crypto.aeadSeal(serverKey, nonce, Array.emptyByteArray,
-      Notification.serialize(NotificationToken(bitPosition, aggLabel)))
+      Notification.serialize(roundId, NotificationToken(bitPosition, aggLabel)))
     nonce ++ ct
 
-  /** Sender-side submit: flips exactly the token's bit under (round, label). Rejects
-    * forged/tampered blobs (AEAD authentication). */
+  /** Sender-side submit: flips exactly the token's bit under (round, label). Rejects forged/tampered
+    * blobs (AEAD), AND a token whose bound round != this signal's round (replay to another round). */
   def signal(roundId: Long, sealedToken: Array[Byte]): Either[String, Unit] =
     if sealedToken.length < Crypto.NonceBytes then Left("malformed sealed token")
     else
@@ -56,15 +58,16 @@ final class DevNotificationServer(serverKey: Array[Byte]):
       Crypto
         .aeadOpen(serverKey, nonce, Array.emptyByteArray, ct)
         .flatMap(Notification.deserialize)
-        .map { tok =>
-          val k = (roundId, hex(tok.label))
-          // atomic OR: a concurrent signal for the same (round,label) cannot clobber another's bit.
-          rounds.compute(k, (_, cur) => (if cur == null then Digest.empty else cur).set(tok.bitPosition))
-          // Evict only when this signal advances the newest round (relative to the true max),
-          // so steady-state same-round signaling does no scan.
-          val prevMax = maxRound.getAndAccumulate(roundId, (a, b) => math.max(a, b))
-          if roundId > prevMax then evictBefore(roundId - RetentionRounds)
-          ()
+        .flatMap { (tokenRound, tok) =>
+          if tokenRound != roundId then Left("round mismatch") // token bound to a different round
+          else
+            val k = (roundId, hex(tok.label))
+            // atomic OR: a concurrent signal for the same (round,label) cannot clobber another's bit.
+            rounds.compute(k, (_, cur) => (if cur == null then Digest.empty else cur).set(tok.bitPosition))
+            // Evict only when this signal advances the newest round (relative to the true max).
+            val prevMax = maxRound.getAndAccumulate(roundId, (a, b) => math.max(a, b))
+            if roundId > prevMax then evictBefore(roundId - RetentionRounds)
+            Right(())
         }
 
   /** Per-client digest for a round (non-destructive peek). Returns a carrier (all-zero, uniform)
