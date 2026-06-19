@@ -2,8 +2,9 @@
 //! and reports `{constantTime, obliviousInvariants}` as JSON. Constant-timeness is by construction
 //! (the `subtle` crate + a data-independent network); the self-test validates correctness.
 
-use oblivious_sidecar::primitives::{oblivious_compact, oblivious_sort, Record};
+use oblivious_sidecar::primitives::{ct_select_u64, oblivious_compact, oblivious_sort, Record};
 use std::io::Read;
+use subtle::Choice;
 
 fn main() {
     let cmd = std::env::args().nth(1).unwrap_or_default();
@@ -26,8 +27,14 @@ fn main() {
             oblivious_compact(&mut c, &keep);
             let compacted = c.iter().take(3).map(|r| r.payload[0]).collect::<Vec<_>>() == vec![0u8, 2, 4];
 
+            // `constantTime` reflects an actual functional check of the ct primitive (its
+            // constant-timeness is by construction via `subtle`; this validates correctness).
+            let constant_time =
+                ct_select_u64(Choice::from(1), 7, 9) == 7 && ct_select_u64(Choice::from(0), 7, 9) == 9;
+
             println!(
-                "{{\"constantTime\":true,\"obliviousInvariants\":{}}}",
+                "{{\"constantTime\":{},\"obliviousInvariants\":{}}}",
+                constant_time,
                 sorted && compacted
             );
         }

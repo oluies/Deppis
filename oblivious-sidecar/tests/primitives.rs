@@ -1,7 +1,27 @@
-use oblivious_sidecar::primitives::{oblivious_compact, oblivious_sort, Record};
+use oblivious_sidecar::primitives::{ct_select_u64, oblivious_compact, oblivious_sort, Record};
 use proptest::prelude::*;
+use subtle::Choice;
 
 proptest! {
+    /// ct_select_u64 picks the correct branch for each choice bit.
+    #[test]
+    fn ct_select_picks_correct_branch(a in any::<u64>(), b in any::<u64>()) {
+        prop_assert_eq!(ct_select_u64(Choice::from(1), a, b), a);
+        prop_assert_eq!(ct_select_u64(Choice::from(0), a, b), b);
+    }
+
+    /// Compaction preserves each record's real key (does not clobber it).
+    #[test]
+    fn oblivious_compact_preserves_keys(keep in proptest::collection::vec(any::<bool>(), 1..32)) {
+        let n = keep.len();
+        let mut records: Vec<Record> = (0..n).map(|i| Record::new(1000 + i as u64, vec![i as u8; 2])).collect();
+        oblivious_compact(&mut records, &keep);
+        // every surviving record still has a key in the original 1000.. range (not a synthetic one)
+        for r in &records {
+            prop_assert!((1000..1000 + n as u64).contains(&r.key));
+            prop_assert_eq!(r.key, 1000 + r.payload[0] as u64); // key matches its payload's index
+        }
+    }
     /// The oblivious (bitonic) sort produces the same ordering as a reference sort.
     #[test]
     fn oblivious_sort_matches_reference(mut keys in proptest::collection::vec(0u64..1_000_000, 0..64)) {
