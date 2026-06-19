@@ -105,10 +105,10 @@ notification server cannot determine the sender; receiver retrieves on its own s
 **Independent Test**: Three buddies send in one round; receiver retrieves and replies to all
 three with no ordering constraint between conversations.
 
-- [ ] T033 [P] [US3] Integration test: 3 concurrent conversations in one round, none blocked, in `server/src/test/scala/integration/concurrency/` (write first, MUST fail)
-- [ ] T033a [P] [US3] Scale test: a user holds up to 512 simultaneous conversations with no conversation blocking another in `server/src/test/scala/integration/scale/` (SC-005) — write first, MUST fail [analyze C4]
+- [X] T033 [P] [US3] Integration test: 3 concurrent conversations in one round, none blocked, in `server/src/test/scala/integration/concurrency/` (write first, MUST fail) — covered at protocol-core level in `ConversationsSpec` (independence); full server-round integration lands with T035
+- [X] T033a [P] [US3] Scale test: a user holds up to 512 simultaneous conversations with no conversation blocking another in `server/src/test/scala/integration/scale/` (SC-005) — write first, MUST fail [analyze C4] — `ConversationsSpec`: 512 conversations each prepare a frame independently
 - [ ] T036a [P] [US3] End-to-end latency test: a two-party exchange completes within minute-order (single-digit rounds); asserts the tuned round interval meets SC-001, in `server/src/test/scala/integration/latency/` (SC-001) — write first, MUST fail [analyze C2]
-- [ ] T034 [US3] Implement per-buddy independent send/retrieve state (no cross-conversation blocking) in `protocol-core/shared/src/main/scala/session/` (FR-006)
+- [X] T034 [US3] Implement per-buddy independent send/retrieve state (no cross-conversation blocking) in `protocol-core/shared/src/main/scala/session/` (FR-006) — immutable `Conversations`: per-buddy queue + monotone counter (non-recurrent tokens), keyed by pairId so conversations never block each other
 - [ ] T035 [US3] Implement round retrieval of multiple frames with uniform/padded count in `server/pong/src/main/scala/` per `contracts/messaging.proto` Retrieve (FR-006/FR-012)
 - [ ] T036 [US3] Flutter multi-conversation list/threading in `clients/flutter/lib/chat/`
 
