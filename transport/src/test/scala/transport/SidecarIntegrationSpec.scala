@@ -59,7 +59,10 @@ class SidecarIntegrationSpec extends AnyFunSuite:
     pb.environment().put("OBSD_ADDR", s"127.0.0.1:$port")
     pb.environment().put("OBSD_NOTIFY_KEY", hex(notifyKey))
     pb.environment().put("OBSD_CAPACITY", "64")
-    pb.redirectErrorStream(true)
+    // Inherit the child's stdout/stderr: avoids a pipe-buffer deadlock (nothing would drain a
+    // buffered pipe) and surfaces obsd's logs to the test console on failure.
+    pb.redirectOutput(ProcessBuilder.Redirect.INHERIT)
+    pb.redirectError(ProcessBuilder.Redirect.INHERIT)
     val proc = pb.start()
     try
       assert(awaitReady(port, 10000), "obsd did not become ready")
@@ -68,7 +71,7 @@ class SidecarIntegrationSpec extends AnyFunSuite:
       finally channel.shutdownNow()
     finally
       proc.destroy()
-      proc.waitFor()
+      if !proc.waitFor(5, java.util.concurrent.TimeUnit.SECONDS) then proc.destroyForcibly()
 
   test("store: write then read over real gRPC to obsd (found-tag, single-use)"):
     withObsd(Array.fill(Crypto.KeyBytes)(0x11.toByte)) { channel =>
