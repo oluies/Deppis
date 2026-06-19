@@ -6,6 +6,7 @@ import frame.Frame
 import privacy.Privacy
 import io.grpc.inprocess.{InProcessChannelBuilder, InProcessServerBuilder}
 import io.grpc.{ManagedChannel, Server}
+import scala.concurrent.Future
 import scala.concurrent.ExecutionContext.Implicits.global
 import org.scalatest.funsuite.AnyFunSuite
 
@@ -63,3 +64,34 @@ class EnclaveObliviousStoreSpec extends AnyFunSuite:
       assert(e.write(tok, frame(3)).isRight)
       assert(e.read(tok).toOption.flatten.exists(_.sameElements(frame(3))))
     }
+
+  test("a transport failure maps to Left (error channel)"):
+    val name = InProcessServerBuilder.generateName()
+    val server: Server =
+      InProcessServerBuilder.forName(name).directExecutor()
+        .addService(spb.ObliviousStoreGrpc.bindService(new StoreServiceImpl(new DevObliviousStore()), global))
+        .build().start()
+    val channel: ManagedChannel = InProcessChannelBuilder.forName(name).directExecutor().build()
+    val e = new EnclaveObliviousStore(spb.ObliviousStoreGrpc.blockingStub(channel), attested = true)
+    channel.shutdownNow() // kill the transport before the RPC
+    server.shutdownNow()
+    assert(e.read("x".getBytes).isLeft)
+    assert(e.write("x".getBytes, frame(1)).isLeft)
+
+  test("an empty results response maps to Left (malformed-response guard)"):
+    val emptyService = new spb.ObliviousStoreGrpc.ObliviousStore:
+      def writeBatch(req: spb.WriteBatchRequest): Future[spb.WriteBatchResponse] =
+        Future.successful(spb.WriteBatchResponse(req.roundId))
+      def readBatch(req: spb.ReadBatchRequest): Future[spb.ReadBatchResponse] =
+        Future.successful(spb.ReadBatchResponse(req.roundId, Seq.empty)) // contract violation
+    val name = InProcessServerBuilder.generateName()
+    val server: Server =
+      InProcessServerBuilder.forName(name).directExecutor()
+        .addService(spb.ObliviousStoreGrpc.bindService(emptyService, global)).build().start()
+    val channel: ManagedChannel = InProcessChannelBuilder.forName(name).directExecutor().build()
+    try
+      val e = new EnclaveObliviousStore(spb.ObliviousStoreGrpc.blockingStub(channel), attested = true)
+      assert(e.read("x".getBytes) == Left("empty store response"))
+    finally
+      channel.shutdownNow()
+      server.shutdownNow()
