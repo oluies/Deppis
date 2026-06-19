@@ -2,12 +2,18 @@
 name = "oblivious-sidecar"
 version = "0.1.0"
 edition = "2021"
-description = "Constant-time oblivious primitives for the PONG store / PING aggregation (dev; the privacy claim requires the SGX enclave)."
+description = "Constant-time oblivious primitives + gRPC PONG store / PING aggregation (dev; the privacy claim requires the SGX enclave)."
 
 # Pinned (Constitution XI). subtle is a vetted constant-time primitives library — Constitution I
-# (no hand-rolled constant-time code).
+# (no hand-rolled constant-time code). tonic/prost/tokio provide the gRPC sidecar server.
 [dependencies]
 subtle = "=2.6.1"
+tonic = "=0.12.3"
+prost = "=0.13.4"
+tokio = { version = "=1.42.0", features = ["rt-multi-thread", "macros", "net"] }
+
+[build-dependencies]
+tonic-build = "=0.12.3"
 
 [dev-dependencies]
 proptest = "=1.5.0"
@@ -19,3 +25,7 @@ path = "src/lib.rs"
 [[bin]]
 name = "obsx"
 path = "src/bin/obsx.rs"
+
+[[bin]]
+name = "obsd"
+path = "src/bin/obsd.rs"

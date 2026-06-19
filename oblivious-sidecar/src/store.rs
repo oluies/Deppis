@@ -84,7 +84,15 @@ impl ObliviousStore {
     /// slot is cleared and zeroized so the token cannot be read again and no payload lingers.
     /// Touches every slot identically.
     pub fn read(&mut self, token: &[u8; TOKEN_LEN]) -> [u8; FRAME_LEN] {
+        self.read_sealed(token).0
+    }
+
+    /// Like [`read`], but also returns whether the token was found. The `found` flag becomes the
+    /// `sealed_result` found tag in the gRPC contract (carried inside the sealed blob, so it is not
+    /// observable in transit). Still touches every slot identically.
+    pub fn read_sealed(&mut self, token: &[u8; TOKEN_LEN]) -> ([u8; FRAME_LEN], bool) {
         let mut result = [0u8; FRAME_LEN];
+        let mut found = Choice::from(0u8);
         #[cfg(test)]
         let mut touched = 0usize;
         for slot in self.slots.iter_mut() {
@@ -98,6 +106,7 @@ impl ObliviousStore {
                 t.conditional_assign(&0u8, matches); // erase token on consume
             }
             slot.occupied.conditional_assign(&0u8, matches); // mark free (non-recurrent)
+            found |= matches;
             #[cfg(test)]
             {
                 touched += 1;
@@ -105,7 +114,7 @@ impl ObliviousStore {
         }
         #[cfg(test)]
         self.touches.set(touched);
-        result
+        (result, bool::from(found))
     }
 }
 
