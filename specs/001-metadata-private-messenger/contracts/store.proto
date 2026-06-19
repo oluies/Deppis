@@ -43,10 +43,12 @@ message ReadResult {
   // peer built from an earlier revision can silently reuse them (proto convention).
   reserved 1, 2;
   reserved "found", "frame";
-  // Single fixed-size, client-sealed blob. Decrypts (client-side only) to {found, frame}.
-  // Byte-uniform whether the token hit or missed, so the store host learns nothing beyond
-  // batch size (no cleartext `found`; see invariants above).
-  bytes sealed_result = 3;     // fixed length = sealed(256-byte frame + 1-byte found tag)
+  // Single fixed-size blob carrying {frame, found}. In the ENCLAVE-TARGET impl it is client-sealed
+  // end to end and byte-uniform whether the token hit or missed, so the store host learns nothing
+  // beyond batch size. The DEV impl returns CLEARTEXT (frame ‖ found tag) — hit/miss is then
+  // distinguishable by content, which is acceptable ONLY under the `DEV, NO METADATA PRIVACY`
+  // label; do not treat the dev output as already sealed.
+  bytes sealed_result = 3;     // fixed length = 256-byte frame + 1-byte found tag (sealed in target)
 }
 message ReadBatchResponse {
   uint64 round_id = 1;

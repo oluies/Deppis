@@ -74,3 +74,31 @@ async fn write_then_read_carries_found_tag_and_is_single_use() {
         .into_inner();
     assert_eq!(resp2.results[0].sealed_result[FRAME_LEN], 0);
 }
+
+#[tokio::test]
+async fn rejects_wrong_token_length() {
+    let s = svc(4);
+    let r = s
+        .read_batch(Request::new(ReadBatchRequest {
+            round_id: 0,
+            batch_size: 1,
+            entries: vec![ReadEntry {
+                retrieval_token: vec![1u8; 8], // not TOKEN_LEN
+            }],
+        }))
+        .await;
+    assert_eq!(r.unwrap_err().code(), tonic::Code::InvalidArgument);
+}
+
+#[tokio::test]
+async fn rejects_batch_size_mismatch() {
+    let s = svc(4);
+    let r = s
+        .write_batch(Request::new(WriteBatchRequest {
+            round_id: 0,
+            batch_size: 5, // declares 5 but sends 0 entries
+            entries: vec![],
+        }))
+        .await;
+    assert_eq!(r.unwrap_err().code(), tonic::Code::InvalidArgument);
+}
