@@ -6,6 +6,7 @@ import frame.Frame
 import privacy.Privacy
 import io.grpc.inprocess.{InProcessChannelBuilder, InProcessServerBuilder}
 import io.grpc.{ManagedChannel, Server}
+import com.google.protobuf.ByteString
 import scala.concurrent.Future
 import scala.concurrent.ExecutionContext.Implicits.global
 import org.scalatest.funsuite.AnyFunSuite
@@ -14,20 +15,31 @@ class EnclaveObliviousStoreSpec extends AnyFunSuite:
 
   private def frame(b: Byte): Array[Byte] = Frame.pad(Array(b)).toOption.get
 
-  /** Stand up a StoreService backed by a fresh dev store and hand the test an enclave-target front
-    * speaking to it over in-process gRPC. */
-  private def withEnclave(attested: Boolean)(body: EnclaveObliviousStore => Unit): Unit =
-    val dev  = new DevObliviousStore()
+  /** Run `body` with an enclave-target front speaking over in-process gRPC to `service`. */
+  private def withService(service: spb.ObliviousStoreGrpc.ObliviousStore, attested: Boolean = true)(
+      body: EnclaveObliviousStore => Unit
+  ): Unit =
     val name = InProcessServerBuilder.generateName()
     val server: Server =
       InProcessServerBuilder.forName(name).directExecutor()
-        .addService(spb.ObliviousStoreGrpc.bindService(new StoreServiceImpl(dev), global))
-        .build().start()
+        .addService(spb.ObliviousStoreGrpc.bindService(service, global)).build().start()
     val channel: ManagedChannel = InProcessChannelBuilder.forName(name).directExecutor().build()
     try body(new EnclaveObliviousStore(spb.ObliviousStoreGrpc.blockingStub(channel), attested))
     finally
       channel.shutdownNow()
       server.shutdownNow()
+
+  /** The default: a real StoreService backed by a fresh dev store. */
+  private def withEnclave(attested: Boolean)(body: EnclaveObliviousStore => Unit): Unit =
+    withService(new StoreServiceImpl(new DevObliviousStore()), attested)(body)
+
+  /** A custom read response (write is a no-op) for exercising malformed-response guards. */
+  private def serviceReturning(read: spb.ReadBatchResponse => spb.ReadBatchResponse): spb.ObliviousStoreGrpc.ObliviousStore =
+    new spb.ObliviousStoreGrpc.ObliviousStore:
+      def writeBatch(req: spb.WriteBatchRequest): Future[spb.WriteBatchResponse] =
+        Future.successful(spb.WriteBatchResponse(req.roundId))
+      def readBatch(req: spb.ReadBatchRequest): Future[spb.ReadBatchResponse] =
+        Future.successful(read(spb.ReadBatchResponse(req.roundId, Seq.empty)))
 
   test("enclave-target front is private only when attested (Constitution IV/IX)"):
     withEnclave(attested = false) { e =>
@@ -79,19 +91,13 @@ class EnclaveObliviousStoreSpec extends AnyFunSuite:
     assert(e.write("x".getBytes, frame(1)).isLeft)
 
   test("an empty results response maps to Left (malformed-response guard)"):
-    val emptyService = new spb.ObliviousStoreGrpc.ObliviousStore:
-      def writeBatch(req: spb.WriteBatchRequest): Future[spb.WriteBatchResponse] =
-        Future.successful(spb.WriteBatchResponse(req.roundId))
-      def readBatch(req: spb.ReadBatchRequest): Future[spb.ReadBatchResponse] =
-        Future.successful(spb.ReadBatchResponse(req.roundId, Seq.empty)) // contract violation
-    val name = InProcessServerBuilder.generateName()
-    val server: Server =
-      InProcessServerBuilder.forName(name).directExecutor()
-        .addService(spb.ObliviousStoreGrpc.bindService(emptyService, global)).build().start()
-    val channel: ManagedChannel = InProcessChannelBuilder.forName(name).directExecutor().build()
-    try
-      val e = new EnclaveObliviousStore(spb.ObliviousStoreGrpc.blockingStub(channel), attested = true)
+    withService(serviceReturning(identity)) { e => // leaves results empty
       assert(e.read("x".getBytes) == Left("empty store response"))
-    finally
-      channel.shutdownNow()
-      server.shutdownNow()
+    }
+
+  test("a wrong-length sealed_result maps to Left (malformed-response guard)"):
+    val bad = serviceReturning(r =>
+      // 256 bytes — missing the 1-byte found tag (should be Frame.Size + 1)
+      r.copy(results = Seq(spb.ReadResult(sealedResult = ByteString.copyFrom(new Array[Byte](Frame.Size)))))
+    )
+    withService(bad)(e => assert(e.read("x".getBytes) == Left("malformed sealed_result")))
