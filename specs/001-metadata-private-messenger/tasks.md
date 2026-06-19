@@ -53,7 +53,7 @@ Multi-component layout (plan.md): `protocol-core/`, `crypto/`, `server/`, `obliv
 - [X] T015 Implement the client schedule (uniform per-round send/retrieve/carrier decisions, cover traffic) in `protocol-core/shared/src/main/scala/schedule/` (FR-012) + `pcore schedule-next` CLI
 - [X] T016 Define the `ObliviousStore` and `AnonymityLayer` interfaces (config-switchable backends) in `server/pong/src/main/scala/store/` and `anonymity/src/main/scala/` (Constitution VIII)
 - [X] T017 [P] Implement `BuildPrivacyStatus` + `pstatus show` CLI emitting `{backend, metadataPrivate, label}` in `protocol-core/shared/src/main/scala/privacy/` (FR-016, Constitution IV)
-- [ ] T018 [P] Configure error handling/logging that never varies on secret values (Constitution II) in `server/src/main/scala/obs/`
+- [X] T018 [P] Configure error handling/logging that never varies on secret values (Constitution II) in `server/src/main/scala/obs/` — `SafeLog` (constant redaction marker, no value/length leak) + `FailureReason` enum (fixed public messages); property-tested for content/length independence
 - [ ] T019 Scaffold the Scala.js engine bundle + versioned Dart platform-channel API per `contracts/engine-api.md` in `protocol-core/js/` (Constitution VII)
 - [ ] T020 [P] Stand up the Pekko/Akka server skeleton with gRPC/TLS 1.3 round orchestration in `server/src/main/scala/round/` (per `contracts/messaging.proto`)
 
