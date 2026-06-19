@@ -59,3 +59,19 @@ proptest! {
         prop_assert_eq!(got, expected);
     }
 }
+
+/// A batch with mismatched payload lengths must panic at the entry point (not silently corrupt) —
+/// the explicit point of the runtime `assert!` (vs. a release-stripped `debug_assert!`).
+#[test]
+#[should_panic(expected = "must share a payload length")]
+fn oblivious_sort_panics_on_ragged_payloads() {
+    let mut records = vec![Record::new(1, vec![0u8; 4]), Record::new(2, vec![0u8; 2])];
+    oblivious_sort(&mut records);
+}
+
+#[test]
+#[should_panic(expected = "must share a payload length")]
+fn oblivious_compact_panics_on_ragged_payloads() {
+    let mut records = vec![Record::new(1, vec![0u8; 4]), Record::new(2, vec![0u8; 2])];
+    oblivious_compact(&mut records, &[true, false]);
+}
