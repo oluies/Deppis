@@ -92,6 +92,9 @@ lazy val transport = (project in file("transport"))
   .settings(
     name := "transport",
     scalacOptions ++= Seq("-deprecation", "-feature"),
+    // the notification service front loads libsodium (crypto, FFM) -> fork w/ native access.
+    Test / fork := true,
+    Test / javaOptions += "--enable-native-access=ALL-UNNAMED",
     Compile / PB.targets := Seq(scalapb.gen(grpc = true) -> (Compile / sourceManaged).value / "scalapb"),
     libraryDependencies ++= Seq(
       "com.thesamet.scalapb" %% "scalapb-runtime"      % scalapbVersion % "protobuf",
