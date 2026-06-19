@@ -31,8 +31,8 @@ Multi-component layout (plan.md): `protocol-core/`, `crypto/`, `server/`, `obliv
 - [ ] T001 Create the multi-module layout per plan.md (`protocol-core/{shared,jvm,js}`, `crypto/`, `server/{ping,pong,provider,attestation}`, `oblivious-sidecar/`, `anonymity/`, `clients/flutter/`, `deploy/`)
 - [ ] T002 Initialize the sbt cross-build (Scala 3) for `protocol-core` (JVM + Scala.js) and `crypto`/`server` JVM modules in `build.sbt`, with **pinned** dependency versions
 - [X] T003 [P] Initialize the Rust `oblivious-sidecar` crate with pinned deps in `oblivious-sidecar/Cargo.toml` — subtle (constant-time) + proptest, pinned; Cargo.lock committed
-- [ ] T004 [P] Initialize the Flutter app skeleton in `clients/flutter/`
-- [ ] T005 [P] Configure linting/formatting: scalafmt + scalafix (`/.scalafmt.conf`), rustfmt + clippy (`oblivious-sidecar/`), `dart format`/`flutter analyze` — PARTIAL: rustfmt + clippy (`-D warnings`) enforced in CI; `.scalafmt.conf` present (CI scalafmt check + Flutter analyze pending)
+- [X] T004 [P] Initialize the Flutter app skeleton in `clients/flutter/` (web platform; `ProtocolEngine` bridge + `DevEngine` stand-in + AppState; widget + engine tests)
+- [ ] T005 [P] Configure linting/formatting: scalafmt + scalafix (`/.scalafmt.conf`), rustfmt + clippy (`oblivious-sidecar/`), `dart format`/`flutter analyze` — PARTIAL: rustfmt + clippy (`-D warnings`) + `flutter analyze`+`flutter test` enforced in CI; `.scalafmt.conf` present (CI scalafmt check pending)
 - [X] T006 [P] Add ScalaPB codegen for the contracts in `specs/001-metadata-private-messenger/contracts/*.proto` wired into `build.sbt` — sbt-protoc + ScalaPB in `transport` module; `messaging.proto` compiles to message + gRPC stubs
 - [X] T007 [P] Add a reproducible-build + dependency-pinning CI check and a secret-scanning gate in `deploy/ci/` (Constitution XI) — `.github/workflows/ci.yml` hygiene job: pinned-sbt + Cargo.lock check + gitleaks secret scan
 - [X] T008 [P] Add a CI gate asserting no release artifact reports `metadataPrivate:false` and that the `DEV, NO METADATA PRIVACY` label is present in dev builds (Constitution IV / FR-016) — CI labeling gate runs `pstatus show`, asserts metadataPrivate:false + the dev label on a build without the real backend
@@ -74,7 +74,7 @@ buddy; a tampered secret fails the comparison and is rejected; re-adding is reco
 - [X] T024a [P] [US1] Boundary test for the 512-buddy cap (accept up to 512; 513th rejected predictably; count correct after removals) in `protocol-core/shared/src/test/scala/buddy/` (FR-015) — write first, MUST fail [analyze C1]
 - [X] T024 [US1] Implement `BuddyRelationship` state (`Pending→Confirmed→Removed`), uniqueness/no-dup, removal, AND enforcement of the **512-buddy cap** (reject the 513th predictably) in `protocol-core/shared/src/main/scala/buddy/` (FR-002, FR-015, FR-018)
 - [ ] T025 [US1] Wire `addBuddy`/`confirmBuddy`/`removeBuddy` engine commands + `buddyConfirmed` event in `protocol-core/js/` (FR-001/FR-002/FR-018)
-- [ ] T026 [US1] Flutter add-buddy + safety-number-compare UI in `clients/flutter/lib/buddy/`, showing the privacy-status label (FR-016)
+- [X] T026 [US1] Flutter add-buddy + safety-number-compare UI in `clients/flutter/lib/ui/add_buddy_screen.dart`, showing the privacy-status label (FR-016) — over the `ProtocolEngine` bridge (`DevEngine` stand-in until T019)
 
 **Checkpoint**: US1 fully functional and independently testable (Phase A begins).
 
@@ -92,7 +92,7 @@ notification server cannot determine the sender; receiver retrieves on its own s
 - [X] T029 [US2] Implement receiver-generated sealed notification-token codec (one-hot position + aggregation label) in `protocol-core/shared/src/main/scala/notify/` (FR-003, token direction receiver→sender) — codec + Digest bit-vector in protocol-core; AEAD sealing in server/ping (JVM-only crypto)
 - [X] T030 [US2] Implement the **dev** notification aggregation (bitwise-OR + carrier injection) behind the PING front in `server/ping/src/main/scala/` over the dev store, labeled `DEV, NO METADATA PRIVACY` (FR-004/FR-012/Constitution IV) [Phase B] — DevNotificationServer: seal/open, OR-by-label, carrier digest, anti-forge/tamper; oblivious sort/scan/compaction deferred to the sidecar (T053)
 - [X] T031 [US2] Implement the **dev** `ObliviousStore` (in-memory/Postgres KV, no access-pattern privacy, labeled) in `server/pong/src/main/scala/store/dev/` (Constitution VIII/IV) [dev store before sidecar] — in-memory; enforces 256-byte frames, single-use non-recurrent tokens, no-token-reuse
-- [ ] T032 [US2] Wire `sendMessage` (frame+enqueue) and the `notified` engine event in `protocol-core/js/` + Flutter notification indicator in `clients/flutter/lib/notify/` (FR-004)
+- [~] T032 [US2] Wire `sendMessage` (frame+enqueue) and the `notified` engine event in `protocol-core/js/` + Flutter notification indicator in `clients/flutter/lib/notify/` (FR-004) — Flutter side done (conversation send + `notified` event handling in `AppState`); engine-side `protocol-core/js` wiring pending T019
 
 **Checkpoint**: US1+US2 work; notify-before-retrieval UX over the labeled dev backend.
 
@@ -110,7 +110,7 @@ three with no ordering constraint between conversations.
 - [ ] T036a [P] [US3] End-to-end latency test: a two-party exchange completes within minute-order (single-digit rounds); asserts the tuned round interval meets SC-001, in `server/src/test/scala/integration/latency/` (SC-001) — write first, MUST fail [analyze C2]
 - [X] T034 [US3] Implement per-buddy independent send/retrieve state (no cross-conversation blocking) in `protocol-core/shared/src/main/scala/session/` (FR-006) — immutable `Conversations`: per-buddy queue + monotone counter (non-recurrent tokens), keyed by pairId so conversations never block each other
 - [X] T035 [US3] Implement round retrieval of multiple frames with uniform/padded count in `server/pong/src/main/scala/` per `contracts/messaging.proto` Retrieve (FR-006/FR-012) — `RoundServiceImpl.retrieve` (transport): reads each single-use token, pads misses with a carrier zero-frame so the response count is uniform; in-process gRPC test green
-- [ ] T036 [US3] Flutter multi-conversation list/threading in `clients/flutter/lib/chat/`
+- [X] T036 [US3] Flutter multi-conversation list/threading in `clients/flutter/lib/ui/` (`home_screen.dart` buddy list + `conversation_screen.dart` per-buddy threading, over the engine bridge)
 
 **Checkpoint**: US1–US3 (all P1) complete — Phase B UX done over the labeled dev backend.
 
