@@ -64,6 +64,35 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
 
+  integration:
+    name: Cross-process integration (Scala client ↔ Rust obsd)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install libsodium + protoc
+        run: sudo apt-get update && sudo apt-get install -y libsodium-dev protobuf-compiler
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "24"
+      - uses: sbt/setup-sbt@v1
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: oblivious-sidecar
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cache/coursier
+            ~/.sbt
+            ~/.ivy2/cache
+          key: sbt-${{ runner.os }}-${{ hashFiles('build.sbt', 'project/build.properties', 'project/plugins.sbt') }}
+          restore-keys: sbt-${{ runner.os }}-
+      - name: Build obsd (the Rust sidecar binary)
+        run: cargo build --bin obsd --manifest-path oblivious-sidecar/Cargo.toml
+      - name: Run the cross-process integration test (Scala fronts ↔ obsd)
+        run: OBSD_BIN="$(pwd)/oblivious-sidecar/target/debug/obsd" sbt -batch -no-colors "transport/testOnly transport.SidecarIntegrationSpec"
+
   hygiene:
     name: Hygiene — pinned deps + secret scan (T007)
     runs-on: ubuntu-latest
