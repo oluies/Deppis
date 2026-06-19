@@ -43,6 +43,21 @@ class DevNotificationServerSpec extends AnyFunSuite:
     val s = server()
     assert(s.signal(Array.fill[Byte](40)(0)).isLeft)
 
+  test("digestAndReset consumes: a retrieved notification is not re-reported"):
+    val s = server()
+    assert(s.signal(s.issueToken(4, labelA)).isRight)
+    assert(s.digestAndReset(labelA).get(4))     // first read sees the bit
+    assert(s.digestAndReset(labelA).isEmpty)     // and clears it (carrier afterwards)
+
+  test("concurrent signals under one label all survive (atomic OR)"):
+    import scala.concurrent.{Await, Future}
+    import scala.concurrent.ExecutionContext.Implicits.global
+    import scala.concurrent.duration.*
+    val s    = server()
+    val toks = (0 until 200).map(i => s.issueToken(i, labelA))
+    Await.result(Future.sequence(toks.map(t => Future(s.signal(t)))), 30.seconds)
+    assert(s.digest(labelA).popcount == 200)
+
   test("tampered sealed token is rejected (AEAD authentication)"):
     val s   = server()
     val tok = s.issueToken(2, labelA)

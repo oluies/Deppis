@@ -30,8 +30,11 @@ object Notification:
 
   /** Fixed-size (public) bit-vector digest. Immutable; every op returns a new Digest. */
   final class Digest private (val bytes: Array[Byte]):
-    def get(pos: Int): Boolean = (bytes(pos >> 3) & (1 << (pos & 7))) != 0
+    def get(pos: Int): Boolean =
+      require(pos >= 0 && pos < MaxBits, s"bit $pos out of 0..${MaxBits - 1}")
+      (bytes(pos >> 3) & (1 << (pos & 7))) != 0
     def set(pos: Int): Digest =
+      require(pos >= 0 && pos < MaxBits, s"bit $pos out of 0..${MaxBits - 1}")
       val c = bytes.clone()
       c(pos >> 3) = (c(pos >> 3) | (1 << (pos & 7))).toByte
       new Digest(c)

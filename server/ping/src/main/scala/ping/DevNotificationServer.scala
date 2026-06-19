@@ -5,7 +5,7 @@ import notify.Notification.{Digest, NotificationToken}
 import crypto.Crypto
 import privacy.Privacy
 import java.security.SecureRandom
-import scala.collection.mutable
+import java.util.concurrent.ConcurrentHashMap
 
 /** Dev PING notification subsystem (T030, FR-003/FR-004). Aggregates receiver-sealed tokens by
   * bitwise-OR over a shared label and emits one digest per client, injecting an all-zero carrier
@@ -21,7 +21,9 @@ final class DevNotificationServer(serverKey: Array[Byte]):
   require(serverKey.length == Crypto.KeyBytes, s"server key must be ${Crypto.KeyBytes} bytes")
 
   private val rng    = new SecureRandom()
-  private val rounds = mutable.Map.empty[String, Digest] // aggregation label (hex) -> digest
+  // aggregation label (hex) -> digest; ConcurrentHashMap.compute makes the per-label OR atomic
+  // under concurrent submissions.
+  private val rounds = new ConcurrentHashMap[String, Digest]()
 
   val label: String            = Privacy.DevLabel
   def metadataPrivate: Boolean = false
@@ -45,11 +47,21 @@ final class DevNotificationServer(serverKey: Array[Byte]):
         .flatMap(Notification.deserialize)
         .map { tok =>
           val k = hex(tok.label)
-          rounds.update(k, rounds.getOrElse(k, Digest.empty).set(tok.bitPosition))
+          // atomic OR: a concurrent signal for the same label cannot clobber another's bit.
+          rounds.compute(k, (_, cur) => (if cur == null then Digest.empty else cur).set(tok.bitPosition))
+          ()
         }
 
-  /** Per-client digest. Returns a carrier (all-zero, uniform) when the client has no waiting
-    * mail, so the response never reveals whether — or from which buddy — mail arrived. */
-  def digest(aggLabel: Array[Byte]): Digest = rounds.getOrElse(hex(aggLabel), Digest.carrier)
+  /** Per-client digest (non-destructive peek). Returns a carrier (all-zero, uniform) when the
+    * client has no waiting mail, so the response never reveals whether — or from which buddy —
+    * mail arrived. */
+  def digest(aggLabel: Array[Byte]): Digest =
+    Option(rounds.get(hex(aggLabel))).getOrElse(Digest.carrier)
+
+  /** Consume-on-read: atomically return the client's digest and clear its accumulated bits, so a
+    * retrieved notification is not re-reported and `rounds` does not grow without bound. Returns
+    * a carrier when there is no waiting mail. */
+  def digestAndReset(aggLabel: Array[Byte]): Digest =
+    Option(rounds.remove(hex(aggLabel))).getOrElse(Digest.carrier)
 
   private def hex(b: Array[Byte]): String = b.map(x => f"${x & 0xff}%02x").mkString
