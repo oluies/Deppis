@@ -9,17 +9,18 @@ import scala.concurrent.{ExecutionContext, Future}
 
 /** gRPC `RoundService` over an `ObliviousStore` (T020/T035, contract `messaging.proto`).
   *
-  *   - `sendFrame` writes a real frame under its write token; a carrier frame (flagged, or with no
-  *     write token) is dropped server-side — the client still sends exactly one frame per round so
-  *     the on-wire shape is uniform (FR-012).
+  *   - `sendFrame` writes a frame iff it carries a write token. The server is BLIND to the client's
+  *     `is_carrier` flag (the proto marks it "never trusted") — behaving differently on a
+  *     client-supplied flag would leak real-vs-carrier to a server observer. A real frame carries a
+  *     write token; a carrier carries none, so token presence alone drops carriers (FR-012).
   *   - `retrieve` reads each single-use retrieval token and pads misses with a carrier zero-frame,
   *     so the response count matches the request and reveals nothing about hits vs. misses. */
 final class RoundServiceImpl(store: ObliviousStore)(using ec: ExecutionContext) extends RoundService:
 
   def sendFrame(req: SendFrameRequest): Future[SendFrameResponse] = Future {
-    if !req.isCarrier && !req.writeToken.isEmpty then
+    if !req.writeToken.isEmpty then
       // dev: a duplicate write token (Left) is ignored rather than surfaced (no secret-dependent
-      // error); the store enforces non-recurrence.
+      // error); the store enforces non-recurrence. `is_carrier` is intentionally not consulted.
       store.write(req.writeToken.toByteArray, req.frame.toByteArray): Unit
     SendFrameResponse(roundId = req.roundId)
   }

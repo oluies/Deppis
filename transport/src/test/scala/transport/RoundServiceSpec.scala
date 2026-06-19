@@ -41,19 +41,43 @@ class RoundServiceSpec extends AnyFunSuite:
       channel.shutdownNow()
       server.shutdownNow()
 
-  test("a carrier sendFrame stores nothing (uniform shape, no real write)"):
-    val store = new DevObliviousStore()
-    val name  = InProcessServerBuilder.generateName()
+  /** Run `body` against a fresh in-process server over `store`. */
+  private def withClient(store: DevObliviousStore)(body: RoundServiceGrpc.RoundServiceBlockingStub => Unit): Unit =
+    val name = InProcessServerBuilder.generateName()
     val server: Server =
       InProcessServerBuilder.forName(name).directExecutor()
         .addService(RoundServiceGrpc.bindService(new RoundServiceImpl(store), global))
         .build().start()
     val channel: ManagedChannel = InProcessChannelBuilder.forName(name).directExecutor().build()
-    try
-      val client = RoundServiceGrpc.blockingStub(channel)
-      client.sendFrame(SendFrameRequest(roundId = 2L, writeToken = ByteString.EMPTY, frame = bs(Frame.carrier()), isCarrier = true))
-      val resp = client.retrieve(RetrieveRequest(roundId = 2L, retrievalTokens = Seq(bs("anything".getBytes))))
-      assert(resp.sealedFrames(0).toByteArray.sameElements(Frame.carrier()))
+    try body(RoundServiceGrpc.blockingStub(channel))
     finally
       channel.shutdownNow()
       server.shutdownNow()
+
+  test("a tokenless carrier sendFrame stores nothing (uniform shape, no real write)"):
+    withClient(new DevObliviousStore()) { client =>
+      client.sendFrame(SendFrameRequest(roundId = 2L, writeToken = ByteString.EMPTY, frame = bs(Frame.carrier()), isCarrier = true))
+      val resp = client.retrieve(RetrieveRequest(roundId = 2L, retrievalTokens = Seq(bs("anything".getBytes))))
+      assert(resp.sealedFrames(0).toByteArray.sameElements(Frame.carrier()))
+    }
+
+  test("duplicate write token is ignored: the original frame is preserved"):
+    withClient(new DevObliviousStore()) { client =>
+      val tok = "dup".getBytes
+      val f1  = Frame.pad("first".getBytes).toOption.get
+      val f2  = Frame.pad("second".getBytes).toOption.get
+      client.sendFrame(SendFrameRequest(roundId = 3L, writeToken = bs(tok), frame = bs(f1), isCarrier = false))
+      client.sendFrame(SendFrameRequest(roundId = 3L, writeToken = bs(tok), frame = bs(f2), isCarrier = false))
+      val resp = client.retrieve(RetrieveRequest(roundId = 3L, retrievalTokens = Seq(bs(tok))))
+      assert(resp.sealedFrames(0).toByteArray.sameElements(f1)) // original, not clobbered
+    }
+
+  test("is_carrier is not trusted: a flagged frame WITH a write token is still written (server blind)"):
+    withClient(new DevObliviousStore()) { client =>
+      val tok = "tok".getBytes
+      val fr  = Frame.pad("real".getBytes).toOption.get
+      // misleading flag: isCarrier=true but a real token is present -> server writes based on token
+      client.sendFrame(SendFrameRequest(roundId = 4L, writeToken = bs(tok), frame = bs(fr), isCarrier = true))
+      val resp = client.retrieve(RetrieveRequest(roundId = 4L, retrievalTokens = Seq(bs(tok))))
+      assert(resp.sealedFrames(0).toByteArray.sameElements(fr))
+    }
