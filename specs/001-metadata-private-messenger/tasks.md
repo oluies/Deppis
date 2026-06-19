@@ -33,7 +33,7 @@ Multi-component layout (plan.md): `protocol-core/`, `crypto/`, `server/`, `obliv
 - [ ] T003 [P] Initialize the Rust `oblivious-sidecar` crate with pinned deps in `oblivious-sidecar/Cargo.toml`
 - [ ] T004 [P] Initialize the Flutter app skeleton in `clients/flutter/`
 - [ ] T005 [P] Configure linting/formatting: scalafmt + scalafix (`/.scalafmt.conf`), rustfmt + clippy (`oblivious-sidecar/`), `dart format`/`flutter analyze`
-- [ ] T006 [P] Add ScalaPB codegen for the contracts in `specs/001-metadata-private-messenger/contracts/*.proto` wired into `build.sbt`
+- [X] T006 [P] Add ScalaPB codegen for the contracts in `specs/001-metadata-private-messenger/contracts/*.proto` wired into `build.sbt` — sbt-protoc + ScalaPB in `transport` module; `messaging.proto` compiles to message + gRPC stubs
 - [ ] T007 [P] Add a reproducible-build + dependency-pinning CI check and a secret-scanning gate in `deploy/ci/` (Constitution XI)
 - [ ] T008 [P] Add a CI gate asserting no release artifact reports `metadataPrivate:false` and that the `DEV, NO METADATA PRIVACY` label is present in dev builds (Constitution IV / FR-016)
 
@@ -55,7 +55,7 @@ Multi-component layout (plan.md): `protocol-core/`, `crypto/`, `server/`, `obliv
 - [X] T017 [P] Implement `BuildPrivacyStatus` + `pstatus show` CLI emitting `{backend, metadataPrivate, label}` in `protocol-core/shared/src/main/scala/privacy/` (FR-016, Constitution IV)
 - [X] T018 [P] Configure error handling/logging that never varies on secret values (Constitution II) in `server/src/main/scala/obs/` — `SafeLog` (constant redaction marker, no value/length leak) + `FailureReason` enum (fixed public messages); property-tested for content/length independence
 - [ ] T019 Scaffold the Scala.js engine bundle + versioned Dart platform-channel API per `contracts/engine-api.md` in `protocol-core/js/` (Constitution VII)
-- [ ] T020 [P] Stand up the Pekko/Akka server skeleton with gRPC/TLS 1.3 round orchestration in `server/src/main/scala/round/` (per `contracts/messaging.proto`)
+- [ ] T020 [P] Stand up the Pekko/Akka server skeleton with gRPC/TLS 1.3 round orchestration in `server/src/main/scala/round/` (per `contracts/messaging.proto`) — PARTIAL: gRPC `RoundService` (ScalaPB) implemented in `transport` + in-process round-trip test green; Pekko actor orchestration and TLS network binding (self-signed certs, bound port) still pending
 
 **Checkpoint**: protocol-core + crypto + interfaces ready; user stories can begin.
 
@@ -109,7 +109,7 @@ three with no ordering constraint between conversations.
 - [ ] T033a [P] [US3] Scale test: a user holds up to 512 simultaneous conversations with no conversation blocking another in `server/src/test/scala/integration/scale/` (SC-005) — write first, MUST fail [analyze C4] — PARTIAL: protocol-core 512-conversation scale shown in `ConversationsSpec`; server-round (real-concurrency) scale test still pending T035
 - [ ] T036a [P] [US3] End-to-end latency test: a two-party exchange completes within minute-order (single-digit rounds); asserts the tuned round interval meets SC-001, in `server/src/test/scala/integration/latency/` (SC-001) — write first, MUST fail [analyze C2]
 - [X] T034 [US3] Implement per-buddy independent send/retrieve state (no cross-conversation blocking) in `protocol-core/shared/src/main/scala/session/` (FR-006) — immutable `Conversations`: per-buddy queue + monotone counter (non-recurrent tokens), keyed by pairId so conversations never block each other
-- [ ] T035 [US3] Implement round retrieval of multiple frames with uniform/padded count in `server/pong/src/main/scala/` per `contracts/messaging.proto` Retrieve (FR-006/FR-012)
+- [X] T035 [US3] Implement round retrieval of multiple frames with uniform/padded count in `server/pong/src/main/scala/` per `contracts/messaging.proto` Retrieve (FR-006/FR-012) — `RoundServiceImpl.retrieve` (transport): reads each single-use token, pads misses with a carrier zero-frame so the response count is uniform; in-process gRPC test green
 - [ ] T036 [US3] Flutter multi-conversation list/threading in `clients/flutter/lib/chat/`
 
 **Checkpoint**: US1–US3 (all P1) complete — Phase B UX done over the labeled dev backend.

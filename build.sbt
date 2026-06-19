@@ -1,3 +1,5 @@
+import scalapb.compiler.Version.{scalapbVersion, grpcJavaVersion}
+
 // Metadata-Private Messenger — JVM build (Phase 1/2 foundational slice).
 // protocol-core is the single source of truth (Constitution VII). This build currently
 // compiles it for the JVM; the Scala.js cross-build (T019) and the server/sidecar/client
@@ -83,6 +85,22 @@ lazy val server = (project in file("server"))
     libraryDependencies ++= testDeps
   )
 
+// transport: gRPC contracts compiled by ScalaPB + the round service/client over them. Generated
+// code lives under sourceManaged; we drop -Wunused here so codegen doesn't produce noise.
+lazy val transport = (project in file("transport"))
+  .dependsOn(protocolCore, server)
+  .settings(
+    name := "transport",
+    scalacOptions ++= Seq("-deprecation", "-feature"),
+    Compile / PB.targets := Seq(scalapb.gen(grpc = true) -> (Compile / sourceManaged).value / "scalapb"),
+    libraryDependencies ++= Seq(
+      "com.thesamet.scalapb" %% "scalapb-runtime"      % scalapbVersion % "protobuf",
+      "com.thesamet.scalapb" %% "scalapb-runtime-grpc" % scalapbVersion,
+      "io.grpc"               % "grpc-netty-shaded"     % grpcJavaVersion,
+      "io.grpc"               % "grpc-inprocess"        % grpcJavaVersion % Test
+    ) ++ testDeps
+  )
+
 lazy val root = (project in file("."))
-  .aggregate(protocolCore, crypto, anonymity, server)
+  .aggregate(protocolCore, crypto, anonymity, server, transport)
   .settings(name := "metadata-messenger", publish / skip := true)
