@@ -204,7 +204,7 @@ US2/US3/US5/US6's real guarantee.)
 ## Phase 11: Polish & Cross-Cutting Concerns
 
 - [ ] T060 [P] SPIRE/SPIRE-Envoy SDS mesh identity for **non-enclave** services only; enclave-aware attestor gates any PING/PONG SVID on a passing attestation result; never a substitute (Constitution IX) in `deploy/spire/`
-- [ ] T061 [P] Groove mixnet stub behind `AnonymityLayer` (single shuffler, labeled "no DP guarantee") in `anonymity/src/main/scala/groove/` (D9, leaves room without conflating trust models)
+- [X] T061 [P] Groove mixnet stub behind `AnonymityLayer` (single shuffler, labeled "no DP guarantee") in `anonymity/src/main/scala/groove/` (D9, leaves room without conflating trust models) — GrooveStub: single Fisher–Yates shuffler per round, multiset-preserving, labeled DEV/no-DP; 5 tests
 - [ ] T062 [P] Per-phase README updates stating exactly what metadata is protected vs leaked (Constitution III / FR-017) in repo root + `specs/.../`
 - [ ] T063 [P] Threshold-split the enclave key across replicas/operators (Phase D) in `deploy/enclave/threshold/`
 - [ ] T064 Run `quickstart.md` end-to-end validation (all 6 smoke steps) and record results
