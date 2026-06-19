@@ -6,6 +6,7 @@ import crypto.Crypto
 import privacy.Privacy
 import java.security.SecureRandom
 import java.util.concurrent.ConcurrentHashMap
+import scala.jdk.CollectionConverters.*
 
 /** Dev PING notification subsystem (T030, FR-003/FR-004). Aggregates receiver-sealed tokens by
   * bitwise-OR over a shared label and emits one digest per client, injecting an all-zero carrier
@@ -25,6 +26,11 @@ final class DevNotificationServer(serverKey: Array[Byte]):
   // atomic under concurrent submissions. Keying by round honors the proto's per-round scope:
   // signals in different rounds never mix, and a fetch only clears its own round.
   private val rounds = new ConcurrentHashMap[(Long, String), Digest]()
+
+  /** Sliding retention window: entries for rounds more than this many behind the newest signaled
+    * round are evicted, bounding map growth even for a (round,label) that is never fetched. This
+    * also realizes the spec's "bound how long undelivered notifications are retained" edge case. */
+  private val RetentionRounds: Long = 16L
 
   val label: String            = Privacy.DevLabel
   def metadataPrivate: Boolean = false
@@ -50,6 +56,7 @@ final class DevNotificationServer(serverKey: Array[Byte]):
           val k = (roundId, hex(tok.label))
           // atomic OR: a concurrent signal for the same (round,label) cannot clobber another's bit.
           rounds.compute(k, (_, cur) => (if cur == null then Digest.empty else cur).set(tok.bitPosition))
+          evictBefore(roundId - RetentionRounds)
           ()
         }
 
@@ -59,10 +66,18 @@ final class DevNotificationServer(serverKey: Array[Byte]):
   def digest(roundId: Long, aggLabel: Array[Byte]): Digest =
     Option(rounds.get((roundId, hex(aggLabel)))).getOrElse(Digest.carrier)
 
-  /** Consume-on-read for a round: atomically return the client's digest and clear its bits, so a
-    * retrieved notification is not re-reported and `rounds` does not grow without bound. Returns
-    * a carrier when there is no waiting mail. */
+  /** Consume-on-read for a round: atomically return the client's digest and clear its bits so a
+    * retrieved notification is not re-reported. Returns a carrier when there is no waiting mail.
+    * Map growth is bounded by the retention window even for rounds that are never fetched (see
+    * `RetentionRounds` / `evictBefore`). */
   def digestAndReset(roundId: Long, aggLabel: Array[Byte]): Digest =
     Option(rounds.remove((roundId, hex(aggLabel)))).getOrElse(Digest.carrier)
+
+  /** Number of distinct rounds currently retained (test/observability hook). */
+  def retainedRounds: Int = rounds.keySet().asScala.map(_._1).toSet.size
+
+  /** Drop entries for rounds strictly older than `minRound` (weakly-consistent, atomic per key). */
+  private def evictBefore(minRound: Long): Unit =
+    if minRound > 0 then rounds.keySet().removeIf(k => k._1 < minRound)
 
   private def hex(b: Array[Byte]): String = b.map(x => f"${x & 0xff}%02x").mkString

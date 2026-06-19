@@ -54,6 +54,14 @@ class DevNotificationServerSpec extends AnyFunSuite:
     assert(s.digestAndReset(1L, labelA).isEmpty)  // cleared
     assert(s.digestAndReset(2L, labelA).get(6))   // round 2 untouched
 
+  test("stale rounds are evicted by the retention window (bounded growth)"):
+    val s = server()
+    assert(s.signal(1L, s.issueToken(0, labelA)).isRight) // old round
+    assert(s.signal(100L, s.issueToken(1, labelA)).isRight) // far ahead -> evicts round 1
+    assert(s.digest(1L, labelA).isEmpty)                    // round 1 dropped (never fetched)
+    assert(s.digest(100L, labelA).get(1))                   // current round retained
+    assert(s.retainedRounds == 1)
+
   test("forged token is rejected (cannot flood/impersonate, FR-003)"):
     val s = server()
     assert(s.signal(R, Array.fill[Byte](40)(0)).isLeft)
