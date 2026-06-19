@@ -80,4 +80,25 @@ void main() {
     await tester.pump();
     expect(find.byKey(const Key('notifyIndicator')), findsNothing);
   });
+
+  testWidgets('error banner shows a vetted message and dismisses', (tester) async {
+    final engine = DevEngine();
+    await tester.pumpWidget(MetadataMessengerApp(engine: engine));
+    await tester.pump();
+
+    expect(find.byKey(const Key('errorBanner')), findsNothing);
+
+    // Confirming an unknown pairing makes the engine emit EngineError('unknown_pair').
+    await engine.confirmBuddy(pairId: 'does-not-exist', matched: true);
+    await tester.pump();
+    expect(find.byKey(const Key('errorBanner')), findsOneWidget);
+    expect(find.text('That conversation is no longer available.'), findsOneWidget);
+
+    await tester.tap(find.descendant(
+      of: find.byKey(const Key('errorBanner')),
+      matching: find.byIcon(Icons.close),
+    ));
+    await tester.pump();
+    expect(find.byKey(const Key('errorBanner')), findsNothing);
+  });
 }

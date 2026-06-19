@@ -58,11 +58,24 @@ class AppState extends ChangeNotifier {
         ));
       case Notified(:final roundId):
         _lastNotifiedRound = roundId;
-      case EngineError(:final code, :final message):
-        _lastError = '$code: $message';
+      case EngineError(:final code, message: _):
+        // Defense in depth: show a vetted, fixed string keyed off `code` rather
+        // than echoing the engine's `message` verbatim. The contract already
+        // forbids secret-dependent error detail, but never rendering arbitrary
+        // engine text means a future real backend cannot leak into the UI even
+        // if that invariant slips (Constitution II).
+        _lastError = _displayForError(code);
     }
     notifyListeners();
   }
+
+  /// Map an engine error `code` to a fixed, user-facing string. Unknown codes
+  /// fall back to a generic message — the raw engine text is never shown.
+  static String _displayForError(String code) => switch (code) {
+        'invalid_arg' => 'Invalid input.',
+        'unknown_pair' => 'That conversation is no longer available.',
+        _ => 'Something went wrong.',
+      };
 
   /// Confirm a pairing whose safety number the user has compared out of band.
   Future<void> confirmPairing({

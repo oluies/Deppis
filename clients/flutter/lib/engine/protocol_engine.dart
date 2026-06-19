@@ -114,7 +114,10 @@ class PrivacyStatusChanged extends EngineEvent {
   final PrivacyStatus status;
 }
 
-/// Error surfaced to the UI. MUST NOT vary on secret values (Constitution II).
+/// Error surfaced to the UI. Both fields MUST be content-independent — they MUST
+/// NOT vary on secret values (Constitution II). `code` is a stable category the
+/// UI maps to a fixed string; the UI does not render `message` verbatim, so even
+/// a misbehaving backend cannot leak through it.
 class EngineError extends EngineEvent {
   const EngineError(this.code, this.message);
   final String code;

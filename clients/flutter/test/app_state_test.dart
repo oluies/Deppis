@@ -84,14 +84,21 @@ void main() {
       expect(state.lastNotifiedRound, isNull);
     });
 
-    test('EngineError is surfaced and clearable', () async {
+    test('EngineError is surfaced as a vetted string (never echoes raw message) and clearable',
+        () async {
       final engine = FakeEngine();
       final state = AppState(engine);
-      engine.emit(const EngineError('boom', 'generic failure'));
+      // Unknown code → generic; the raw secret-shaped message is never shown.
+      engine.emit(const EngineError('boom', 'super-secret-value-1234'));
       await _flush();
-      expect(state.lastError, 'boom: generic failure');
+      expect(state.lastError, 'Something went wrong.');
+      expect(state.lastError, isNot(contains('super-secret-value-1234')));
       state.clearError();
       expect(state.lastError, isNull);
+      // Known code → its fixed mapping.
+      engine.emit(const EngineError('invalid_arg', 'whatever'));
+      await _flush();
+      expect(state.lastError, 'Invalid input.');
     });
 
     test('MessageReceived is appended to the right conversation', () async {
