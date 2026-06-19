@@ -17,15 +17,15 @@ jobs:
     name: JVM — sbt test + labeling gate
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install libsodium (crypto FFM tests)
         run: sudo apt-get update && sudo apt-get install -y libsodium-dev
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "24" # Foreign Function & Memory API is final since 22
       - uses: sbt/setup-sbt@v1
-      - uses: actions/cache@v4
+      - uses: actions/cache@v5
         with:
           path: |
             ~/.cache/coursier
@@ -51,7 +51,7 @@ jobs:
       run:
         working-directory: oblivious-sidecar
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -66,7 +66,7 @@ jobs:
     name: Hygiene — pinned deps + secret scan (T007)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: Pinned dependencies (reproducible builds, Constitution XI)
