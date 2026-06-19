@@ -19,8 +19,10 @@ final class EnclaveObliviousStore(
     attested: Boolean
 ) extends ObliviousStore:
 
-  def metadataPrivate: Boolean = attested
-  def label: String            = if attested then "METADATA PRIVATE" else Privacy.DevLabel
+  // Derive both from the canonical labeling logic (single source of truth) — no literal drift.
+  private val status           = Privacy.BuildPrivacyStatus(Privacy.Backend.EnclaveTarget, attested)
+  def metadataPrivate: Boolean = status.metadataPrivate
+  def label: String            = status.label
 
   // gRPC failures surface as exceptions from the blocking stub; map them to the trait's Left
   // channel. Error text is generic (no secret-dependent content, Constitution II).

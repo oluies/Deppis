@@ -16,8 +16,10 @@ final class EnclaveNotificationClient(
     stub: npb.NotificationServiceGrpc.NotificationServiceBlockingStub,
     attested: Boolean
 ):
-  def metadataPrivate: Boolean = attested
-  def label: String            = if attested then "METADATA PRIVATE" else Privacy.DevLabel
+  // Derive both from the canonical labeling logic (single source of truth) — no literal drift.
+  private val status           = Privacy.BuildPrivacyStatus(Privacy.Backend.EnclaveTarget, attested)
+  def metadataPrivate: Boolean = status.metadataPrivate
+  def label: String            = status.label
 
   /** Submit a receiver-sealed token for a round; always succeeds uniformly server-side. */
   def signal(roundId: Long, sealedToken: Array[Byte]): Either[String, Unit] =
