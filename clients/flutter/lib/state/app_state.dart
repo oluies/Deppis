@@ -100,6 +100,21 @@ class AppState extends ChangeNotifier {
     await engine.sendMessage(pairId: pairId, plaintext: text);
   }
 
+  /// Dismiss the "mail waiting" indicator once the user has seen it (the engine
+  /// drives retrieval on its own schedule; this only clears the UI hint).
+  void acknowledgeNotified() {
+    if (_lastNotifiedRound == null) return;
+    _lastNotifiedRound = null;
+    notifyListeners();
+  }
+
+  /// Dismiss the last surfaced error.
+  void clearError() {
+    if (_lastError == null) return;
+    _lastError = null;
+    notifyListeners();
+  }
+
   String _nameFor(String pairId) {
     final existing = _buddies.firstWhere(
       (b) => b.pairId == pairId,

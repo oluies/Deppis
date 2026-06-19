@@ -21,7 +21,19 @@ class HomeScreen extends StatelessWidget {
         children: [
           ListenableBuilder(
             listenable: state,
-            builder: (context, _) => PrivacyBanner(status: state.privacy),
+            builder: (context, _) => Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                PrivacyBanner(status: state.privacy),
+                if (state.lastNotifiedRound != null)
+                  _NotifyIndicator(onDismiss: state.acknowledgeNotified),
+                if (state.lastError != null)
+                  _ErrorBanner(
+                    message: state.lastError!,
+                    onDismiss: state.clearError,
+                  ),
+              ],
+            ),
           ),
           Expanded(
             child: ListenableBuilder(
@@ -68,6 +80,56 @@ class HomeScreen extends StatelessWidget {
         label: const Text('Add buddy'),
         onPressed: () => Navigator.of(context).push(
           MaterialPageRoute(builder: (_) => AddBuddyScreen(state: state)),
+        ),
+      ),
+    );
+  }
+}
+
+/// "Some buddy has mail" (FR-004). Deliberately generic — it never names which
+/// buddy wrote; the engine drives retrieval and only the round is shown.
+class _NotifyIndicator extends StatelessWidget {
+  const _NotifyIndicator({required this.onDismiss});
+
+  final VoidCallback onDismiss;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Theme.of(context).colorScheme.secondaryContainer,
+      child: ListTile(
+        key: const Key('notifyIndicator'),
+        dense: true,
+        leading: const Icon(Icons.mark_email_unread_outlined),
+        title: const Text('Mail waiting'),
+        subtitle: const Text('A buddy wrote — which one is hidden'),
+        trailing: IconButton(
+          icon: const Icon(Icons.close),
+          onPressed: onDismiss,
+        ),
+      ),
+    );
+  }
+}
+
+class _ErrorBanner extends StatelessWidget {
+  const _ErrorBanner({required this.message, required this.onDismiss});
+
+  final String message;
+  final VoidCallback onDismiss;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Theme.of(context).colorScheme.errorContainer,
+      child: ListTile(
+        key: const Key('errorBanner'),
+        dense: true,
+        leading: const Icon(Icons.error_outline),
+        title: Text(message),
+        trailing: IconButton(
+          icon: const Icon(Icons.close),
+          onPressed: onDismiss,
         ),
       ),
     );

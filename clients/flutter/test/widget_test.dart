@@ -58,4 +58,26 @@ void main() {
 
     expect(find.text('hello there'), findsWidgets);
   });
+
+  testWidgets('notify indicator appears on a notified round and dismisses (FR-004)',
+      (tester) async {
+    final engine = DevEngine();
+    await tester.pumpWidget(MetadataMessengerApp(engine: engine));
+    await tester.pump();
+
+    expect(find.byKey(const Key('notifyIndicator')), findsNothing);
+
+    await engine.tick(roundId: 1); // "some buddy has mail"
+    await tester.pump();
+    expect(find.byKey(const Key('notifyIndicator')), findsOneWidget);
+    // Must not name a buddy.
+    expect(find.text('A buddy wrote — which one is hidden'), findsOneWidget);
+
+    await tester.tap(find.descendant(
+      of: find.byKey(const Key('notifyIndicator')),
+      matching: find.byIcon(Icons.close),
+    ));
+    await tester.pump();
+    expect(find.byKey(const Key('notifyIndicator')), findsNothing);
+  });
 }
