@@ -11,9 +11,11 @@ class NotificationSpec extends AnyFunSuite with ScalaCheckDrivenPropertyChecks:
   private val positions: Gen[Int]      = Gen.choose(0, Notification.MaxBits - 1)
   private val labels: Gen[Array[Byte]] = Gen.listOf(arbitrary[Byte]).map(_.toArray)
 
-  test("serialize/deserialize round-trips token (bit position + label)"):
-    forAll(positions, labels) { (pos, lbl) =>
-      val Right(t) = Notification.deserialize(Notification.serialize(NotificationToken(pos, lbl))): @unchecked
+  test("serialize/deserialize round-trips (round, bit position, label)"):
+    forAll(Gen.choose(0L, Long.MaxValue), positions, labels) { (round, pos, lbl) =>
+      val Right((r, t)) =
+        Notification.deserialize(Notification.serialize(round, NotificationToken(pos, lbl))): @unchecked
+      assert(r == round)
       assert(t.bitPosition == pos)
       assert(t.label.sameElements(lbl))
     }
@@ -30,4 +32,8 @@ class NotificationSpec extends AnyFunSuite with ScalaCheckDrivenPropertyChecks:
     assert(Digest.carrier.bytes.length == Notification.DigestBytes)
 
   test("out-of-range bit position is rejected"):
-    assert(Notification.deserialize(Array(0xff.toByte, 0xff.toByte)).isLeft) // 65535 >= 512
+    // 8 round bytes + bit 0xffff (65535 >= 512)
+    assert(Notification.deserialize(new Array[Byte](8) ++ Array(0xff.toByte, 0xff.toByte)).isLeft)
+
+  test("a too-short token is rejected"):
+    assert(Notification.deserialize(Array(0x00.toByte, 0x01.toByte)).isLeft)

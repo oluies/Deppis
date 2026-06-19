@@ -13,20 +13,32 @@ object Notification:
   final case class NotificationToken(bitPosition: Int, label: Array[Byte]):
     require(bitPosition >= 0 && bitPosition < MaxBits, s"bit $bitPosition out of 0..${MaxBits - 1}")
 
-  /** 2-byte big-endian bit position, then the aggregation label. */
-  def serialize(t: NotificationToken): Array[Byte] =
-    val out = new Array[Byte](2 + t.label.length)
-    out(0) = ((t.bitPosition >> 8) & 0xff).toByte
-    out(1) = (t.bitPosition & 0xff).toByte
-    System.arraycopy(t.label, 0, out, 2, t.label.length)
+  /** Plaintext layout: 8-byte big-endian round, 2-byte big-endian bit position, then the
+    * aggregation label. Binding the round into the sealed plaintext stops a captured token from
+    * being replayed into a DIFFERENT round (the opener validates the round matches the request). */
+  def serialize(roundId: Long, t: NotificationToken): Array[Byte] =
+    val out = new Array[Byte](10 + t.label.length)
+    var i   = 0
+    while i < 8 do
+      out(i) = ((roundId >>> (56 - 8 * i)) & 0xff).toByte
+      i += 1
+    out(8) = ((t.bitPosition >> 8) & 0xff).toByte
+    out(9) = (t.bitPosition & 0xff).toByte
+    System.arraycopy(t.label, 0, out, 10, t.label.length)
     out
 
-  def deserialize(b: Array[Byte]): Either[String, NotificationToken] =
-    if b.length < 2 then Left("token too short")
+  /** Returns the bound `(roundId, token)`. */
+  def deserialize(b: Array[Byte]): Either[String, (Long, NotificationToken)] =
+    if b.length < 10 then Left("token too short")
     else
-      val pos = ((b(0) & 0xff) << 8) | (b(1) & 0xff)
+      var round = 0L
+      var i     = 0
+      while i < 8 do
+        round = (round << 8) | (b(i) & 0xffL)
+        i += 1
+      val pos = ((b(8) & 0xff) << 8) | (b(9) & 0xff)
       if pos >= MaxBits then Left(s"bit $pos out of range")
-      else Right(NotificationToken(pos, b.drop(2)))
+      else Right((round, NotificationToken(pos, b.drop(10))))
 
   /** Fixed-size (public) bit-vector digest. Immutable; every op returns a new Digest. */
   final class Digest private (val bytes: Array[Byte]):

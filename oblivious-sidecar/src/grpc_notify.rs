@@ -22,13 +22,11 @@ use pb::{FetchDigestRequest, FetchDigestResponse, SignalRequest, SignalResponse}
 
 const NONCE_LEN: usize = 12;
 const TAG_LEN: usize = 16;
-/// Bounded retention: keep the most-recently-INSERTED rounds, evicted in insertion order. We do
-/// NOT evict by round_id arithmetic — round_id is attacker-controlled cleartext (it is not bound
-/// into the sealed token), so arithmetic eviction would let a single huge round_id wipe every
-/// legitimate round.
+/// Bounded retention: keep the most-recently-INSERTED rounds, evicted in insertion order (NOT by
+/// round_id arithmetic, which would let a large round_id wipe legitimate rounds). A memory backstop.
 const MAX_ROUNDS: usize = 1024;
-/// Per-round signal cap: bounds memory/CPU against token replay. AEAD authenticates a token but
-/// does NOT prevent replay of an already-valid ciphertext, so we cap signals per round.
+/// Per-round signal cap: bounds memory/CPU against same-round token replay (round binding stops
+/// cross-round replay; a token replayed within its own round just re-ORs the same bit).
 const MAX_SIGNALS_PER_ROUND: usize = 8192;
 
 /// FNV-1a hash of the (public) aggregation label to a u64 key for the oblivious aggregator. Labels
@@ -49,16 +47,12 @@ struct State {
 }
 
 /// PING notification server. Holds the server key (to open sealed tokens) and per-round decoded
-/// signals; aggregation is recomputed obliviously on fetch. Map growth is bounded by insertion-order
-/// round eviction + a per-round signal cap.
+/// signals; aggregation is recomputed obliviously on fetch.
 ///
-/// RESIDUAL (dev-path) DoS, tracked: `round_id` is unauthenticated cleartext (it is not bound into
-/// the sealed token) and a valid token is replayable, so an attacker who captures one token can
-/// replay it across `max_rounds` distinct ids to FIFO-evict the oldest legitimate rounds before
-/// receivers fetch. Fully closing this needs round AUTHENTICATION — binding `round_id` into the
-/// sealed token (which conflicts with the issue-once-reuse-across-rounds model) or a server-clock
-/// round window — a protocol decision deferred to the real (enclave + attested-key) backend. The
-/// dev build is labeled `DEV, NO METADATA PRIVACY` accordingly.
+/// The `round_id` is BOUND into the sealed plaintext ([round][bit][label]) and validated on signal,
+/// so a captured token cannot be replayed into a different round — this closes the round-eviction
+/// replay DoS. Insertion-order round eviction + a per-round signal cap remain as memory/CPU
+/// backstops (e.g. against same-round replay, which is idempotent OR'ing).
 pub struct NotificationServer {
     cipher: ChaCha20Poly1305,
     state: Mutex<State>,
@@ -96,17 +90,20 @@ impl NotificationSvcTrait for NotificationServer {
         req: Request<SignalRequest>,
     ) -> Result<Response<SignalResponse>, Status> {
         let req = req.into_inner();
-        // Open the sealed token; a forged/tampered/short token is silently dropped (uniform
-        // response — token validity is never leaked to the submitter, FR-003). AEAD authentication
-        // stops FORGERY/impersonation (a sender can't craft another buddy's bit), but does NOT stop
-        // replay of a valid token — that is bounded by MAX_SIGNALS_PER_ROUND below.
+        // Open the sealed token; a forged/tampered/short token, or one whose bound round != this
+        // signal's round, is silently dropped (uniform response — validity is never leaked, FR-003).
+        // AEAD stops forgery (can't craft another buddy's bit); the bound round stops cross-round
+        // replay; the per-round cap bounds same-round replay.
         if req.sealed_token.len() >= NONCE_LEN + TAG_LEN {
             let (nonce, ct) = req.sealed_token.split_at(NONCE_LEN);
             if let Ok(pt) = self.cipher.decrypt(Nonce::from_slice(nonce), ct) {
-                if pt.len() >= 2 {
-                    let bit = ((pt[0] as u16) << 8) | (pt[1] as u16);
-                    if bit < MAX_BIT {
-                        let label = label_key(&pt[2..]);
+                // plaintext = [round(8 BE)][bit(2 BE)][label]
+                if pt.len() >= 10 {
+                    let round = u64::from_be_bytes(pt[0..8].try_into().unwrap());
+                    let bit = ((pt[8] as u16) << 8) | (pt[9] as u16);
+                    // round binding: a token sealed for a DIFFERENT round cannot be replayed here.
+                    if round == req.round_id && bit < MAX_BIT {
+                        let label = label_key(&pt[10..]);
                         let mut st = self
                             .state
                             .lock()
