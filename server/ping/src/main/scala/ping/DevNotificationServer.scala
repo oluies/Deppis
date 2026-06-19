@@ -6,6 +6,7 @@ import crypto.Crypto
 import privacy.Privacy
 import java.security.SecureRandom
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
 import scala.jdk.CollectionConverters.*
 
 /** Dev PING notification subsystem (T030, FR-003/FR-004). Aggregates receiver-sealed tokens by
@@ -29,8 +30,11 @@ final class DevNotificationServer(serverKey: Array[Byte]):
 
   /** Sliding retention window: entries for rounds more than this many behind the newest signaled
     * round are evicted, bounding map growth even for a (round,label) that is never fetched. This
-    * also realizes the spec's "bound how long undelivered notifications are retained" edge case. */
+    * also realizes the spec's "bound how long undelivered notifications are retained" edge case.
+    * Eviction runs only when a signal advances the newest round, so steady-state same-round
+    * signaling does no scan; an out-of-order low-round signal lingers until the next advance. */
   private val RetentionRounds: Long = 16L
+  private val maxRound: AtomicLong  = new AtomicLong(0L)
 
   val label: String            = Privacy.DevLabel
   def metadataPrivate: Boolean = false
@@ -56,7 +60,10 @@ final class DevNotificationServer(serverKey: Array[Byte]):
           val k = (roundId, hex(tok.label))
           // atomic OR: a concurrent signal for the same (round,label) cannot clobber another's bit.
           rounds.compute(k, (_, cur) => (if cur == null then Digest.empty else cur).set(tok.bitPosition))
-          evictBefore(roundId - RetentionRounds)
+          // Evict only when this signal advances the newest round (relative to the true max),
+          // so steady-state same-round signaling does no scan.
+          val prevMax = maxRound.getAndAccumulate(roundId, (a, b) => math.max(a, b))
+          if roundId > prevMax then evictBefore(roundId - RetentionRounds)
           ()
         }
 
