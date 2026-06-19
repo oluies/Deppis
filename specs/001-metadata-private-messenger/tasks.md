@@ -30,7 +30,7 @@ Multi-component layout (plan.md): `protocol-core/`, `crypto/`, `server/`, `obliv
 
 - [ ] T001 Create the multi-module layout per plan.md (`protocol-core/{shared,jvm,js}`, `crypto/`, `server/{ping,pong,provider,attestation}`, `oblivious-sidecar/`, `anonymity/`, `clients/flutter/`, `deploy/`)
 - [ ] T002 Initialize the sbt cross-build (Scala 3) for `protocol-core` (JVM + Scala.js) and `crypto`/`server` JVM modules in `build.sbt`, with **pinned** dependency versions
-- [ ] T003 [P] Initialize the Rust `oblivious-sidecar` crate with pinned deps in `oblivious-sidecar/Cargo.toml`
+- [X] T003 [P] Initialize the Rust `oblivious-sidecar` crate with pinned deps in `oblivious-sidecar/Cargo.toml` — subtle (constant-time) + proptest, pinned; Cargo.lock committed
 - [ ] T004 [P] Initialize the Flutter app skeleton in `clients/flutter/`
 - [ ] T005 [P] Configure linting/formatting: scalafmt + scalafix (`/.scalafmt.conf`), rustfmt + clippy (`oblivious-sidecar/`), `dart format`/`flutter analyze`
 - [X] T006 [P] Add ScalaPB codegen for the contracts in `specs/001-metadata-private-messenger/contracts/*.proto` wired into `build.sbt` — sbt-protoc + ScalaPB in `transport` module; `messaging.proto` compiles to message + gRPC stubs
@@ -185,8 +185,8 @@ are unrecoverable.
 **Per the clarify decision, the first shippable release is gated here.** (Cross-cutting; serves
 US2/US3/US5/US6's real guarantee.)
 
-- [ ] T050 [P] Rust property tests for oblivious primitives (compare/choose/sort/compaction): access pattern depends only on batch size; `obsx selftest` in `oblivious-sidecar/src/primitives/` (write first, MUST fail)
-- [ ] T051 Implement constant-time oblivious primitives in `oblivious-sidecar/src/primitives/` (Constitution II) [native sidecar after dev store]
+- [X] T050 [P] Rust property tests for oblivious primitives (compare/choose/sort/compaction): access pattern depends only on batch size; `obsx selftest` in `oblivious-sidecar/src/primitives/` (write first, MUST fail) — 3 proptest properties green; selftest reports obliviousInvariants:true
+- [X] T051 Implement constant-time oblivious primitives in `oblivious-sidecar/src/primitives/` (Constitution II) [native sidecar after dev store] — ct select/swap (subtle), data-oblivious bitonic sort, oblivious stable compaction
 - [ ] T052 Implement the PONG oblivious store (stash + bins + message tables, deamortized builds, unlinkable write/read, non-recurrent tokens) in `oblivious-sidecar/src/store/` + `obsx store-write|store-read` CLI (D7/FR-014)
 - [ ] T053 Implement the PING sealed-notification aggregation (OR + oblivious sort/scan/compaction, carrier injection) in `oblivious-sidecar/src/notify/` + `obsx notify-aggregate` CLI (D8)
 - [ ] T053a [P] Which-buddy anonymity test against the real enclave backend: with N buddies and one real sender, an observer (incl. the store/notify host) cannot identify the sending buddy better than 1/N in `server/src/test/scala/integration/anonymity/` (SC-002) — acceptance test; written up front, stays failing until the Phase C backend (T051–T056) is assembled [analyze C3]
