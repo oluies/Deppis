@@ -89,8 +89,8 @@ notification server cannot determine the sender; receiver retrieves on its own s
 
 - [ ] T027 [P] [US2] Property test: sealed token lets holder flip only its own bit; no forge/flood (FR-003) in `protocol-core/shared/src/test/scala/notify/` (write first, MUST fail)
 - [ ] T028 [P] [US2] Contract test for `notify.proto` Signal/FetchDigest in `server/ping/src/test/scala/`
-- [ ] T029 [US2] Implement receiver-generated sealed notification-token codec (one-hot position + aggregation label) in `protocol-core/shared/src/main/scala/notify/` (FR-003, token direction receiver→sender)
-- [ ] T030 [US2] Implement the **dev** notification aggregation (bitwise-OR + carrier injection) behind the PING front in `server/ping/src/main/scala/` over the dev store, labeled `DEV, NO METADATA PRIVACY` (FR-004/FR-012/Constitution IV) [Phase B]
+- [X] T029 [US2] Implement receiver-generated sealed notification-token codec (one-hot position + aggregation label) in `protocol-core/shared/src/main/scala/notify/` (FR-003, token direction receiver→sender) — codec + Digest bit-vector in protocol-core; AEAD sealing in server/ping (JVM-only crypto)
+- [X] T030 [US2] Implement the **dev** notification aggregation (bitwise-OR + carrier injection) behind the PING front in `server/ping/src/main/scala/` over the dev store, labeled `DEV, NO METADATA PRIVACY` (FR-004/FR-012/Constitution IV) [Phase B] — DevNotificationServer: seal/open, OR-by-label, carrier digest, anti-forge/tamper; oblivious sort/scan/compaction deferred to the sidecar (T053)
 - [X] T031 [US2] Implement the **dev** `ObliviousStore` (in-memory/Postgres KV, no access-pattern privacy, labeled) in `server/pong/src/main/scala/store/dev/` (Constitution VIII/IV) [dev store before sidecar] — in-memory; enforces 256-byte frames, single-use non-recurrent tokens, no-token-reuse
 - [ ] T032 [US2] Wire `sendMessage` (frame+enqueue) and the `notified` engine event in `protocol-core/js/` + Flutter notification indicator in `clients/flutter/lib/notify/` (FR-004)
 

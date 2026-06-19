@@ -67,10 +67,13 @@ lazy val anonymity = (project in file("anonymity"))
 // server: PING/PONG/provider/attestation fronts. Sources live in per-role subdirs to match the
 // plan structure (server/pong/..., server/ping/..., etc.).
 lazy val server = (project in file("server"))
-  .dependsOn(protocolCore)
+  .dependsOn(protocolCore, crypto)
   .settings(
     name := "server",
     scalacOptions ++= commonScalac,
+    // ping aggregation seals tokens via libsodium (crypto, FFM) -> fork tests w/ native access.
+    Test / fork := true,
+    Test / javaOptions += "--enable-native-access=ALL-UNNAMED",
     // ++= keeps the default server/src/main/scala root (where T018 obs/logging will live)
     // alongside the per-role dirs.
     Compile / unmanagedSourceDirectories ++= Seq("pong", "ping", "provider", "attestation")
