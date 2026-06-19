@@ -3,7 +3,7 @@ use chacha20poly1305::{ChaCha20Poly1305, Key, KeyInit, Nonce};
 use oblivious_sidecar::grpc_notify::pb::notification_service_server::NotificationService as _;
 use oblivious_sidecar::grpc_notify::pb::{FetchDigestRequest, SignalRequest};
 use oblivious_sidecar::grpc_notify::NotificationServer;
-use oblivious_sidecar::notify::DIGEST_BYTES;
+use oblivious_sidecar::notify::{DIGEST_BYTES, MAX_BIT};
 use tonic::Request;
 
 const KEY: [u8; 32] = [9u8; 32];
@@ -84,6 +84,39 @@ async fn forged_token_sets_no_bit_with_uniform_response() {
         .into_inner();
     assert_eq!(resp.round_id, 2); // uniform success, no validity leaked
     assert!(fetch(&svc, 2, b"alice").await.iter().all(|&b| b == 0)); // carrier
+}
+
+#[tokio::test]
+async fn a_huge_round_id_does_not_wipe_existing_rounds() {
+    // regression for the round_id-arithmetic eviction DoS: an attacker-controlled huge round_id
+    // must not evict legitimate rounds.
+    let svc = NotificationServer::new(KEY);
+    svc.signal(Request::new(SignalRequest {
+        round_id: 1,
+        sealed_token: seal(3, b"alice", 1),
+    }))
+    .await
+    .unwrap();
+    svc.signal(Request::new(SignalRequest {
+        round_id: u64::MAX,
+        sealed_token: seal(7, b"alice", 2),
+    }))
+    .await
+    .unwrap();
+    assert!(bit_set(&fetch(&svc, 1, b"alice").await, 3)); // round 1 NOT wiped
+}
+
+#[tokio::test]
+async fn out_of_range_bit_is_dropped_not_panicked() {
+    let svc = NotificationServer::new(KEY);
+    // bit == MAX_BIT (512) is out of range; the service must drop it, not panic or set a bit
+    svc.signal(Request::new(SignalRequest {
+        round_id: 1,
+        sealed_token: seal(MAX_BIT, b"alice", 1),
+    }))
+    .await
+    .unwrap();
+    assert!(fetch(&svc, 1, b"alice").await.iter().all(|&b| b == 0));
 }
 
 #[tokio::test]

@@ -8,7 +8,7 @@
 use crate::notify::{oblivious_aggregate, Signal, DIGEST_BYTES, MAX_BIT};
 use chacha20poly1305::aead::Aead;
 use chacha20poly1305::{ChaCha20Poly1305, Key, KeyInit, Nonce};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 use tonic::{Request, Response, Status};
 
@@ -22,7 +22,14 @@ use pb::{FetchDigestRequest, FetchDigestResponse, SignalRequest, SignalResponse}
 
 const NONCE_LEN: usize = 12;
 const TAG_LEN: usize = 16;
-const RETENTION_ROUNDS: u64 = 16;
+/// Bounded retention: keep the most-recently-INSERTED rounds, evicted in insertion order. We do
+/// NOT evict by round_id arithmetic — round_id is attacker-controlled cleartext (it is not bound
+/// into the sealed token), so arithmetic eviction would let a single huge round_id wipe every
+/// legitimate round.
+const MAX_ROUNDS: usize = 1024;
+/// Per-round signal cap: bounds memory/CPU against token replay. AEAD authenticates a token but
+/// does NOT prevent replay of an already-valid ciphertext, so we cap signals per round.
+const MAX_SIGNALS_PER_ROUND: usize = 8192;
 
 /// FNV-1a hash of the (public) aggregation label to a u64 key for the oblivious aggregator. Labels
 /// are public tags, not secrets, so a non-cryptographic hash is appropriate; 64 bits has no
@@ -38,7 +45,7 @@ fn label_key(label: &[u8]) -> u64 {
 
 struct State {
     rounds: HashMap<u64, Vec<Signal>>,
-    max_round: u64,
+    order: VecDeque<u64>, // round-id insertion order, for bounded eviction
 }
 
 /// PING notification server. Holds the server key (to open sealed tokens) and per-round decoded
@@ -55,7 +62,7 @@ impl NotificationServer {
             cipher: ChaCha20Poly1305::new(Key::from_slice(&server_key)),
             state: Mutex::new(State {
                 rounds: HashMap::new(),
-                max_round: 0,
+                order: VecDeque::new(),
             }),
         }
     }
@@ -70,7 +77,8 @@ impl NotificationSvcTrait for NotificationServer {
         let req = req.into_inner();
         // Open the sealed token; a forged/tampered/short token is silently dropped (uniform
         // response — token validity is never leaked to the submitter, FR-003). AEAD authentication
-        // is what stops flooding/impersonation: only a correctly-sealed token decodes.
+        // stops FORGERY/impersonation (a sender can't craft another buddy's bit), but does NOT stop
+        // replay of a valid token — that is bounded by MAX_SIGNALS_PER_ROUND below.
         if req.sealed_token.len() >= NONCE_LEN + TAG_LEN {
             let (nonce, ct) = req.sealed_token.split_at(NONCE_LEN);
             if let Ok(pt) = self.cipher.decrypt(Nonce::from_slice(nonce), ct) {
@@ -82,15 +90,21 @@ impl NotificationSvcTrait for NotificationServer {
                             .state
                             .lock()
                             .map_err(|_| Status::internal("unavailable"))?;
-                        if req.round_id > st.max_round {
-                            st.max_round = req.round_id;
-                            let min = st.max_round.saturating_sub(RETENTION_ROUNDS);
-                            st.rounds.retain(|&r, _| r >= min);
+                        if let Some(sigs) = st.rounds.get_mut(&req.round_id) {
+                            // existing round: cap signals per round (replay/flood bound)
+                            if sigs.len() < MAX_SIGNALS_PER_ROUND {
+                                sigs.push(Signal { label, bit });
+                            }
+                        } else {
+                            // new round: insert and evict the oldest-inserted round if over the cap
+                            st.rounds.insert(req.round_id, vec![Signal { label, bit }]);
+                            st.order.push_back(req.round_id);
+                            if st.order.len() > MAX_ROUNDS {
+                                if let Some(old) = st.order.pop_front() {
+                                    st.rounds.remove(&old);
+                                }
+                            }
                         }
-                        st.rounds
-                            .entry(req.round_id)
-                            .or_default()
-                            .push(Signal { label, bit });
                     }
                 }
             }

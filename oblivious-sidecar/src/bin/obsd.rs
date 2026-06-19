@@ -12,8 +12,8 @@ use std::sync::{Arc, Mutex};
 /// Parse a 64-hex-char env var into a 32-byte key.
 fn hex_key(var: &str) -> Option<[u8; 32]> {
     let s = std::env::var(var).ok()?;
-    if s.len() != 64 {
-        return None;
+    if s.len() != 64 || !s.is_ascii() {
+        return None; // is_ascii ensures 1 byte per char, so the slicing below can't split a char
     }
     let mut out = [0u8; 32];
     for (i, byte) in out.iter_mut().enumerate() {
