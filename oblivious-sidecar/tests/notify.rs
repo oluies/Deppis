@@ -23,6 +23,12 @@ fn client_with_no_signals_gets_carrier() {
     assert_eq!(out, vec![CARRIER, CARRIER]);
 }
 
+#[test]
+#[should_panic(expected = "signal bit must be")]
+fn out_of_range_bit_panics_not_silently_drops() {
+    oblivious_aggregate(&[Signal { label: 1, bit: MAX_BIT }], &[1]);
+}
+
 proptest! {
     /// The oblivious aggregation matches a plain reference: each client's digest is the OR of the
     /// one-hot bits of signals carrying its label.
