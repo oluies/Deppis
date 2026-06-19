@@ -33,3 +33,15 @@ class GrooveStubSpec extends AnyFunSuite:
 
   test("negative count is rejected"):
     assert(GrooveStub().fetch(1L, -1).isLeft)
+
+  test("concurrent submit/fetch does not throw and preserves the multiset"):
+    import scala.concurrent.{Await, Future}
+    import scala.concurrent.ExecutionContext.Implicits.global
+    import scala.concurrent.duration.*
+    val g  = GrooveStub()
+    val fs = frames(200)
+    val submits = fs.map(f => Future(g.submit(3L, f)))
+    val fetches = (0 until 50).map(_ => Future(g.fetch(3L, 200))) // racing reads during writes
+    Await.result(Future.sequence(submits ++ fetches), 30.seconds)
+    val out = g.fetch(3L, 200).toOption.get
+    assert(out.map(hex).sorted == fs.map(hex).sorted)
