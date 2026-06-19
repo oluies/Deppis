@@ -15,13 +15,16 @@ import scala.concurrent.{ExecutionContext, Future}
   *   - `fetchDigest` consumes the client's accumulated digest (`digestAndReset`), so a retrieved
   *     notification is not re-reported; an empty round returns an all-zero carrier digest. */
 final class NotificationServiceImpl(ns: DevNotificationServer)(using ec: ExecutionContext) extends NotificationService:
+  // Surface the backend's privacy status so a dev/no-privacy build is never silently served
+  // (Constitution IV — labeling rule).
+  System.err.println(s"[transport] NotificationService bound to backend: ${ns.label} (metadataPrivate=${ns.metadataPrivate})")
 
   def signal(req: SignalRequest): Future[SignalResponse] = Future {
-    ns.signal(req.sealedToken.toByteArray) // result intentionally ignored (uniform response)
+    ns.signal(req.roundId, req.sealedToken.toByteArray) // result intentionally ignored (uniform response)
     SignalResponse(roundId = req.roundId)
   }
 
   def fetchDigest(req: FetchDigestRequest): Future[FetchDigestResponse] = Future {
-    val digest = ns.digestAndReset(req.clientLabel.toByteArray)
+    val digest = ns.digestAndReset(req.roundId, req.clientLabel.toByteArray)
     FetchDigestResponse(roundId = req.roundId, digest = ByteString.copyFrom(digest.bytes))
   }

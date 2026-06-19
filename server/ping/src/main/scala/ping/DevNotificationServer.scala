@@ -21,9 +21,10 @@ final class DevNotificationServer(serverKey: Array[Byte]):
   require(serverKey.length == Crypto.KeyBytes, s"server key must be ${Crypto.KeyBytes} bytes")
 
   private val rng    = new SecureRandom()
-  // aggregation label (hex) -> digest; ConcurrentHashMap.compute makes the per-label OR atomic
-  // under concurrent submissions.
-  private val rounds = new ConcurrentHashMap[String, Digest]()
+  // (roundId, aggregation label hex) -> digest; ConcurrentHashMap.compute makes the per-key OR
+  // atomic under concurrent submissions. Keying by round honors the proto's per-round scope:
+  // signals in different rounds never mix, and a fetch only clears its own round.
+  private val rounds = new ConcurrentHashMap[(Long, String), Digest]()
 
   val label: String            = Privacy.DevLabel
   def metadataPrivate: Boolean = false
@@ -36,9 +37,9 @@ final class DevNotificationServer(serverKey: Array[Byte]):
       Notification.serialize(NotificationToken(bitPosition, aggLabel)))
     nonce ++ ct
 
-  /** Sender-side submit: flips exactly the token's bit under its label. Rejects forged/tampered
-    * blobs (AEAD authentication). */
-  def signal(sealedToken: Array[Byte]): Either[String, Unit] =
+  /** Sender-side submit: flips exactly the token's bit under (round, label). Rejects
+    * forged/tampered blobs (AEAD authentication). */
+  def signal(roundId: Long, sealedToken: Array[Byte]): Either[String, Unit] =
     if sealedToken.length < Crypto.NonceBytes then Left("malformed sealed token")
     else
       val (nonce, ct) = sealedToken.splitAt(Crypto.NonceBytes)
@@ -46,22 +47,22 @@ final class DevNotificationServer(serverKey: Array[Byte]):
         .aeadOpen(serverKey, nonce, Array.emptyByteArray, ct)
         .flatMap(Notification.deserialize)
         .map { tok =>
-          val k = hex(tok.label)
-          // atomic OR: a concurrent signal for the same label cannot clobber another's bit.
+          val k = (roundId, hex(tok.label))
+          // atomic OR: a concurrent signal for the same (round,label) cannot clobber another's bit.
           rounds.compute(k, (_, cur) => (if cur == null then Digest.empty else cur).set(tok.bitPosition))
           ()
         }
 
-  /** Per-client digest (non-destructive peek). Returns a carrier (all-zero, uniform) when the
-    * client has no waiting mail, so the response never reveals whether — or from which buddy —
-    * mail arrived. */
-  def digest(aggLabel: Array[Byte]): Digest =
-    Option(rounds.get(hex(aggLabel))).getOrElse(Digest.carrier)
+  /** Per-client digest for a round (non-destructive peek). Returns a carrier (all-zero, uniform)
+    * when the client has no waiting mail, so the response never reveals whether — or from which
+    * buddy — mail arrived. */
+  def digest(roundId: Long, aggLabel: Array[Byte]): Digest =
+    Option(rounds.get((roundId, hex(aggLabel)))).getOrElse(Digest.carrier)
 
-  /** Consume-on-read: atomically return the client's digest and clear its accumulated bits, so a
+  /** Consume-on-read for a round: atomically return the client's digest and clear its bits, so a
     * retrieved notification is not re-reported and `rounds` does not grow without bound. Returns
     * a carrier when there is no waiting mail. */
-  def digestAndReset(aggLabel: Array[Byte]): Digest =
-    Option(rounds.remove(hex(aggLabel))).getOrElse(Digest.carrier)
+  def digestAndReset(roundId: Long, aggLabel: Array[Byte]): Digest =
+    Option(rounds.remove((roundId, hex(aggLabel)))).getOrElse(Digest.carrier)
 
   private def hex(b: Array[Byte]): String = b.map(x => f"${x & 0xff}%02x").mkString
