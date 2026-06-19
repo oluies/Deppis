@@ -2,8 +2,10 @@ package transport
 
 import metadatamessenger.store.v1.{store as spb}
 import store.ObliviousStore
+import frame.Frame
 import privacy.Privacy
 import com.google.protobuf.ByteString
+import scala.util.control.NonFatal
 
 /** Enclave-target `ObliviousStore` front (T054, Constitution VIII): implements the `ObliviousStore`
   * interface by calling the `ObliviousStore` gRPC service — in real deployment the Rust oblivious
@@ -20,25 +22,36 @@ final class EnclaveObliviousStore(
   def metadataPrivate: Boolean = attested
   def label: String            = if attested then "METADATA PRIVATE" else Privacy.DevLabel
 
+  // gRPC failures surface as exceptions from the blocking stub; map them to the trait's Left
+  // channel. Error text is generic (no secret-dependent content, Constitution II).
   def write(writeToken: Array[Byte], frame: Array[Byte]): Either[String, Unit] =
-    stub.writeBatch(
-      spb.WriteBatchRequest(
-        roundId = 0L,
-        batchSize = 1,
-        entries = Seq(spb.WriteEntry(writeToken = ByteString.copyFrom(writeToken), frame = ByteString.copyFrom(frame)))
+    try
+      stub.writeBatch(
+        spb.WriteBatchRequest(
+          roundId = 0L,
+          batchSize = 1,
+          entries = Seq(spb.WriteEntry(writeToken = ByteString.copyFrom(writeToken), frame = ByteString.copyFrom(frame)))
+        )
       )
-    )
-    Right(())
+      Right(())
+    catch case NonFatal(_) => Left("store write failed")
 
   def read(retrievalToken: Array[Byte]): Either[String, Option[Array[Byte]]] =
-    val resp = stub.readBatch(
-      spb.ReadBatchRequest(
-        roundId = 0L,
-        batchSize = 1,
-        entries = Seq(spb.ReadEntry(retrievalToken = ByteString.copyFrom(retrievalToken)))
+    try
+      val resp = stub.readBatch(
+        spb.ReadBatchRequest(
+          roundId = 0L,
+          batchSize = 1,
+          entries = Seq(spb.ReadEntry(retrievalToken = ByteString.copyFrom(retrievalToken)))
+        )
       )
-    )
-    val sealedBytes = resp.results.head.sealedResult.toByteArray
-    // carrier (all-zero) => miss; any content => hit. An empty-payload frame is indistinguishable
-    // from a miss at this bridge, but real frames carry a non-zero length prefix.
-    Right(if sealedBytes.forall(_ == 0) then None else Some(sealedBytes))
+      resp.results.headOption match
+        case None => Left("empty store response")
+        case Some(r) =>
+          val b = r.sealedResult.toByteArray
+          // sealed_result = frame (256B) ‖ found tag (1B); the tag carries hit/miss (see contract),
+          // so an empty-payload frame is not mistaken for a miss.
+          if b.length != Frame.Size + 1 then Left("malformed sealed_result")
+          else if b(Frame.Size) == 1.toByte then Right(Some(b.take(Frame.Size)))
+          else Right(None)
+    catch case NonFatal(_) => Left("store read failed")

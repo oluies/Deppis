@@ -46,3 +46,20 @@ class EnclaveObliviousStoreSpec extends AnyFunSuite:
 
   test("a miss returns None (carrier)"):
     withEnclave(attested = true)(e => assert(e.read("nope".getBytes).toOption.flatten.isEmpty))
+
+  test("an empty-payload frame round-trips as a hit (found tag, not content)"):
+    withEnclave(attested = true) { e =>
+      val tok   = "empty".getBytes
+      val empty = Frame.carrier() // valid empty-payload frame — byte-identical to a carrier
+      assert(e.write(tok, empty).isRight)
+      // must be Some(empty), NOT None: the found tag distinguishes a stored empty frame from a miss
+      assert(e.read(tok).toOption.flatten.exists(_.sameElements(empty)))
+    }
+
+  test("unattested front serves data on a real path but surfaces the DEV label"):
+    withEnclave(attested = false) { e =>
+      assert(!e.metadataPrivate && e.label == Privacy.DevLabel)
+      val tok = "t".getBytes
+      assert(e.write(tok, frame(3)).isRight)
+      assert(e.read(tok).toOption.flatten.exists(_.sameElements(frame(3))))
+    }

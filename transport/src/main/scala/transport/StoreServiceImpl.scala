@@ -21,7 +21,12 @@ final class StoreServiceImpl(store: ObliviousStore)(using ec: ExecutionContext)
 
   def readBatch(req: spb.ReadBatchRequest): Future[spb.ReadBatchResponse] = Future {
     val results = req.entries.map { e =>
-      val sealedBytes = store.read(e.retrievalToken.toByteArray).toOption.flatten.getOrElse(Frame.carrier())
+      // sealed_result = frame (256B) ‖ found tag (1B). The explicit tag carries hit/miss, so an
+      // empty-payload frame (byte-identical to a carrier) is not lost. Both branches are 257 bytes,
+      // so the result length is uniform (hit/miss not observable from length).
+      val sealedBytes = store.read(e.retrievalToken.toByteArray).toOption.flatten match
+        case Some(f) => f ++ Array[Byte](1)
+        case None    => Frame.carrier() ++ Array[Byte](0)
       spb.ReadResult(sealedResult = ByteString.copyFrom(sealedBytes))
     }
     spb.ReadBatchResponse(roundId = req.roundId, results = results)
