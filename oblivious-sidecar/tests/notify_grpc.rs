@@ -99,6 +99,7 @@ async fn a_huge_round_id_does_not_wipe_existing_rounds() {
     signal(&svc, 1, seal(1, 3, b"alice", 1)).await;
     signal(&svc, u64::MAX, seal(u64::MAX, 7, b"alice", 2)).await;
     assert!(bit_set(&fetch(&svc, 1, b"alice").await, 3)); // round 1 NOT wiped
+    assert!(bit_set(&fetch(&svc, u64::MAX, b"alice").await, 7)); // high-bit round-bound token accepted
 }
 
 #[tokio::test]

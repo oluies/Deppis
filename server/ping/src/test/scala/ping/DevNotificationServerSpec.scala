@@ -46,6 +46,12 @@ class DevNotificationServerSpec extends AnyFunSuite:
     assert(s.digest(2L, labelA).isEmpty) // different round, nothing
     assert(s.digest(1L, labelA).get(4)) // original round still has it
 
+  test("a high-bit (uint64) round binds correctly (-1L == u64::MAX)"):
+    val s = server()
+    assert(s.signal(-1L, s.issueToken(-1L, 5, labelA)).isRight) // accepted in its own (high-bit) round
+    assert(s.digest(-1L, labelA).get(5))
+    assert(s.signal(2L, s.issueToken(-1L, 5, labelA)).isLeft) // bound to -1L, rejected at round 2
+
   test("a token bound to one round cannot be replayed into another (round binding)"):
     val s   = server()
     val tok = s.issueToken(1L, 4, labelA) // bound to round 1
