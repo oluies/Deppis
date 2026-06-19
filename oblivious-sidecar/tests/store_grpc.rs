@@ -91,6 +91,53 @@ async fn rejects_wrong_token_length() {
 }
 
 #[tokio::test]
+async fn malformed_entry_does_not_burn_earlier_tokens() {
+    let s = svc(8);
+    let tok = vec![7u8; TOKEN_LEN];
+    s.write_batch(Request::new(WriteBatchRequest {
+        round_id: 0,
+        batch_size: 1,
+        entries: vec![WriteEntry {
+            write_token: tok.clone(),
+            frame: vec![42u8; FRAME_LEN],
+        }],
+    }))
+    .await
+    .unwrap();
+
+    // a batch whose 2nd entry is malformed must be rejected WITHOUT consuming the valid 1st token
+    let bad = s
+        .read_batch(Request::new(ReadBatchRequest {
+            round_id: 0,
+            batch_size: 2,
+            entries: vec![
+                ReadEntry {
+                    retrieval_token: tok.clone(),
+                },
+                ReadEntry {
+                    retrieval_token: vec![1u8; 8], // malformed
+                },
+            ],
+        }))
+        .await;
+    assert_eq!(bad.unwrap_err().code(), tonic::Code::InvalidArgument);
+
+    // the valid token is still present (not burned) -> found tag 1
+    let ok = s
+        .read_batch(Request::new(ReadBatchRequest {
+            round_id: 0,
+            batch_size: 1,
+            entries: vec![ReadEntry {
+                retrieval_token: tok,
+            }],
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(ok.results[0].sealed_result[FRAME_LEN], 1);
+}
+
+#[tokio::test]
 async fn rejects_batch_size_mismatch() {
     let s = svc(4);
     let r = s

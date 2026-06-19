@@ -62,15 +62,25 @@ impl ObliviousStoreSvc for StoreService {
     ) -> Result<Response<WriteBatchResponse>, Status> {
         let req = req.into_inner();
         check_batch(req.batch_size, req.entries.len())?;
+        // Validate ALL entries up front so a malformed entry can't leave the store partially
+        // mutated (all-or-nothing); only then lock and apply.
+        let parsed = req
+            .entries
+            .iter()
+            .map(|e| {
+                Ok((
+                    exact::<TOKEN_LEN>(&e.write_token, "write_token")?,
+                    exact::<FRAME_LEN>(&e.frame, "frame")?,
+                ))
+            })
+            .collect::<Result<Vec<([u8; TOKEN_LEN], [u8; FRAME_LEN])>, Status>>()?;
         let mut store = self
             .store
             .lock()
             .map_err(|_| Status::internal("store unavailable"))?;
-        for e in &req.entries {
-            let token = exact::<TOKEN_LEN>(&e.write_token, "write_token")?;
-            let frame = exact::<FRAME_LEN>(&e.frame, "frame")?;
+        for (token, frame) in &parsed {
             // A full store silently drops (dev); the store enforces non-recurrence.
-            let _ = store.write(&token, &frame);
+            let _ = store.write(token, frame);
         }
         Ok(Response::new(WriteBatchResponse {
             round_id: req.round_id,
@@ -83,14 +93,20 @@ impl ObliviousStoreSvc for StoreService {
     ) -> Result<Response<ReadBatchResponse>, Status> {
         let req = req.into_inner();
         check_batch(req.batch_size, req.entries.len())?;
+        // Validate all tokens up front (all-or-nothing) so a malformed entry never burns earlier
+        // single-use tokens before the call rejects.
+        let tokens = req
+            .entries
+            .iter()
+            .map(|e| exact::<TOKEN_LEN>(&e.retrieval_token, "retrieval_token"))
+            .collect::<Result<Vec<[u8; TOKEN_LEN]>, Status>>()?;
         let mut store = self
             .store
             .lock()
             .map_err(|_| Status::internal("store unavailable"))?;
-        let mut results = Vec::with_capacity(req.entries.len());
-        for e in &req.entries {
-            let token = exact::<TOKEN_LEN>(&e.retrieval_token, "retrieval_token")?;
-            let (frame, found) = store.read_sealed(&token);
+        let mut results = Vec::with_capacity(tokens.len());
+        for token in &tokens {
+            let (frame, found) = store.read_sealed(token);
             // sealed_result = frame (256B) ‖ found tag (1B): uniform 257-byte length. NOTE: this
             // DEV impl returns CLEARTEXT (frame+tag), so hit/miss is distinguishable by content to
             // the store host — acceptable only under the DEV/NO-METADATA-PRIVACY label. Only the
