@@ -1,0 +1,20 @@
+version: 2
+# Dependabot covers the ecosystems Scala Steward does not: Cargo (the Rust oblivious-sidecar) and
+# GitHub Actions (also clears the Node-20 action-version deprecation). Scala/sbt deps are handled
+# by Scala Steward (.github/workflows/scala-steward.yml).
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      github-actions:
+        patterns: ["*"]
+
+  - package-ecosystem: "cargo"
+    directory: "/oblivious-sidecar"
+    schedule:
+      interval: "weekly"
+    groups:
+      cargo:
+        patterns: ["*"]
