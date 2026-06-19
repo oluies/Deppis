@@ -14,7 +14,11 @@ struct Slot {
 
 impl Slot {
     fn empty() -> Self {
-        Slot { occupied: 0, token: [0u8; TOKEN_LEN], frame: [0u8; FRAME_LEN] }
+        Slot {
+            occupied: 0,
+            token: [0u8; TOKEN_LEN],
+            frame: [0u8; FRAME_LEN],
+        }
     }
 }
 
@@ -59,13 +63,13 @@ impl ObliviousStore {
             let is_free = slot.occupied.ct_eq(&0u8);
             let take = is_free & !placed; // first free slot only
             slot.occupied.conditional_assign(&1u8, take);
-            for k in 0..TOKEN_LEN {
-                slot.token[k].conditional_assign(&token[k], take);
+            for (dst, src) in slot.token.iter_mut().zip(token.iter()) {
+                dst.conditional_assign(src, take);
             }
-            for k in 0..FRAME_LEN {
-                slot.frame[k].conditional_assign(&frame[k], take);
+            for (dst, src) in slot.frame.iter_mut().zip(frame.iter()) {
+                dst.conditional_assign(src, take);
             }
-            placed = placed | take;
+            placed |= take;
             #[cfg(test)]
             {
                 touched += 1;
@@ -86,12 +90,12 @@ impl ObliviousStore {
         for slot in self.slots.iter_mut() {
             let occ = slot.occupied.ct_eq(&1u8);
             let matches = occ & slot.token.as_slice().ct_eq(token.as_slice());
-            for k in 0..FRAME_LEN {
-                result[k].conditional_assign(&slot.frame[k], matches); // capture frame first
-                slot.frame[k].conditional_assign(&0u8, matches); // then erase on consume
+            for (r, f) in result.iter_mut().zip(slot.frame.iter_mut()) {
+                r.conditional_assign(f, matches); // capture frame first
+                f.conditional_assign(&0u8, matches); // then erase on consume
             }
-            for k in 0..TOKEN_LEN {
-                slot.token[k].conditional_assign(&0u8, matches); // erase token on consume
+            for t in slot.token.iter_mut() {
+                t.conditional_assign(&0u8, matches); // erase token on consume
             }
             slot.occupied.conditional_assign(&0u8, matches); // mark free (non-recurrent)
             #[cfg(test)]

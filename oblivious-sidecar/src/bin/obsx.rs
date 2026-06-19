@@ -21,22 +21,26 @@ fn main() {
                 .collect();
             oblivious_sort(&mut recs);
             let sorted = recs.windows(2).all(|w| w[0].key <= w[1].key)
-                && recs.iter().all(|r| r.payload == vec![(r.key & 0xff) as u8; 2]);
+                && recs
+                    .iter()
+                    .all(|r| r.payload == vec![(r.key & 0xff) as u8; 2]);
 
             let keep = vec![true, false, true, false, true, false];
             let mut c: Vec<Record> = (0..6).map(|i| Record::new(0, vec![i as u8; 1])).collect();
             oblivious_compact(&mut c, &keep);
-            let compacted = c.iter().take(3).map(|r| r.payload[0]).collect::<Vec<_>>() == vec![0u8, 2, 4];
+            let compacted =
+                c.iter().take(3).map(|r| r.payload[0]).collect::<Vec<_>>() == vec![0u8, 2, 4];
 
             // oblivious store round-trip: write -> read (hit) -> read again (single-use carrier)
             let mut store = ObliviousStore::with_capacity(4);
             store.write(&[3u8; 32], &[42u8; 256]);
-            let store_ok = store.read(&[3u8; 32]) == [42u8; 256] && store.read(&[3u8; 32]) == [0u8; 256];
+            let store_ok =
+                store.read(&[3u8; 32]) == [42u8; 256] && store.read(&[3u8; 32]) == [0u8; 256];
 
             // `constantTime` reflects an actual functional check of the ct primitive (its
             // constant-timeness is by construction via `subtle`; this validates correctness).
-            let constant_time =
-                ct_select_u64(Choice::from(1), 7, 9) == 7 && ct_select_u64(Choice::from(0), 7, 9) == 9;
+            let constant_time = ct_select_u64(Choice::from(1), 7, 9) == 7
+                && ct_select_u64(Choice::from(0), 7, 9) == 9;
 
             println!(
                 "{{\"constantTime\":{},\"obliviousInvariants\":{}}}",

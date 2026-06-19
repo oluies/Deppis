@@ -26,7 +26,13 @@ fn client_with_no_signals_gets_carrier() {
 #[test]
 #[should_panic(expected = "signal bit must be")]
 fn out_of_range_bit_panics_not_silently_drops() {
-    oblivious_aggregate(&[Signal { label: 1, bit: MAX_BIT }], &[1]);
+    oblivious_aggregate(
+        &[Signal {
+            label: 1,
+            bit: MAX_BIT,
+        }],
+        &[1],
+    );
 }
 
 proptest! {

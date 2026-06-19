@@ -24,13 +24,13 @@ thread_local! {
 /// Constant-time set of `bit` in `digest` when `cond`. Scans ALL digest bytes and conditionally
 /// sets the target byte, so the byte touched is not revealed by a data-dependent index.
 fn ct_set_bit(digest: &mut [u8; DIGEST_BYTES], bit: u16, cond: Choice) {
-    let byte_idx = (bit >> 3) as u16;
+    let byte_idx = bit >> 3;
     let mask = 1u8 << (bit & 7);
-    for i in 0..DIGEST_BYTES {
+    for (i, d) in digest.iter_mut().enumerate() {
         let is_target = (i as u16).ct_eq(&byte_idx);
         let set = cond & is_target;
-        let with_bit = digest[i] | mask;
-        digest[i].conditional_assign(&with_bit, set);
+        let with_bit = *d | mask;
+        d.conditional_assign(&with_bit, set);
         #[cfg(test)]
         BYTE_VISITS.with(|c| c.set(c.get() + 1));
     }

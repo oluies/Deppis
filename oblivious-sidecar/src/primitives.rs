@@ -104,7 +104,11 @@ pub fn oblivious_sort(records: &mut Vec<Record>) {
 /// records are the kept ones (count is public). `record.key` is PRESERVED — compaction sorts by a
 /// synthetic `(!keep, original_index)` key carried alongside each record, never overwriting it.
 pub fn oblivious_compact(records: &mut Vec<Record>, keep: &[bool]) {
-    assert_eq!(records.len(), keep.len(), "keep mask must match record count");
+    assert_eq!(
+        records.len(),
+        keep.len(),
+        "keep mask must match record count"
+    );
     let n = records.len();
     if n == 0 {
         return;

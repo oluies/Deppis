@@ -32,10 +32,10 @@ Multi-component layout (plan.md): `protocol-core/`, `crypto/`, `server/`, `obliv
 - [ ] T002 Initialize the sbt cross-build (Scala 3) for `protocol-core` (JVM + Scala.js) and `crypto`/`server` JVM modules in `build.sbt`, with **pinned** dependency versions
 - [X] T003 [P] Initialize the Rust `oblivious-sidecar` crate with pinned deps in `oblivious-sidecar/Cargo.toml` — subtle (constant-time) + proptest, pinned; Cargo.lock committed
 - [ ] T004 [P] Initialize the Flutter app skeleton in `clients/flutter/`
-- [ ] T005 [P] Configure linting/formatting: scalafmt + scalafix (`/.scalafmt.conf`), rustfmt + clippy (`oblivious-sidecar/`), `dart format`/`flutter analyze`
+- [ ] T005 [P] Configure linting/formatting: scalafmt + scalafix (`/.scalafmt.conf`), rustfmt + clippy (`oblivious-sidecar/`), `dart format`/`flutter analyze` — PARTIAL: rustfmt + clippy (`-D warnings`) enforced in CI; `.scalafmt.conf` present (CI scalafmt check + Flutter analyze pending)
 - [X] T006 [P] Add ScalaPB codegen for the contracts in `specs/001-metadata-private-messenger/contracts/*.proto` wired into `build.sbt` — sbt-protoc + ScalaPB in `transport` module; `messaging.proto` compiles to message + gRPC stubs
-- [ ] T007 [P] Add a reproducible-build + dependency-pinning CI check and a secret-scanning gate in `deploy/ci/` (Constitution XI)
-- [ ] T008 [P] Add a CI gate asserting no release artifact reports `metadataPrivate:false` and that the `DEV, NO METADATA PRIVACY` label is present in dev builds (Constitution IV / FR-016)
+- [X] T007 [P] Add a reproducible-build + dependency-pinning CI check and a secret-scanning gate in `deploy/ci/` (Constitution XI) — `.github/workflows/ci.yml` hygiene job: pinned-sbt + Cargo.lock check + gitleaks secret scan
+- [X] T008 [P] Add a CI gate asserting no release artifact reports `metadataPrivate:false` and that the `DEV, NO METADATA PRIVACY` label is present in dev builds (Constitution IV / FR-016) — CI labeling gate runs `pstatus show`, asserts metadataPrivate:false + the dev label on a build without the real backend
 
 ---
 

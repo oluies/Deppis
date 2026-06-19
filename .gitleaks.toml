@@ -1,0 +1,21 @@
+# gitleaks config for the secret scan (CI hygiene job, T007).
+# Uses the default rule set; allowlists known PUBLIC test fixtures (KAT vectors, test keys) so the
+# gate flags real leaked credentials without false-positiving on published test data.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "public test vectors and fixtures (not secrets)"
+regexTarget = "match"
+paths = [
+  '''.*Spec\.scala$''',                       # ScalaCheck/ScalaTest specs (test keys, fixtures)
+  '''crypto/src/main/scala/crypto/Kat\.scala$''', # RFC 8439 / RFC 7693 published vectors
+  '''oblivious-sidecar/src/bin/obsx\.rs$''',  # selftest fixtures
+  '''oblivious-sidecar/tests/.*\.rs$''',       # Rust property-test fixtures
+  '''specs/.*''',                              # spec/contract docs
+]
+# The dev HMAC key literal used only by the retrieval-token / handshake unit tests.
+regexes = [
+  '''test-key-0123456789abcdef''',
+]
