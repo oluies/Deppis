@@ -1,6 +1,5 @@
 package transport
 
-import crypto.Crypto
 import org.scalatest.funsuite.AnyFunSuite
 
 /** Smoke test for the headless demo: drives `DeppisDemo.run` against the REAL Rust `obsd` (via the
@@ -10,7 +9,7 @@ import org.scalatest.funsuite.AnyFunSuite
 class DeppisDemoSpec extends AnyFunSuite with ObsdHarness:
 
   test("DeppisDemo.run delivers Alice's message to Bob through obsd"):
-    val notifyKey = Array.tabulate(Crypto.KeyBytes)(i => (i * 7 + 3).toByte)
+    val notifyKey = DeppisDemo.devNotifyKey // single source — obsd + demo must agree
     withObsd(notifyKey) { channel =>
       assert(DeppisDemo.run(channel, notifyKey), "the demo should deliver the message end-to-end")
     }

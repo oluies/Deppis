@@ -29,9 +29,12 @@ object DeppisDemo:
 
   private def log(who: String, msg: String): Unit = println(f"  [$who%-5s] $msg")
 
+  /** The dev notify key obsd opens tokens with AND the PING-front stand-in seals with — one source
+    * so the two never silently diverge. A fresh array per call (never shared mutable state). */
+  private[transport] def devNotifyKey: Array[Byte] = Array.tabulate(Crypto.KeyBytes)(i => (i * 7 + 3).toByte)
+
   def main(args: Array[String]): Unit =
-    // obsd opens notify tokens with this key; the PING-front stand-in seals with the SAME key.
-    val notifyKey = Array.tabulate(Crypto.KeyBytes)(i => (i * 7 + 3).toByte)
+    val notifyKey = devNotifyKey
     val bin = findObsd().getOrElse {
       System.err.println(
         "obsd binary not found. Build it with `cargo build --bin obsd` in oblivious-sidecar/, " +
@@ -42,18 +45,23 @@ object DeppisDemo:
     val port = freePort()
     println(s"  spawning obsd (real Rust sidecar) on 127.0.0.1:$port …")
     val proc = startObsd(bin, port, notifyKey)
-    try
-      if !awaitReady(port, 10000) then
-        System.err.println(s"obsd did not become ready on port $port")
-        sys.exit(3)
-      val channel = ManagedChannelBuilder.forAddress("127.0.0.1", port).usePlaintext().build()
-      val delivered =
-        try run(channel, notifyKey)
-        finally channel.shutdownNow()
-      sys.exit(if delivered then 0 else 1)
-    finally
-      proc.destroy()
-      if !proc.waitFor(5, TimeUnit.SECONDS) then proc.destroyForcibly()
+    // Compute the exit code INSIDE try/finally, then exit AFTER teardown — sys.exit halts the JVM
+    // without running finally, which would orphan the spawned obsd (it holds its port).
+    val code =
+      try
+        if !awaitReady(port, 10000) then
+          System.err.println(s"obsd did not become ready on port $port")
+          3
+        else
+          val channel = ManagedChannelBuilder.forAddress("127.0.0.1", port).usePlaintext().build()
+          val delivered =
+            try run(channel, notifyKey)
+            finally channel.shutdownNow()
+          if delivered then 0 else 1
+      finally
+        proc.destroy()
+        if !proc.waitFor(5, TimeUnit.SECONDS) then proc.destroyForcibly()
+    sys.exit(code)
 
   /** Drive the whole flow against an already-connected `obsd` channel. Returns `true` iff Alice's
     * message reached Bob. Pure of process management / `sys.exit`, so the integration suite can run
@@ -113,6 +121,11 @@ object DeppisDemo:
     while !delivered && round <= maxRounds do
       val ad        = alice.tick(round).toOption.get
       val aliceReal = !ad.carrier
+      // DEV stand-in only: signalling obsd ONLY on real rounds makes the notify RPC volume depend on
+      // whether a real message was sent — an active-vs-idle distinguisher at the front. The engine's
+      // own store traffic is already uniform; the REAL PONG/PING front MUST likewise decouple signal
+      // timing/volume from real-message presence (aggregation + cover signalling). Safe here only
+      // because the whole run is DEV, NO METADATA PRIVACY.
       if aliceReal then pingSignal.signal(round, sealer.issueToken(round, bobBit, bobLabel))
       log("alice", f"round $round: wrote ${if aliceReal then "REAL  frame" else "cover frame"} (256B, indistinguishable)")
 
