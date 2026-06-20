@@ -81,9 +81,9 @@ lazy val crypto = (project in file("crypto"))
     Test / javaOptions += "--enable-native-access=ALL-UNNAMED",
     libraryDependencies ++= testDeps ++ Seq(
       "com.lihaoyi"      %% "upickle"        % V.upickle,
-      // Audited Signal double-ratchet (T012, Constitution I — no hand-rolled ratchet). The original
-      // pure-JVM libsignal-protocol implementation; we wrap it, never reimplement the ratchet.
-      "org.whispersystems" % "signal-protocol-java" % "2.8.1",
+      // Audited Signal double-ratchet (T012/T012a, Constitution I — no hand-rolled ratchet). The
+      // MAINTAINED libsignal (Rust core + Java bindings); we wrap it, never reimplement the ratchet.
+      "org.signal" % "libsignal-client" % "0.61.0",
       // independent vetted Blake2b impl, used only to cross-validate libsodium in KATs
       "org.bouncycastle"  % "bcprov-jdk18on" % "1.78.1" % Test
     )
