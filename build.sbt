@@ -25,7 +25,7 @@ lazy val commonScalac = Seq("-deprecation", "-feature", "-unchecked", "-Wunused:
 
 // protocol-core is the single source of truth (Constitution VII), cross-compiled to JVM + Scala.js
 // from ONE set of `shared/` sources. The ONLY platform-specific file is `kdf/Kdf.scala` (JVM = JCA
-// HMAC; JS = Node-crypto HMAC) — both vetted, both synchronous, so the two builds are identical.
+// HMAC; JS = @noble/hashes HMAC) — both vetted, both synchronous, so the two builds are identical.
 lazy val protocolCore = (project in file("protocol-core"))
   .settings(
     name := "protocol-core",

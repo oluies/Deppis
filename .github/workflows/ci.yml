@@ -25,6 +25,11 @@ jobs:
           distribution: temurin
           java-version: "24" # Foreign Function & Memory API is final since 22
       - uses: sbt/setup-sbt@v1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22" # the aggregated `sbt test` also runs protocolCoreJS tests under Node
+      - name: Install the vetted JS crypto dep (@noble/hashes) for the Scala.js tests
+        run: npm ci
       - uses: actions/cache@v5
         with:
           path: |
