@@ -1,14 +1,14 @@
 import 'package:flutter/material.dart';
 
-import 'engine/dev_engine.dart';
+import 'engine/engine_factory.dart';
 import 'engine/protocol_engine.dart';
 import 'state/app_state.dart';
 import 'ui/home_screen.dart';
 
 void main() {
-  // The dev stand-in engine. Swapped for the Scala.js `protocol-core` binding
-  // (T019) once it lands — the UI talks only to [ProtocolEngine].
-  runApp(MetadataMessengerApp(engine: DevEngine()));
+  // Platform-selected engine: the real Scala.js `protocol-core` engine (T019) on web when its
+  // bundle is loaded, the labeled DevEngine otherwise. The UI talks only to [ProtocolEngine].
+  runApp(MetadataMessengerApp(engine: createEngine()));
 }
 
 class MetadataMessengerApp extends StatefulWidget {
