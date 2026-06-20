@@ -117,13 +117,35 @@ class RoundTransportSpec extends AnyFunSuite:
       e.tick(r)
     assert(t.submits.size == 5, "exactly one store write per round (no missing/extra writes)")
 
-  test("active and idle traces are indistinguishable in the observable metadata (T040)"):
+  test("one store write per round holds under a transient submit failure (actual store, not attempts)"):
+    val t = FakeTransport()
+    val (e, pairId) = confirmedEngine(t, BuddyRole.Initiator)
+    // Idle round with the backend up ⇒ exactly one cover frame lands in the store.
+    e.tick(1)
+    assert(t.store.size == 1, "an idle round writes one cover frame")
+    // Idle round with the backend down ⇒ one write ATTEMPT, nothing lands (store unchanged).
+    t.acceptSubmit = false
+    e.tick(2)
+    assert(t.submits.size == 2, "still exactly one write attempt this round")
+    assert(t.store.size == 1, "the failed cover write does not land — and is not silently doubled")
+    // Real message while the backend is down ⇒ one attempt, frame stays queued, store unchanged.
+    e.sendMessage(pairId, "later")
+    e.tick(3)
+    assert(t.submits.size == 3 && t.store.size == 1)
+    // Backend recovers ⇒ the queued real frame is delivered (no loss).
+    t.acceptSubmit = true
+    e.tick(4)
+    assert(t.store.size == 2, "the retried real frame now lands")
+
+  test("active and idle STORE-WRITE traces are indistinguishable (T041 send path)"):
     // Two clients: one sends a real message every round, one is idle every round. An observer of the
-    // store sees, per round, one write with a fixed-size frame under a fixed-size token — IDENTICAL
-    // for both, so it cannot tell the active client from the idle one by traffic shape (FR-012).
-    // (Frame *content* — real plaintext vs all-zero carrier — is the orthogonal confidentiality
-    // layer, hidden once the message-content ratchet is in the frame path; this asserts the metadata
-    // trace, which is what a metadata-private messenger must keep uniform.)
+    // store's WRITE side sees, per round, one write with a fixed-size frame under a fixed-size token
+    // — IDENTICAL for both, so it cannot tell active from idle by the write trace (FR-012, send path).
+    //
+    // NOT yet uniform (tracked, T041 fetch path + T042): the FETCH side still leaks (an active
+    // receiver drains more frames than an idle one), and frame *content* (real plaintext vs all-zero
+    // carrier) distinguishes until the message-content ratchet is in the frame path. This asserts the
+    // store-WRITE shape only.
     val rounds = 20
     val active = FakeTransport()
     val idle   = FakeTransport()
@@ -133,13 +155,10 @@ class RoundTransportSpec extends AnyFunSuite:
       ea.sendMessage(pid, s"hello$r")
       ea.tick(r)
       ei.tick(r) // idle: never sends
-    // Same number of writes…
+    // Same number of writes, same frame size, same token size — identical observable write shape.
     assert(active.submits.size == rounds && idle.submits.size == rounds)
-    // …same frame size every write…
     assert((active.submits ++ idle.submits).forall(_._2.length == frame.Frame.Size))
-    // …same token size every write (random-looking HMAC output, real or cover).
     assert((active.submits ++ idle.submits).forall(_._1.length == token.RetrievalToken.Length))
-    // The per-round observable shape (count, frame size, token size) is identical between the two.
     assert(active.submits.map(s => (s._1.length, s._2.length)) == idle.submits.map(s => (s._1.length, s._2.length)))
 
   test("the carrier flag reflects whether a real frame was actually submitted (fail+retry uniform)"):

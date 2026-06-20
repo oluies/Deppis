@@ -199,12 +199,13 @@ final class Engine(
                       dropHead(pid, q)
                       realSubmitted = true
                   case _ =>
-                    // Defensive: an outbox entry always has a runtime + book entry (sendMessage
-                    // requires a confirmed buddy; removeBuddy clears both), so this is unreachable via
-                    // the API. Send a cover frame so the round still makes its one uniform write.
+                    // Defensive + observable: an outbox entry always has a runtime + book entry
+                    // (sendMessage requires a confirmed buddy; removeBuddy clears both), so this is
+                    // unreachable via the API. Drop the orphaned frame to avoid a stuck queue, but
+                    // deliberately do NOT emit a masking cover write: if this invariant ever breaks,
+                    // the round produces zero writes — an observable anomaly — rather than the loss
+                    // being hidden behind a uniform cover frame.
                     dropHead(pid, q)
-                    coverCounter += 1
-                    t.submit(RetrievalToken.derive(coverKey, "cover", "", coverCounter), Frame.carrier())
               case None =>
                 coverCounter += 1
                 t.submit(RetrievalToken.derive(coverKey, "cover", "", coverCounter), Frame.carrier())
