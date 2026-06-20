@@ -25,61 +25,66 @@ private def exactLong(v: ujson.Value): Long = v match
 
 /** `pcore <subcommand>` — retrieval-token | frame | deframe | schedule-next (T013/T014/T015). */
 object Pcore:
-  def main(args: Array[String]): Unit =
-    val sub = args.headOption.getOrElse("")
-    val in  = scala.io.Source.stdin.mkString
-    val out: ujson.Value =
-      try
-        val j = if in.trim.isEmpty then ujson.Obj() else ujson.read(in)
-        sub match
-          case "handshake-init" =>
-            val pi = Handshake.init(b64d(j("sharedSecret").str))
+  /** Pure command core: `(subcommand, stdin JSON) -> Right(result) | Left(error)`. Holds no IO so
+    * it is directly unit-testable; `main` is the thin stdin/stdout/exit shell around it. Any thrown
+    * exception (bad JSON, missing key, bad base64) maps to a `Left` rather than escaping. */
+  def run(sub: String, in: String): Either[String, ujson.Value] =
+    try
+      val j = if in.trim.isEmpty then ujson.Obj() else ujson.read(in)
+      sub match
+        case "handshake-init" =>
+          val pi = Handshake.init(b64d(j("sharedSecret").str))
+          Right(
             ujson.Obj(
               "pairId"       -> pi.pairId,
               "safetyNumber" -> pi.safetyNumber,
               "pairKey"      -> b64e(pi.pairKey)
             )
-          case "retrieval-token" =>
-            val key = j.obj.get("key").map(k => b64d(k.str)).getOrElse("dev-key".getBytes)
-            val tok = RetrievalToken.derive(key, j("senderId").str, j("receiverId").str, exactLong(j("counter")))
-            ujson.Obj("token" -> b64e(tok))
-          case "frame" =>
-            Frame.pad(b64d(j("payload").str)).fold(fail, f => ujson.Obj("frame" -> b64e(f)))
-          case "deframe" =>
-            Frame.unpad(b64d(j("frame").str)).fold(fail, p => ujson.Obj("payload" -> b64e(p)))
-          case "schedule-next" =>
-            val rid     = j.obj.get("roundId").map(_.num.toLong).getOrElse(0L)
-            val payload = j.obj.get("payload").map(p => b64d(p.str))
-            Schedule.planRound(rid, payload).fold(
-              fail,
-              plan =>
-                ujson.Obj(
-                  "roundId"  -> plan.roundId,
-                  "kind"     -> plan.kind.toString,
-                  "frame"    -> b64e(plan.frame),
-                  "retrieve" -> plan.retrieve
-                )
+          )
+        case "retrieval-token" =>
+          val key = j.obj.get("key").map(k => b64d(k.str)).getOrElse("dev-key".getBytes)
+          val tok = RetrievalToken.derive(key, j("senderId").str, j("receiverId").str, exactLong(j("counter")))
+          Right(ujson.Obj("token" -> b64e(tok)))
+        case "frame" =>
+          Frame.pad(b64d(j("payload").str)).map(f => ujson.Obj("frame" -> b64e(f)))
+        case "deframe" =>
+          Frame.unpad(b64d(j("frame").str)).map(p => ujson.Obj("payload" -> b64e(p)))
+        case "schedule-next" =>
+          val rid     = j.obj.get("roundId").map(_.num.toLong).getOrElse(0L)
+          val payload = j.obj.get("payload").map(p => b64d(p.str))
+          Schedule.planRound(rid, payload).map { plan =>
+            ujson.Obj(
+              "roundId"  -> plan.roundId,
+              "kind"     -> plan.kind.toString,
+              "frame"    -> b64e(plan.frame),
+              "retrieve" -> plan.retrieve
             )
-          case other => fail(s"unknown subcommand: $other")
-      catch case e: Throwable => fail(e.getMessage)
-    println(ujson.write(out))
+          }
+        case other => Left(s"unknown subcommand: $other")
+    catch case e: Throwable => Left(Option(e.getMessage).getOrElse(e.getClass.getSimpleName))
+
+  def main(args: Array[String]): Unit =
+    val sub = args.headOption.getOrElse("")
+    val in  = scala.io.Source.stdin.mkString
+    run(sub, in).fold(fail, out => println(ujson.write(out)))
 
 /** `pstatus show` — emits {backend, metadataPrivate, label}. Backend/attestation from env
   * (STORE_BACKEND, ATTESTATION_PASSED); defaults to the dev backend (no privacy). */
 object Pstatus:
-  def main(args: Array[String]): Unit =
-    val backend = sys.env.getOrElse("STORE_BACKEND", "dev") match
+  /** Pure core: derives the privacy-status JSON from an environment map (so tests can supply env
+    * without mutating the process). `main` calls it with `sys.env`. */
+  def run(env: Map[String, String]): ujson.Value =
+    val backend = env.getOrElse("STORE_BACKEND", "dev") match
       case "enclave-target" => Backend.EnclaveTarget
       case "groove-target"  => Backend.GrooveTarget
       case "groove-stub"    => Backend.GrooveStub
       case _                => Backend.Dev
-    val status = BuildPrivacyStatus(backend, sys.env.get("ATTESTATION_PASSED").contains("true"))
-    println(
-      ujson.write(
-        ujson.Obj(
-          "backend"         -> backend.toString,
-          "metadataPrivate" -> status.metadataPrivate,
-          "label"           -> status.label
-        )
-      )
+    val status = BuildPrivacyStatus(backend, env.get("ATTESTATION_PASSED").contains("true"))
+    ujson.Obj(
+      "backend"         -> backend.toString,
+      "metadataPrivate" -> status.metadataPrivate,
+      "label"           -> status.label
     )
+
+  def main(args: Array[String]): Unit =
+    println(ujson.write(run(sys.env)))
