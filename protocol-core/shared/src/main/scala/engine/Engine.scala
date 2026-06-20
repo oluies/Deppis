@@ -82,7 +82,7 @@ final class Engine(
   private val coverKey             = random.Rand.bytes(32)
   private var coverCounter         = 0L // send-path cover frames
   private var coverReadCounter     = 0L // fetch-path cover reads
-  private var recvCursor           = 0  // round-robin cursor for the one-retrieve-per-round fetch
+  private var recvCursor           = 0L // round-robin cursor for the one-retrieve-per-round fetch
   // Positive diagnostic for the unreachable orphan branch in `tick` (an outbox entry with no
   // runtime/book). Stays 0 in correct operation; a non-zero value means an internal invariant broke.
   private var orphanedDrops        = 0L
@@ -186,7 +186,8 @@ final class Engine(
             // still before retrieval) and, crucially, lets a transport reject the round up front
             // (e.g. an out-of-range round id) so an invalid round fails atomically without a
             // half-applied send (no submitted frame, no advanced counter).
-            if t.mailWaiting(roundId, clientLabel) then emit(EngineEvent.Notified(roundId))
+            val notified = t.mailWaiting(roundId, clientLabel)
+            if notified then emit(EngineEvent.Notified(roundId))
             // Exactly ONE store write per round (cover traffic, FR-012): a real frame under its
             // outgoing token if one is queued, otherwise a carrier frame under a fresh random-looking
             // cover token. So the store-write trace (one 256-byte write per round, random 32-byte
@@ -214,19 +215,20 @@ final class Engine(
               case None =>
                 coverCounter += 1
                 t.submit(RetrievalToken.derive(coverKey, "cover", "", coverCounter), Frame.carrier())
-            // Retrieve AFTER notify (FR-004 notify-before-retrieval). Exactly ONE retrieve per round
-            // (the schedule's one-retrieve invariant, FR-012 fetch path): round-robin over confirmed
-            // buddies so the fetch trace (one read/round under a random token) is uniform regardless
-            // of how many buddies have mail; a client with no confirmed buddies issues a cover read.
-            // The cost is latency — a buddy's stream is checked once every `#buddies` rounds (this is
-            // the cover-traffic tradeoff; a digest-guided scheme with fixed padding is a refinement).
+            // Exactly ONE retrieve per round (the schedule's one-retrieve invariant, FR-012 fetch
+            // path), and it is NOTIFY-GUIDED (FR-004): a *real* read happens only when the backend
+            // says mail is waiting this round — otherwise a cover read under a fresh, random-looking
+            // token. Because a real expected token is read only when its message is actually present,
+            // it is read at most once and its counter advances, so the per-round read-token stream is
+            // ALWAYS fresh (non-recurrent) whether the client is active or idle — closing the
+            // token-recurrence distinguisher of a fixed-token poll (FR-014 non-recurrence).
             val confirmed = runtime.toSeq
               .flatMap { case (pid, rt) =>
                 book.get(pid).filter(_.state == BuddyState.Confirmed).map(rel => (pid, rt, rel))
               }
               .sortBy(_._1) // stable order so the round-robin cursor is deterministic
-            if confirmed.nonEmpty then
-              val (pid, rt, rel) = confirmed(recvCursor % confirmed.size)
+            if notified && confirmed.nonEmpty then
+              val (pid, rt, rel) = confirmed((Math.floorMod(recvCursor, confirmed.size.toLong)).toInt)
               recvCursor += 1
               t.retrieve(dirToken(rel.pairKey, peerRole(rt.role), rt.role, rt.recvCounter)).foreach { frame =>
                 // The frame was consumed (single-use), so advance regardless of decode outcome —
@@ -237,7 +239,8 @@ final class Engine(
                 }
               }
             else
-              // No confirmed buddies: still issue one (cover) read so the fetch trace stays uniform.
+              // No notification (or no confirmed buddies): a cover read under a fresh token, so the
+              // fetch trace stays one-read-per-round with a non-recurrent token.
               coverReadCounter += 1
               t.retrieve(RetrievalToken.derive(coverKey, "cover-read", "", coverReadCounter)): Unit
             // Report the round as a carrier unless a real frame was ACTUALLY submitted — a failed or
