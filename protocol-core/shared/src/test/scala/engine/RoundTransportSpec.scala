@@ -169,6 +169,23 @@ class RoundTransportSpec extends AnyFunSuite:
     tb.signalMail(pairKeyOf("shared")); bob.tick(3); assert(msgs(bob) == Seq("m1"))
     tb.signalMail(pairKeyOf("shared")); bob.tick(4); assert(msgs(bob) == Seq("m2"))
 
+  test("frame content is encrypted: real and carrier wire frames are 256B, random, no plaintext (T042)"):
+    val t = FakeTransport()
+    val (e, pairId) = confirmedEngine(t, BuddyRole.Initiator)
+    val plaintext = "the secret meeting time is noon"
+    e.sendMessage(pairId, plaintext)
+    e.tick(1) // real send (encrypted)
+    e.tick(2) // idle ⇒ carrier (encrypted)
+    val realWire    = t.submits(0)._2
+    val carrierWire = t.submits(1)._2
+    assert(realWire.length == frame.Frame.Size && carrierWire.length == frame.Frame.Size, "both wire frames are 256B")
+    // The real frame does NOT contain the plaintext bytes — it's encrypted, not padded plaintext.
+    assert(!new String(realWire, "ISO-8859-1").contains(plaintext), "plaintext must not appear on the wire")
+    // The carrier is NOT all-zero (it's an encryption of zeros under a random key) — so it is
+    // byte-indistinguishable from a real frame (both high-entropy 256B blobs), not a zero block.
+    assert(carrierWire.exists(_ != 0), "carrier frame must be encrypted (not all-zero)")
+    assert(!realWire.sameElements(carrierWire))
+
   test("MULTI-BUDDY fetch is non-recurrent: read exactly the signaled buddy (T041b, FR-014)"):
     // Bob has two confirmed buddies A and B. Only B is sending. Each round, the digest signals B's
     // bit (B has mail) and never A's. Bob reads B's (advancing, fresh) real token on signaled rounds
