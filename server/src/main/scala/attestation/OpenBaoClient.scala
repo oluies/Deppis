@@ -2,8 +2,18 @@ package attestation
 
 import java.net.URI
 import java.net.http.{HttpClient, HttpRequest, HttpResponse}
+import java.time.Duration
 import java.util.Base64
 import scala.util.control.NonFatal
+
+object OpenBaoClient:
+  /** Bounded timeouts so a hung/slow OpenBao on the key-release path cannot block the caller
+    * indefinitely. A `HttpTimeoutException` is `NonFatal` and maps to `"openbao: request failed"`. */
+  val ConnectTimeout: Duration = Duration.ofSeconds(5)
+  val RequestTimeout: Duration = Duration.ofSeconds(10)
+
+  /** The default client: like `HttpClient.newHttpClient()` but with a bounded connect timeout. */
+  def defaultHttp: HttpClient = HttpClient.newBuilder().connectTimeout(ConnectTimeout).build()
 
 /** Minimal client to **OpenBao** (the Vault-compatible secret store) for the **attested key
   * release** (Constitution IX, research D11; see `design/attestation-key-provisioning.md`).
@@ -21,7 +31,7 @@ import scala.util.control.NonFatal
 final class OpenBaoClient(
     baseUrl: String,
     token: String,
-    http: HttpClient = HttpClient.newHttpClient()
+    http: HttpClient = OpenBaoClient.defaultHttp
 ):
 
   /** Read a KV-v2 secret and return `data.data.<field>`, base64-decoded. The OpenBao KV-v2 read
@@ -43,6 +53,7 @@ final class OpenBaoClient(
       val req = HttpRequest
         .newBuilder(URI.create(url))
         .header("X-Vault-Token", token)
+        .timeout(OpenBaoClient.RequestTimeout)
         .GET()
         .build()
       val resp = http.send(req, HttpResponse.BodyHandlers.ofString())

@@ -27,16 +27,19 @@ class OpenBaoClientSpec extends AnyFunSuite:
     ex.sendResponseHeaders(status, bytes.length.toLong)
     val os = ex.getResponseBody; os.write(bytes); os.close()
 
-  test("readKey returns the base64-decoded key from a KV-v2 response, sending the token header"):
+  test("readKey returns the base64-decoded key from a KV-v2 response, sending the token header and /v1/ path"):
     var sawToken = ""
+    var sawPath  = ""
     withMock { ex =>
       sawToken = Option(ex.getRequestHeaders.getFirst("X-Vault-Token")).getOrElse("")
+      sawPath = ex.getRequestURI.getPath
       respond(ex, 200, s"""{"data":{"data":{"key":"$keyB64"},"metadata":{"version":1}}}""")
     } { base =>
       val client = new OpenBaoClient(base, token = "s.testtoken")
       val got = client.readKey("secret/data/messenger/notify-key")
       assert(got.map(_.toVector) == Right(keyBytes.toVector))
       assert(sawToken == "s.testtoken", "the X-Vault-Token header must be sent")
+      assert(sawPath == "/v1/secret/data/messenger/notify-key", "the request path must be /v1/<path>")
     }
 
   test("a 403 maps to a fixed permission-denied error (no secret-dependent detail)"):
