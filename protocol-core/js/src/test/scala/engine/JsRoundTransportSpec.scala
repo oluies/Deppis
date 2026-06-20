@@ -98,6 +98,25 @@ class JsRoundTransportSpec extends AnyFunSuite:
     // Nothing staged in the store ⇒ retrieve returns null ⇒ Option(null) = None.
     assert(!tickEvents(bob, 1).contains("messageReceived"))
 
+  test("an out-of-JS-range roundId is rejected atomically — no half-applied send"):
+    val store = mutable.Map.empty[String, Uint8Array]
+    val fakeA = new FakeJsTransport(store)
+    val fakeB = new FakeJsTransport(store)
+    val alice = new EngineJs(fakeA.asInstanceOf[JsTransport], u8("alice"))
+    val bob   = new EngineJs(fakeB.asInstanceOf[JsTransport], u8("bob"))
+    val pairId = addBuddy(alice, "initiator"); confirm(alice, pairId)
+    addBuddy(bob, "responder"); confirm(bob, pairId)
+
+    alice.handle(s"""{"apiVersion":"1","command":"sendMessage","args":{"pairId":"$pairId","plaintext":"queued"}}""")
+    // roundId 2^53+1 (sent as a string so it parses exactly) exceeds the JS-safe range.
+    val resp = ujson.read(alice.handle(
+      """{"apiVersion":"1","command":"tick","args":{"roundId":"9007199254740993"}}"""))
+    assert(resp("error")("code").str == "bad_request")
+    assert(store.isEmpty, "the frame must NOT have been submitted on the rejected round")
+    // The message survives: a valid round delivers it (the send side effect was not half-applied).
+    tickEvents(alice, 1)
+    assert(tickEvents(bob, 2).contains("messageReceived"))
+
   test("with no transport the engine is local-only (no delivery events)"):
     val e = new EngineJs() // no transport
     val pairId = addBuddy(e, "initiator")
