@@ -12,5 +12,6 @@
 pub mod grpc;
 pub mod grpc_notify;
 pub mod notify;
+pub mod portable_sort;
 pub mod primitives;
 pub mod store;

@@ -24,9 +24,12 @@ pub fn ct_select_u64(cond: Choice, a: u64, b: u64) -> u64 {
 
 /// A `(sort_key, record)` pair. The network sorts by `sort_key`, which lets compaction sort by a
 /// synthetic key WITHOUT disturbing `record.key` (the record's real key travels untouched).
-type Item = (u64, Record);
+/// `pub(crate)` so the portable/"GPU-style" sort reuses the SAME constant-time swap + compare-
+/// exchange (no drift between the CPU oracle and the accelerator path).
+pub(crate) type Item = (u64, Record);
 
-/// Conditionally swap two items in constant time (sort key, record key, every payload byte).
+/// Conditionally swap two items in constant time (sort key, record key, every payload byte). Stays
+/// private — the portable path shares only `Item` + `compare_exchange`, which is the full surface.
 fn ct_swap_item(cond: Choice, a: &mut Item, b: &mut Item) {
     u64::conditional_swap(&mut a.0, &mut b.0, cond);
     u64::conditional_swap(&mut a.1.key, &mut b.1.key, cond);
@@ -36,7 +39,8 @@ fn ct_swap_item(cond: Choice, a: &mut Item, b: &mut Item) {
 }
 
 /// Oblivious compare-exchange of positions `i < j` for a given direction, decided in constant time.
-fn compare_exchange(a: &mut [Item], i: usize, j: usize, ascending: bool) {
+/// `pub(crate)` so the portable schedule executes the identical primitive (see [[Item]]).
+pub(crate) fn compare_exchange(a: &mut [Item], i: usize, j: usize, ascending: bool) {
     debug_assert!(i < j);
     let gt = a[i].0.ct_gt(&a[j].0); // a[i] > a[j]
     let lt = a[j].0.ct_gt(&a[i].0); // a[i] < a[j]
