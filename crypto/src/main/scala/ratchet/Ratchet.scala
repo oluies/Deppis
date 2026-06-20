@@ -10,7 +10,15 @@ import org.whispersystems.libsignal.util.KeyHelper
   * implementation and NEVER reimplement the ratchet). Each [[RatchetParty]] is one local identity
   * with its own protocol store; it publishes a prekey bundle (X3DH), establishes a session from a
   * peer's bundle, and then exchanges messages. Forward secrecy and post-compromise security are
-  * provided by the underlying library's double ratchet — this layer only adapts the API to Scala. */
+  * provided by the underlying library's double ratchet — this layer only adapts the API to Scala.
+  *
+  * DEPENDENCY STATUS (tracked): the backing `org.whispersystems:signal-protocol-java` is the
+  * historically-audited pure-JVM libsignal, but its upstream repo is **archived/EOL** — Signal
+  * moved its protocol core to `libsignal` (Rust core + Java bindings, `org.signal:libsignal-client`),
+  * so this pin receives no further security patches. We keep it because it is pure-JVM (no native
+  * libs in CI) and audited, and because this thin wrapper is the ONLY coupling point — migrating to
+  * `org.signal:libsignal-client` later is localized to this file. See tasks.md T012 for the tracked
+  * migration follow-up; do not mistake this pin for a currently-maintained dependency. */
 
 /** A ciphertext on the wire: the libsignal message `type` (PREKEY vs WHISPER) plus the serialized
   * body. The type tells the receiver how to reconstruct the message; no key material is exposed. */

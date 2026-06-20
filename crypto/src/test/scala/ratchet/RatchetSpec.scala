@@ -61,3 +61,15 @@ class RatchetSpec extends AnyFunSuite:
     // Once Bob replies and Alice processes it, the session is fully established → WHISPER type.
     alice.decrypt(bob.address, bob.encrypt(alice.address, utf8("r")))
     assert(alice.encrypt(bob.address, utf8("c")).msgType == CiphertextMessage.WHISPER_TYPE)
+
+  test("a tampered ciphertext is rejected — the wrapper surfaces the library's auth failure"):
+    val (alice, bob) = paired()
+    val ct = alice.encrypt(bob.address, utf8("secret"))
+    // Flip a byte in the body; the library MUST reject it (MAC/parse failure), never return garbage.
+    val corrupted = ct.copy(body = ct.body.updated(ct.body.length - 1, (ct.body.last ^ 0x01).toByte))
+    assertThrows[Exception](bob.decrypt(alice.address, corrupted))
+
+  test("an unknown message type is rejected, not silently mishandled"):
+    val (alice, bob) = paired()
+    val ct = alice.encrypt(bob.address, utf8("x"))
+    assertThrows[IllegalArgumentException](bob.decrypt(alice.address, ct.copy(msgType = 99)))
