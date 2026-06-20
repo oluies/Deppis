@@ -94,17 +94,10 @@ final class Engine(
     case BuddyRole.Initiator => BuddyRole.Responder
     case BuddyRole.Responder => BuddyRole.Initiator
 
-  // The PING digest is 512 one-hot buddy bits (FR-015). Each pair maps to a bit derived from the
-  // shared pair key, so both sides agree which bit the sender signals and the receiver checks.
-  // (Collisions are possible at ~birthday rate over 512 bits; a sequential bit-lease handed out at
-  // pairing is the collision-free refinement — see T041c.)
-  private val NotifyBits = 512
-  private def notifyBit(pairKey: Array[Byte]): Int =
-    val b = RetrievalToken.derive(pairKey, "notify-bit", "", 0L)
-    (((b(0) & 0xff) << 8) | (b(1) & 0xff)) % NotifyBits
-  private def bitSet(digest: Array[Byte], bit: Int): Boolean =
-    val idx = bit >> 3
-    idx < digest.length && (digest(idx) & (1 << (bit & 7))) != 0
+  // Per-buddy notify bit derivation lives in `NotifyDigest` (one source of truth; tests use it too).
+  // Fairness cursor: when several buddies signal the SAME round, rotate which one is served so no
+  // (e.g. higher-pairId) buddy is starved under the one-read-per-round limit.
+  private var recvCursor = 0L
 
   // A directional retrieval token: messages FROM `from` TO `to` for the given counter. Both parties
   // derive the same token from the shared pair key + the (symmetric) role pair, so the receiver can
@@ -237,23 +230,28 @@ final class Engine(
               .flatMap { case (pid, rt) =>
                 book.get(pid).filter(_.state == BuddyState.Confirmed).map(rel => (pid, rt, rel))
               }
-              .filter { case (_, _, rel) => bitSet(digest, notifyBit(rel.pairKey)) }
-              .sortBy(_._1) // deterministic pick when several buddies signaled the same round
+              .filter { case (_, _, rel) => NotifyDigest.isSet(digest, NotifyDigest.bit(rel.pairKey)) }
+              .sortBy(_._1) // stable order; the cursor below rotates fairly within it
             if signaled.nonEmpty then emit(EngineEvent.Notified(roundId)) // some buddy has mail (FR-004)
-            signaled.headOption match
-              case Some((pid, rt, rel)) =>
-                // Read the signaled buddy (one per round; if several signaled, the rest re-signal —
-                // the simultaneous-many-senders case is the known edge, T041c).
-                t.retrieve(dirToken(rel.pairKey, peerRole(rt.role), rt.role, rt.recvCounter)).foreach { frame =>
-                  rt.recvCounter += 1 // consumed (single-use) ⇒ advance regardless of decode outcome
-                  Frame.unpad(frame).toOption.foreach { p =>
-                    emit(EngineEvent.MessageReceived(pid, new String(p, UTF_8), roundId))
-                  }
+            if signaled.nonEmpty then
+              // Serve one signaled buddy per round, ROTATING the start so co-signaling buddies are
+              // not starved (the rest re-signal next round — T041c covers the multi-sender edge).
+              val (pid, rt, rel) = signaled((Math.floorMod(recvCursor, signaled.size.toLong)).toInt)
+              recvCursor += 1
+              // Non-recurrence note: a signaled buddy normally HAS its message present (hit ⇒
+              // recvCounter advances ⇒ next read token is fresh). It only fails to advance on a
+              // birthday-rate bit COLLISION (a wrong buddy signaled) — so non-recurrence is
+              // conditional on collision-freedom, which the T041c bit-lease makes unconditional.
+              t.retrieve(dirToken(rel.pairKey, peerRole(rt.role), rt.role, rt.recvCounter)).foreach { frame =>
+                rt.recvCounter += 1 // consumed (single-use) ⇒ advance regardless of decode outcome
+                Frame.unpad(frame).toOption.foreach { p =>
+                  emit(EngineEvent.MessageReceived(pid, new String(p, UTF_8), roundId))
                 }
-              case None =>
-                // No buddy signaled: a cover read under a fresh token (one-read-per-round, fresh).
-                coverReadCounter += 1
-                t.retrieve(RetrievalToken.derive(coverKey, "cover-read", "", coverReadCounter)): Unit
+              }
+            else
+              // No buddy signaled: a cover read under a fresh token (one-read-per-round, fresh).
+              coverReadCounter += 1
+              t.retrieve(RetrievalToken.derive(coverKey, "cover-read", "", coverReadCounter)): Unit
             // Report the round as a carrier unless a real frame was ACTUALLY submitted — a failed or
             // absent send is then indistinguishable from any other carrier round (a fail+retry does
             // not produce two "real-payload" rounds). (Full store-level cover traffic — a carrier

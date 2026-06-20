@@ -22,11 +22,9 @@ class JsRoundTransportSpec extends AnyFunSuite:
 
   private def u8(s: String): Uint8Array = Uint8.toJs(s.getBytes("UTF-8"))
 
-  // The single pair's per-buddy notify bit (secret "shared"); mirrors Engine.notifyBit.
+  // The single pair's per-buddy notify bit (secret "shared"), from the single source of truth.
   private val sharedBit: Int =
-    val pk = handshake.Handshake.init("shared".getBytes("UTF-8")).pairKey
-    val b  = token.RetrievalToken.derive(pk, "notify-bit", "", 0L)
-    (((b(0) & 0xff) << 8) | (b(1) & 0xff)) % 512
+    NotifyDigest.bit(handshake.Handshake.init("shared".getBytes("UTF-8")).pairKey)
 
   /** A synchronous in-memory JS transport (a real JS object with the methods the host supplies). */
   private final class FakeJsTransport(store: mutable.Map[String, Uint8Array]) extends js.Object:

@@ -13,11 +13,7 @@ class RoundTransportSpec extends AnyFunSuite:
   private def hex(b: Array[Byte]): String   = b.map(x => f"${x & 0xff}%02x").mkString
   private def secret(s: String): Array[Byte] = s.getBytes("UTF-8")
   private def pairKeyOf(s: String): Array[Byte] = handshake.Handshake.init(secret(s)).pairKey
-
-  /** The per-buddy notify bit (must mirror `Engine.notifyBit`). */
-  private def bitOf(pairKey: Array[Byte]): Int =
-    val b = token.RetrievalToken.derive(pairKey, "notify-bit", "", 0L)
-    (((b(0) & 0xff) << 8) | (b(1) & 0xff)) % 512
+  private def bitOf(pairKey: Array[Byte]): Int = NotifyDigest.bit(pairKey) // single source of truth
 
   /** In-memory store + a 512-bit PING digest, recording the observable submit + fetch traces.
     * `fetchDigest` is per-round: it returns the current digest and RESETS it (obsd semantics), so a
@@ -201,3 +197,30 @@ class RoundTransportSpec extends AnyFunSuite:
     assert(tb.retrieves.size == rounds, "one read per round")
     assert(tb.retrieves.map(hex).toSet.size == rounds, "NO read token recurs, even multi-buddy")
     assert(delivered == 5, s"all of B's messages delivered, got $delivered")
+
+  test("two buddies signaling the SAME round are both served over time (no starvation, T041c edge)"):
+    // A and B each have several messages and BOTH signal every round. With one read/round, the
+    // fairness cursor must rotate so NEITHER (regardless of pairId order) is starved.
+    val store = mutable.Map.empty[String, Array[Byte]]
+    val tb = new FakeTransport(store)
+    val tsA = new FakeTransport(store); val tsB = new FakeTransport(store)
+    val bob = Engine(Some(tb), clientLabel = "bob".getBytes)
+    val pidA = handshake.Handshake.init(secret("buddy-A")).pairId
+    val pidB = handshake.Handshake.init(secret("buddy-B")).pairId
+    bob.addBuddy(secret("buddy-A"), BuddyRole.Responder); bob.confirmBuddy(pidA, matched = true)
+    bob.addBuddy(secret("buddy-B"), BuddyRole.Responder); bob.confirmBuddy(pidB, matched = true)
+    bob.drainEvents()
+    val sa = Engine(Some(tsA), clientLabel = "A".getBytes)
+    sa.addBuddy(secret("buddy-A"), BuddyRole.Initiator); sa.confirmBuddy(pidA, matched = true); sa.drainEvents()
+    val sb = Engine(Some(tsB), clientLabel = "B".getBytes)
+    sb.addBuddy(secret("buddy-B"), BuddyRole.Initiator); sb.confirmBuddy(pidB, matched = true); sb.drainEvents()
+    for r <- 1 to 3 do { sa.sendMessage(pidA, s"a$r"); sa.tick(r); sb.sendMessage(pidB, s"b$r"); sb.tick(r) }
+
+    val received = mutable.ArrayBuffer.empty[String]
+    for r <- 1 to 12 do
+      tb.signalMail(pairKeyOf("buddy-A")); tb.signalMail(pairKeyOf("buddy-B")) // BOTH signal
+      bob.tick(r)
+      received ++= bob.drainEvents().collect { case EngineEvent.MessageReceived(_, txt, _) => txt }
+    // Both buddies fully delivered — neither starved — and (distinct messages) all 6 arrived.
+    assert(received.count(_.startsWith("a")) == 3, s"A starved? got $received")
+    assert(received.count(_.startsWith("b")) == 3, s"B starved? got $received")
