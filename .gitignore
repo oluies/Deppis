@@ -10,3 +10,6 @@ project/project/
 .metals/
 *.class
 .DS_Store
+
+# npm deps for the Scala.js bundle
+node_modules/

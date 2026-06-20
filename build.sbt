@@ -25,7 +25,7 @@ lazy val commonScalac = Seq("-deprecation", "-feature", "-unchecked", "-Wunused:
 
 // protocol-core is the single source of truth (Constitution VII), cross-compiled to JVM + Scala.js
 // from ONE set of `shared/` sources. The ONLY platform-specific file is `kdf/Kdf.scala` (JVM = JCA
-// HMAC; JS = Node-crypto HMAC) — both vetted, both synchronous, so the two builds are identical.
+// HMAC; JS = @noble/hashes HMAC) — both vetted, both synchronous, so the two builds are identical.
 lazy val protocolCore = (project in file("protocol-core"))
   .settings(
     name := "protocol-core",
@@ -46,9 +46,11 @@ lazy val protocolCore = (project in file("protocol-core"))
     )
   )
 
-// The Scala.js build of protocol-core: the SAME shared/ sources + js/ (Node-crypto Kdf + the
+// The Scala.js build of protocol-core: the SAME shared/ sources + js/ (the @noble/hashes Kdf + the
 // @JSExportTopLevel `ProtocolEngine` facade). `fastLinkJS`/`fullLinkJS` emit the bundle Dart loads;
-// the engine tests also run here under Node (real Node-crypto), cross-checked against the JVM.
+// the engine tests run here under Node (real @noble/hashes HMAC), cross-checked against the JVM JCA.
+// @noble/hashes is browser-safe too, so the same bundle loads in Flutter web (with a bundler/import
+// map resolving the bare `@noble/...` specifiers).
 lazy val protocolCoreJS = (project in file("protocol-core-js"))
   .enablePlugins(ScalaJSPlugin)
   .settings(

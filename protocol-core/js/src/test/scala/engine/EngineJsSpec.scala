@@ -3,9 +3,9 @@ package engine
 import org.scalatest.funsuite.AnyFunSuite
 
 /** Runs under Node (Scala.js). Proves the generated JS engine works end to end with the real
-  * Node-crypto `Kdf`, and that its derivation is byte-for-byte identical to the JVM build — i.e.
-  * Node's OpenSSL HMAC-SHA256 matches the JVM's JCA HMAC-SHA256. The reference values are captured
-  * from the JVM `EngineSpec` run, so this is a genuine cross-platform known-answer test. */
+  * @noble/hashes `Kdf`, and that its derivation is byte-for-byte identical to the JVM build — i.e.
+  * noble's HMAC-SHA256 matches the JVM's JCA HMAC-SHA256. The reference values are captured from the
+  * JVM `EngineSpec` run, so this is a genuine cross-platform known-answer test. */
 class EngineJsSpec extends AnyFunSuite:
 
   // Reference values for the shared secret "abc", produced by the JVM build.
