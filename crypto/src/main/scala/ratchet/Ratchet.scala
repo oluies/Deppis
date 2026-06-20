@@ -1,10 +1,11 @@
 package ratchet
 
-import org.whispersystems.libsignal.{SessionBuilder, SessionCipher, SignalProtocolAddress}
-import org.whispersystems.libsignal.protocol.{CiphertextMessage, PreKeySignalMessage, SignalMessage}
-import org.whispersystems.libsignal.state.{PreKeyBundle, PreKeyRecord, SignedPreKeyRecord}
-import org.whispersystems.libsignal.state.impl.InMemorySignalProtocolStore
-import org.whispersystems.libsignal.util.KeyHelper
+import org.signal.libsignal.protocol.{IdentityKeyPair, SessionBuilder, SessionCipher, SignalProtocolAddress}
+import org.signal.libsignal.protocol.ecc.Curve
+import org.signal.libsignal.protocol.message.{CiphertextMessage, PreKeySignalMessage, SignalMessage}
+import org.signal.libsignal.protocol.state.{PreKeyBundle, PreKeyRecord, SignedPreKeyRecord}
+import org.signal.libsignal.protocol.state.impl.InMemorySignalProtocolStore
+import org.signal.libsignal.protocol.util.KeyHelper
 
 /** Wrapper over the **audited** libsignal double-ratchet (T012, Constitution I — we wrap a vetted
   * implementation and NEVER reimplement the ratchet). Each [[RatchetParty]] is one local identity
@@ -12,13 +13,13 @@ import org.whispersystems.libsignal.util.KeyHelper
   * peer's bundle, and then exchanges messages. Forward secrecy and post-compromise security are
   * provided by the underlying library's double ratchet — this layer only adapts the API to Scala.
   *
-  * DEPENDENCY STATUS (tracked): the backing `org.whispersystems:signal-protocol-java` is the
-  * historically-audited pure-JVM libsignal, but its upstream repo is **archived/EOL** — Signal
-  * moved its protocol core to `libsignal` (Rust core + Java bindings, `org.signal:libsignal-client`),
-  * so this pin receives no further security patches. We keep it because it is pure-JVM (no native
-  * libs in CI) and audited, and because this thin wrapper is the ONLY coupling point — migrating to
-  * `org.signal:libsignal-client` later is localized to this file. See tasks.md T012 for the tracked
-  * migration follow-up; do not mistake this pin for a currently-maintained dependency. */
+  * DEPENDENCY (T012a): the backing crypto is `org.signal:libsignal-client` — Signal's MAINTAINED
+  * libsignal (Rust core + Java/JNI bindings), which superseded the archived/EOL pure-JVM
+  * `org.whispersystems:signal-protocol-java`. It ships a bundled native library loaded by the JVM at
+  * runtime (no separate install; CI exercises the real ratchet on linux/mac). This thin wrapper is
+  * the ONLY coupling point, so the migration was localized to this file. We wrap the vetted ratchet
+  * and NEVER reimplement it (Constitution I). NOTE: this is the classic X3DH bundle (signed prekey +
+  * one-time prekey); the post-quantum Kyber prekey arm of PQXDH is intentionally not used here. */
 
 /** A ciphertext on the wire: the libsignal message `type` (PREKEY vs WHISPER) plus the serialized
   * body. The type tells the receiver how to reconstruct the message; no key material is exposed. */
@@ -28,12 +29,19 @@ final class RatchetParty(val name: String, deviceId: Int = 1):
   val address: SignalProtocolAddress = new SignalProtocolAddress(name, deviceId)
 
   private val registrationId = KeyHelper.generateRegistrationId(false)
-  private val identity       = KeyHelper.generateIdentityKeyPair()
+  private val identity       = IdentityKeyPair.generate()
   private val store          = new InMemorySignalProtocolStore(identity, registrationId)
 
   // One-time prekey + signed prekey this party publishes for others to start a session with.
-  private val preKey: PreKeyRecord             = KeyHelper.generatePreKeys(0, 1).get(0)
-  private val signedPreKey: SignedPreKeyRecord = KeyHelper.generateSignedPreKey(identity, 0)
+  // libsignal-client exposes the primitives directly (the old KeyHelper.generatePreKeys/
+  // generateSignedPreKey convenience helpers were dropped), so we build the records ourselves:
+  // a fresh Curve keypair per prekey, and an identity-key signature over the signed prekey's
+  // serialized public key (exactly what SessionBuilder.process verifies during X3DH).
+  private val preKey: PreKeyRecord = new PreKeyRecord(1, Curve.generateKeyPair())
+  private val signedPreKey: SignedPreKeyRecord =
+    val spkPair    = Curve.generateKeyPair()
+    val signature  = Curve.calculateSignature(identity.getPrivateKey, spkPair.getPublicKey.serialize())
+    new SignedPreKeyRecord(1, System.currentTimeMillis(), spkPair, signature)
   store.storePreKey(preKey.getId, preKey)
   store.storeSignedPreKey(signedPreKey.getId, signedPreKey)
 

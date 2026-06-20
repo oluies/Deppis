@@ -50,7 +50,7 @@ class RatchetSpec extends AnyFunSuite:
     assert(str(bob.decrypt(alice.address, m1)) == "m1")
 
   test("messages are PREKEY type until the peer replies, then WHISPER type"):
-    import org.whispersystems.libsignal.protocol.CiphertextMessage
+    import org.signal.libsignal.protocol.message.CiphertextMessage
     val (alice, bob) = paired()
     // Alice keeps sending PREKEY messages until she hears back from Bob (she can't yet know he has
     // processed her session). Both her first and second pre-reply messages are PREKEY type.
