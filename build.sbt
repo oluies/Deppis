@@ -129,6 +129,10 @@ lazy val transport = (project in file("transport"))
     // the notification service front loads libsodium (crypto, FFM) -> fork w/ native access.
     Test / fork := true,
     Test / javaOptions += "--enable-native-access=ALL-UNNAMED",
+    // DeppisDemo's PING-front stand-in seals tokens via libsodium too -> same for `runMain`.
+    run / fork := true,
+    run / javaOptions += "--enable-native-access=ALL-UNNAMED",
+    run / connectInput := true,
     Compile / PB.targets := Seq(scalapb.gen(grpc = true) -> (Compile / sourceManaged).value / "scalapb"),
     libraryDependencies ++= Seq(
       "com.thesamet.scalapb" %% "scalapb-runtime"      % scalapbVersion % "protobuf",
