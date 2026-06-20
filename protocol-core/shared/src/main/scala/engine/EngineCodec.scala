@@ -15,16 +15,17 @@ import java.nio.charset.StandardCharsets.UTF_8
 final class EngineCodec(engine: Engine):
 
   def handle(input: String): String =
-    val parsed =
-      try Right(ujson.read(input))
-      catch case _: Throwable => Left(EngineError("bad_request", "malformed JSON envelope"))
-
-    val out = parsed.flatMap { env =>
-      val ver = env.obj.get("apiVersion").map(_.str).getOrElse("")
-      if ver != EngineApi.Version then
-        Left(EngineError("api_version", "unsupported apiVersion"))
-      else dispatch(env)
-    }
+    // The WHOLE evaluation is guarded: not just unparseable JSON, but valid-but-misshaped input
+    // (a non-object envelope, a mistyped arg) must still return the uniform error envelope rather
+    // than throwing a uPickle exception across the Scala.js boundary — the contract + Constitution
+    // II (fixed, controlled error strings) require it.
+    val out: Either[EngineError, ujson.Value] =
+      try
+        val env = ujson.read(input)
+        val ver = env.obj.get("apiVersion").map(_.str).getOrElse("")
+        if ver != EngineApi.Version then Left(EngineError("api_version", "unsupported apiVersion"))
+        else dispatch(env)
+      catch case _: Throwable => Left(EngineError("bad_request", "malformed request"))
 
     out match
       case Right(result) =>
@@ -35,6 +36,9 @@ final class EngineCodec(engine: Engine):
           "events"     -> ujson.Arr(engine.drainEvents().map(eventJson)*)
         ).render()
       case Left(EngineError(code, message)) =>
+        // Discard any buffered events on the error path too, so a partially-emitted event can never
+        // leak into the NEXT successful response (content-leak across calls).
+        engine.drainEvents()
         ujson.Obj(
           "apiVersion" -> EngineApi.Version,
           "error"      -> ujson.Obj("code" -> code, "message" -> message)
@@ -61,14 +65,16 @@ final class EngineCodec(engine: Engine):
 
       case "tick" =>
         engine.tick(long(args, "roundId")).map { d =>
-          ujson.Obj("roundId" -> d.roundId, "carrier" -> d.carrier, "retrieve" -> d.retrieve)
+          // Emit as a JSON number explicitly (a bare Long would render as a string). The echo shares
+          // the JSON-double 2^53 ceiling; exact large round ids are carried on the string INPUT path.
+          ujson.Obj("roundId" -> ujson.Num(d.roundId.toDouble), "carrier" -> d.carrier, "retrieve" -> d.retrieve)
         }
 
       case "privacyStatus" =>
         Right(eventJson(engine.privacyStatus))
 
-      case other =>
-        Left(EngineError("unknown_command", s"unsupported command"))
+      case _ =>
+        Left(EngineError("unknown_command", "unsupported command"))
 
   private def eventJson(e: EngineEvent): ujson.Value = e match
     case EngineEvent.BuddyConfirmed(pairId, safetyNumber) =>
@@ -82,4 +88,11 @@ final class EngineCodec(engine: Engine):
 
   private def str(o: ujson.Value, k: String): String  = o.obj.get(k).map(_.str).getOrElse("")
   private def bool(o: ujson.Value, k: String): Boolean = o.obj.get(k).exists(_.bool)
-  private def long(o: ujson.Value, k: String): Long    = o.obj.get(k).map(_.num.toLong).getOrElse(0L)
+
+  /** `roundId` may arrive as a JSON number or string. JSON numbers are IEEE doubles, so a numeric
+    * round id above 2^53 would silently lose precision; callers expecting large round ids should
+    * send it as a string, which is parsed exactly here. A non-numeric string throws and is mapped
+    * to `bad_request` by the guard in `handle`. */
+  private def long(o: ujson.Value, k: String): Long = o.obj.get(k) match
+    case Some(v) => v.strOpt.map(_.toLong).orElse(v.numOpt.map(_.toLong)).getOrElse(0L)
+    case None    => 0L

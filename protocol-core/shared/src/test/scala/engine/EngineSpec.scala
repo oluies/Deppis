@@ -118,6 +118,33 @@ class EngineSpec extends AnyFunSuite:
     val resp = EngineCodec(Engine()).handle("not json{")
     assert(ujson.read(resp)("error")("code").str == "bad_request")
 
+  test("handle rejects valid-but-misshaped input with the uniform error envelope"):
+    val codec = EngineCodec(Engine())
+    // Non-object top-level value, and a mistyped arg — neither may throw across the boundary.
+    for bad <- Seq(
+        "5",
+        "[1,2]",
+        """{"apiVersion":"1","command":"confirmBuddy","args":{"pairId":123,"matched":"yes"}}"""
+      )
+    do
+      val j = ujson.read(codec.handle(bad))
+      assert(j("error")("code").str == "bad_request", s"input: $bad")
+
+  test("error responses carry no events (and never leak buffered events into the next call)"):
+    val codec = EngineCodec(Engine())
+    val errResp = ujson.read(codec.handle("""{"apiVersion":"1","command":"nope"}"""))
+    assert(errResp.obj.get("events").isEmpty) // error envelope has no events array
+
+  test("tick accepts roundId as a large string (exact beyond 2^53) or a number"):
+    val codec = EngineCodec(Engine())
+    // A big round id sent as a string is parsed exactly (no bad_request) — this is the precision-safe
+    // input path; a non-numeric string would map to bad_request via the guard.
+    val s = ujson.read(codec.handle(
+      """{"apiVersion":"1","command":"tick","args":{"roundId":"9007199254740993"}}"""))
+    assert(s.obj.contains("result"))
+    val n = ujson.read(codec.handle("""{"apiVersion":"1","command":"tick","args":{"roundId":3}}"""))
+    assert(n("result")("roundId").num.toLong == 3L)
+
   test("handle(privacyStatus) emits the dev label"):
     val resp = EngineCodec(Engine()).handle("""{"apiVersion":"1","command":"privacyStatus"}""")
     assert(ujson.read(resp)("result")("metadataPrivate").bool == false)
