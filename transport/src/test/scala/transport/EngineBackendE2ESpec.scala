@@ -20,6 +20,11 @@ import org.scalatest.funsuite.AnyFunSuite
   * job, which builds obsd). */
 class EngineBackendE2ESpec extends AnyFunSuite with ObsdHarness:
 
+  /** The per-buddy notify bit the engine checks (mirrors `Engine.notifyBit`). */
+  private def notifyBit(pairKey: Array[Byte]): Int =
+    val b = RetrievalToken.derive(pairKey, "notify-bit", "", 0L)
+    (((b(0) & 0xff) << 8) | (b(1) & 0xff)) % 512
+
   test("engine.tick over obsd: notify-before-retrieval emits notified then messageReceived"):
     val notifyKey = Array.tabulate(Crypto.KeyBytes)(i => (i * 9 + 4).toByte)
     withObsd(notifyKey) { channel =>
@@ -46,10 +51,11 @@ class EngineBackendE2ESpec extends AnyFunSuite with ObsdHarness:
       val frame      = Frame.pad("see you at the bridge".getBytes).toOption.get
       val aliceStore = new EnclaveObliviousStore(storeStub, attested = false)
       assert(aliceStore.write(aliceToken, frame).isRight)
-      // Alice signals Bob's notification for the round (a sealed, round-bound token).
+      // Alice signals Bob's notification under the PER-BUDDY bit Bob's engine checks (notifyBit).
+      val buddyBit     = notifyBit(pairKey)
       val sealer       = DevNotificationServer(notifyKey)
       val aliceNotify  = new EnclaveNotificationClient(notifyStub, attested = false)
-      assert(aliceNotify.signal(1L, sealer.issueToken(1L, 3, bobLabel)).isRight)
+      assert(aliceNotify.signal(1L, sealer.issueToken(1L, buddyBit, bobLabel)).isRight)
 
       // --- Bob ticks: notify-before-retrieval ---
       bob.tick(1L)
