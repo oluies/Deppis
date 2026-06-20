@@ -144,6 +144,13 @@ class EngineSpec extends AnyFunSuite:
     assert(s.obj.contains("result"))
     val n = ujson.read(codec.handle("""{"apiVersion":"1","command":"tick","args":{"roundId":3}}"""))
     assert(n("result")("roundId").num.toLong == 3L)
+    // A present-but-wrong-typed roundId is an error, not a silent default to 0.
+    for bad <- Seq("true", "null", "\"abc\"") do
+      val j = ujson.read(codec.handle(s"""{"apiVersion":"1","command":"tick","args":{"roundId":$bad}}"""))
+      assert(j("error")("code").str == "bad_request", s"roundId:$bad")
+    // A missing roundId still defaults to 0 (round 0).
+    val miss = ujson.read(codec.handle("""{"apiVersion":"1","command":"tick","args":{}}"""))
+    assert(miss("result")("roundId").num.toLong == 0L)
 
   test("handle(privacyStatus) emits the dev label"):
     val resp = EngineCodec(Engine()).handle("""{"apiVersion":"1","command":"privacyStatus"}""")

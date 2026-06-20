@@ -91,8 +91,10 @@ final class EngineCodec(engine: Engine):
 
   /** `roundId` may arrive as a JSON number or string. JSON numbers are IEEE doubles, so a numeric
     * round id above 2^53 would silently lose precision; callers expecting large round ids should
-    * send it as a string, which is parsed exactly here. A non-numeric string throws and is mapped
-    * to `bad_request` by the guard in `handle`. */
+    * send it as a string, which is parsed exactly here. A missing key defaults to 0; a value of any
+    * OTHER type (boolean/null/non-numeric string) throws and is mapped to `bad_request` by the guard
+    * in `handle` — never silently coerced to 0. */
   private def long(o: ujson.Value, k: String): Long = o.obj.get(k) match
-    case Some(v) => v.strOpt.map(_.toLong).orElse(v.numOpt.map(_.toLong)).getOrElse(0L)
     case None    => 0L
+    case Some(v) => v.strOpt.map(_.toLong).orElse(v.numOpt.map(_.toLong))
+        .getOrElse(throw IllegalArgumentException("roundId must be a number or numeric string"))
