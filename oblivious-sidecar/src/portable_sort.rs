@@ -16,8 +16,9 @@
 //! recursive CPU oracle** ([[crate::primitives::oblivious_sort]]) over random inputs. A real GPU
 //! backend is a drop-in that consumes the same schedule and must pass the same differential KAT.
 
-use crate::primitives::Record;
-use subtle::{Choice, ConditionallySelectable, ConstantTimeGreater};
+// Reuse the SAME constant-time compare-exchange + item type as the CPU oracle, so the obliviousness
+// / constant-time properties cannot drift between the two paths — only the schedule differs here.
+use crate::primitives::{compare_exchange, Item, Record};
 
 /// One oblivious compare-exchange of positions `i < j` in a fixed direction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -64,32 +65,12 @@ pub fn bitonic_schedule(padded: usize) -> Vec<Stage> {
     stages
 }
 
-/// A sort-key + record pair (mirrors `primitives::Item`, kept local to the prototype).
-type Item = (u64, Record);
-
-fn ct_swap_item(cond: Choice, a: &mut Item, b: &mut Item) {
-    u64::conditional_swap(&mut a.0, &mut b.0, cond);
-    u64::conditional_swap(&mut a.1.key, &mut b.1.key, cond);
-    for (x, y) in a.1.payload.iter_mut().zip(b.1.payload.iter_mut()) {
-        u8::conditional_swap(x, y, cond);
-    }
-}
-
-fn apply(items: &mut [Item], ce: CompareExchange) {
-    let CompareExchange { i, j, ascending } = ce;
-    let gt = items[i].0.ct_gt(&items[j].0);
-    let lt = items[j].0.ct_gt(&items[i].0);
-    let do_swap = Choice::conditional_select(&lt, &gt, Choice::from(ascending as u8));
-    let (left, right) = items.split_at_mut(j);
-    ct_swap_item(do_swap, &mut left[i], &mut right[0]);
-}
-
-/// Execute one stage. A real device runs these concurrently (the pairs are disjoint — see
-/// [[disjoint_within_stages]]); here we apply them in sequence, which is equivalent precisely
-/// because they do not overlap.
+/// Execute one stage via the SHARED `primitives::compare_exchange`. A real device runs these
+/// concurrently (the pairs are disjoint — see [[disjoint_within_stages]]); here we apply them in
+/// sequence, which is equivalent precisely because they do not overlap.
 fn run_stage(items: &mut [Item], stage: &Stage) {
-    for &ce in stage {
-        apply(items, ce);
+    for ce in stage {
+        compare_exchange(items, ce.i, ce.j, ce.ascending);
     }
 }
 
@@ -136,10 +117,22 @@ mod tests {
     use crate::primitives::oblivious_sort;
     use proptest::prelude::*;
 
+    // Distinct payloads per element (index in byte 1) so duplicate-key records remain distinguishable.
     fn records(keys: &[u64]) -> Vec<Record> {
         keys.iter()
-            .map(|&k| Record::new(k, vec![(k & 0xff) as u8, 0xab]))
+            .enumerate()
+            .map(|(idx, &k)| Record::new(k, vec![(k & 0xff) as u8, idx as u8]))
             .collect()
+    }
+
+    fn key_sorted(rs: &[Record]) -> bool {
+        rs.windows(2).all(|w| w[0].key <= w[1].key)
+    }
+
+    fn canonical(rs: &[Record]) -> Vec<(u64, Vec<u8>)> {
+        let mut v: Vec<(u64, Vec<u8>)> = rs.iter().map(|r| (r.key, r.payload.clone())).collect();
+        v.sort();
+        v
     }
 
     #[test]
@@ -155,18 +148,39 @@ mod tests {
         // log2(8)=3 → 3*(3+1)/2 = 6 stages, each 4 compare-exchanges.
         assert_eq!(a.len(), 6);
         assert!(a.iter().all(|s| s.len() == 4));
+        // Larger boundary stays disjoint/well-formed too.
+        assert!(disjoint_within_stages(&bitonic_schedule(128)));
     }
 
     proptest! {
-        // Differential KAT: the GPU-style schedule path ≡ the recursive CPU oracle, byte for byte.
-        // Distinct keys (a permutation) so the unique sorted order is unambiguous.
+        // Differential KAT: with DISTINCT keys the sorted order is unique, so the schedule path ≡
+        // the recursive CPU oracle byte for byte. Inputs are SHUFFLED (not a pre-sorted subsequence)
+        // and range up to a padded width of 128 to exercise larger networks.
         #[test]
-        fn portable_matches_cpu_oracle(perm in proptest::sample::subsequence((0u64..64).collect::<Vec<_>>(), 0..40)) {
+        fn portable_matches_cpu_oracle_distinct(
+            perm in (1usize..100usize).prop_flat_map(|n|
+                Just((0u64..n as u64).collect::<Vec<_>>()).prop_shuffle())
+        ) {
             let mut a = records(&perm);
             let mut b = records(&perm);
             oblivious_sort(&mut a);
             oblivious_sort_portable(&mut b);
             prop_assert_eq!(a, b);
+        }
+
+        // With DUPLICATE keys, two different bitonic networks need not agree on the relative order of
+        // equal keys (a sorting network isn't stable), and the store only requires sorted-by-key. So
+        // the meaningful invariant is: the portable path is itself a valid oblivious sort — key-sorted
+        // output AND the same multiset of records as the oracle. (Compaction avoids this entirely by
+        // using unique synthetic keys.)
+        #[test]
+        fn portable_is_a_valid_sort_with_duplicate_keys(keys in prop::collection::vec(0u64..6, 0..40)) {
+            let mut oracle = records(&keys);
+            let mut portable = records(&keys);
+            oblivious_sort(&mut oracle);
+            oblivious_sort_portable(&mut portable);
+            prop_assert!(key_sorted(&portable), "portable output must be key-sorted");
+            prop_assert_eq!(canonical(&oracle), canonical(&portable), "same multiset of records");
         }
     }
 
