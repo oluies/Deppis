@@ -20,8 +20,9 @@ object Latency:
     * The [[Schedule]] invariant "one retrieve per round" bounds this at 2. */
   val OneWayRoundsWorstCase: Int = 2
 
-  /** Worst-case rounds for a full round trip (message + reply): two one-way deliveries, minus the
-    * overlap where the reply is sent in the same round the message is received. */
+  /** Worst-case rounds for a full round trip (message + reply): two full one-way deliveries with no
+    * overlap — the reply cannot piggyback on the round in which the message arrives (that round's
+    * send was already emitted), so it goes out the next round, making it 2 × one-way = 4. */
   val RoundTripRoundsWorstCase: Int = 2 * OneWayRoundsWorstCase
 
   /** Latency (seconds) for `rounds` rounds at the tuned interval. */
