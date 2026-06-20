@@ -223,6 +223,9 @@ class RoundTransportSpec extends AnyFunSuite:
     t.mail = true // notified every round (per-client), but the cursor alternates A/B with no mail
     for r <- 1 to rounds do bob.tick(r)
     assert(t.retrieves.size == rounds, "COUNT uniformity holds: exactly one read per round")
-    // Token non-recurrence does NOT yet hold for multi-buddy (the limitation T041b closes):
+    // Token non-recurrence does NOT yet hold for multi-buddy (the limitation T041b closes). With 2
+    // confirmed buddies, no queued mail, and the floorMod round-robin, every notified round reads one
+    // of exactly TWO frozen recvCounter=0 tokens (alternating A,B,A,B,…). Pin that exact value so any
+    // change — partial fix or regression — trips the assertion, not just a full fix.
     val distinctTokens = t.retrieves.map(hex).toSet.size
-    assert(distinctTokens < rounds, "known limitation: frozen per-buddy tokens recur (pending T041b)")
+    assert(distinctTokens == 2, s"pinned multi-buddy recurrence: 2 frozen tokens (pending T041b), got $distinctTokens")
