@@ -118,6 +118,8 @@ jobs:
         run: sbt -batch -no-colors "protocolCoreJS/test"
       - name: Link the production bundle (proves the @JSExportTopLevel facade emits)
         run: sbt -batch -no-colors "protocolCoreJS/fullLinkJS"
+      - name: E2E — drive the linked bundle through the engine-api contract (as a consumer loads it)
+        run: node protocol-core/js/e2e/engine-contract.cjs protocol-core-js/target/scala-3.3.4/protocol-core-js-opt/main.js
 
   flutter:
     name: Flutter — analyze + widget tests (T005)
