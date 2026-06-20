@@ -28,8 +28,9 @@ pub fn ct_select_u64(cond: Choice, a: u64, b: u64) -> u64 {
 /// exchange (no drift between the CPU oracle and the accelerator path).
 pub(crate) type Item = (u64, Record);
 
-/// Conditionally swap two items in constant time (sort key, record key, every payload byte).
-pub(crate) fn ct_swap_item(cond: Choice, a: &mut Item, b: &mut Item) {
+/// Conditionally swap two items in constant time (sort key, record key, every payload byte). Stays
+/// private — the portable path shares only `Item` + `compare_exchange`, which is the full surface.
+fn ct_swap_item(cond: Choice, a: &mut Item, b: &mut Item) {
     u64::conditional_swap(&mut a.0, &mut b.0, cond);
     u64::conditional_swap(&mut a.1.key, &mut b.1.key, cond);
     for (x, y) in a.1.payload.iter_mut().zip(b.1.payload.iter_mut()) {
