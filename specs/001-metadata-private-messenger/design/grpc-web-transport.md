@@ -12,7 +12,7 @@ both proven in CI; this is the network glue that backs `JsTransport` in a browse
 Flutter web (browser tab)
   └─ ProtocolEngine  (Scala.js bundle: engine.Engine over a JsTransport)
        └─ gRPC-web host transport  (implements JsTransport; this document)
-            └─ HTTP/1.1 gRPC-web ──► Envoy ──► HTTP/2 gRPC ──► Scala server (RoundService etc.)
+            └─ HTTP/1.1 gRPC-web ──► Envoy ──► HTTP/2 gRPC ──► Scala server (ObliviousStore + NotificationService)
                                                                    └─ obsd (oblivious sidecar)
 ```
 
@@ -59,10 +59,16 @@ The host transport implements the `JsTransport` contract (T032b) by calling the 
 Every round issues exactly one of each regardless of real-message presence (the engine's cover
 traffic, FR-012), so the gRPC-web call pattern an observer sees is itself uniform.
 
+The `JsTransport` `submit`/`retrieve` signatures do NOT carry a round id (only `fetchDigest` does),
+but `WriteBatch`/`ReadBatch` need one. The round id is **ambient**: the worker is executing
+`tick(roundId)`, so the SAB relay tags every call for that tick with the current round and the
+main-thread host reads it from the relay context (`ctx.round` below) — it is not a free variable.
+
 ### Reference host transport (TypeScript, over connect-web)
 
 ```ts
 // Runs on the MAIN thread; the worker's synchronous JsTransport relays to this via the SAB shim.
+// `ctx.round` is the round id of the tick currently executing on the worker, carried in the relay.
 import { createPromiseClient } from "@connectrpc/connect";
 import { createGrpcWebTransport } from "@connectrpc/connect-web";
 import { ObliviousStore } from "./gen/store_connect";
@@ -72,22 +78,25 @@ const t = createGrpcWebTransport({ baseUrl: "https://mm.example/grpc" }); // →
 const store  = createPromiseClient(ObliviousStore, t);
 const notify = createPromiseClient(NotificationService, t);
 
-export const hostTransport = {
-  async submit(token: Uint8Array, frame: Uint8Array): Promise<boolean> {
-    await store.writeBatch({ roundId, batchSize: 1, entries: [{ writeToken: token, frame }] });
-    return true; // WriteBatch is all-or-nothing per the contract
-  },
-  async fetchDigest(roundId: bigint, clientLabel: Uint8Array): Promise<Uint8Array> {
-    return (await notify.fetchDigest({ roundId, clientLabel })).digest;
-  },
-  async retrieve(token: Uint8Array): Promise<Uint8Array | null> {
-    const r = await store.readBatch({ roundId, batchSize: 1, entries: [{ retrievalToken: token }] });
-    return foundTag(r.results[0].sealedResult) ? frameOf(r.results[0].sealedResult) : null;
-  },
-};
+export function hostTransport(ctx: { round: bigint }) {
+  return {
+    async submit(token: Uint8Array, frame: Uint8Array): Promise<boolean> {
+      await store.writeBatch({ roundId: ctx.round, batchSize: 1, entries: [{ writeToken: token, frame }] });
+      return true; // WriteBatch is all-or-nothing per the contract
+    },
+    async fetchDigest(roundId: bigint, clientLabel: Uint8Array): Promise<Uint8Array> {
+      return (await notify.fetchDigest({ roundId, clientLabel })).digest; // == ctx.round
+    },
+    async retrieve(token: Uint8Array): Promise<Uint8Array | null> {
+      const r = await store.readBatch({ roundId: ctx.round, batchSize: 1, entries: [{ retrievalToken: token }] });
+      return foundTag(r.results[0].sealedResult) ? frameOf(r.results[0].sealedResult) : null;
+    },
+  };
+}
 ```
 
-The synchronous `JsTransport` the engine sees is a thin SAB/Atomics relay onto these async calls.
+The synchronous `JsTransport` the engine sees is a thin SAB/Atomics relay onto these async calls,
+with the current round threaded through `ctx`.
 
 ## Envoy
 
