@@ -76,6 +76,14 @@ final class Engine(
   private val events               = mutable.ArrayBuffer.empty[EngineEvent]
   // Per-buddy delivery runtime: the role fixes the token direction; counters are non-recurrent.
   private val runtime              = mutable.Map.empty[String, BuddyRuntime]
+  // Per-session cover-traffic key + counter. Cover (carrier) writes go to fresh, random-looking
+  // tokens derived from this key, so a carrier round's store write is indistinguishable from a real
+  // one (FR-012 cover traffic). The key never leaves the engine.
+  private val coverKey             = random.Rand.bytes(32)
+  private var coverCounter         = 0L
+  // Positive diagnostic for the unreachable orphan branch in `tick` (an outbox entry with no
+  // runtime/book). Stays 0 in correct operation; a non-zero value means an internal invariant broke.
+  private var orphanedDrops        = 0L
 
   private final class BuddyRuntime(val role: BuddyRole):
     var sendCounter: Long = 0L
@@ -177,24 +185,33 @@ final class Engine(
             // (e.g. an out-of-range round id) so an invalid round fails atomically without a
             // half-applied send (no submitted frame, no advanced counter).
             if t.mailWaiting(roundId, clientLabel) then emit(EngineEvent.Notified(roundId))
-            // Submit under our outgoing token. Only advance the counter + drop the frame when the
-            // submit SUCCEEDS; on failure the frame stays queued and is retried next round (no
-            // silent message loss).
+            // Exactly ONE store write per round (cover traffic, FR-012): a real frame under its
+            // outgoing token if one is queued, otherwise a carrier frame under a fresh random-looking
+            // cover token. So the store-write trace (one 256-byte write per round, random 32-byte
+            // token) is identical whether or not a real message is sent — active and idle clients are
+            // indistinguishable. A real frame is dropped + advances the counter only on a successful
+            // submit; on failure it stays queued and retries next round (its failed attempt is still
+            // this round's one write — no extra write, no silent loss).
             var realSubmitted = false
-            nextReal.foreach { case (pid, q) =>
-              (runtime.get(pid), book.get(pid)) match
-                case (Some(rt), Some(rel)) =>
-                  if t.submit(dirToken(rel.pairKey, rt.role, peerRole(rt.role), rt.sendCounter), q.head) then
-                    rt.sendCounter += 1
+            nextReal match
+              case Some((pid, q)) =>
+                (runtime.get(pid), book.get(pid)) match
+                  case (Some(rt), Some(rel)) =>
+                    if t.submit(dirToken(rel.pairKey, rt.role, peerRole(rt.role), rt.sendCounter), q.head) then
+                      rt.sendCounter += 1
+                      dropHead(pid, q)
+                      realSubmitted = true
+                  case _ =>
+                    // Defensive: an outbox entry always has a runtime + book entry (sendMessage
+                    // requires a confirmed buddy; removeBuddy clears both), so this is unreachable via
+                    // the API. Drop the orphaned frame to avoid a stuck queue and record a POSITIVE
+                    // diagnostic (orphanedDrops) — a break surfaces as a non-zero counter, not just a
+                    // missing write. We do NOT emit a masking cover write that would hide the loss.
                     dropHead(pid, q)
-                    realSubmitted = true
-                // else: leave the frame queued for the next round
-                case _ =>
-                  // Defensive: an outbox entry always has a runtime + book entry (sendMessage
-                  // requires a confirmed buddy; removeBuddy clears both), so this is unreachable via
-                  // the API — drop rather than wedge the queue if that invariant ever breaks.
-                  dropHead(pid, q)
-            }
+                    orphanedDrops += 1
+              case None =>
+                coverCounter += 1
+                t.submit(RetrievalToken.derive(coverKey, "cover", "", coverCounter), Frame.carrier())
             // Retrieve (after notify — FR-004 notify-before-retrieval) and drain delivered frames.
             for (pid, rt) <- runtime.toSeq do
               book.get(pid).filter(_.state == BuddyState.Confirmed).foreach { rel =>
@@ -226,3 +243,7 @@ final class Engine(
   /** Active (non-removed) buddy count — presentation helper; carries no key material. */
   def buddyCount: Int = book.size
   def confirmedCount: Int = book.confirmedCount
+
+  /** Count of internal invariant breaks hit in `tick` (orphaned outbox entries). Always 0 in
+    * correct operation — a non-zero value is a positive diagnostic that something is wrong. */
+  def internalAnomalyCount: Long = orphanedDrops

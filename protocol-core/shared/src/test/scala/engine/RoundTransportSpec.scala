@@ -14,9 +14,12 @@ class RoundTransportSpec extends AnyFunSuite:
     * one submits can be retrieved by the other (single-use). */
   private final class FakeTransport(val store: mutable.Map[String, Array[Byte]] = mutable.Map.empty)
       extends RoundTransport:
-    var mail: Boolean       = false
+    var mail: Boolean         = false
     var acceptSubmit: Boolean = true // set false to simulate a transient backend failure on send
+    // The observable submit trace: (token, frame) per write — what an observer of the store sees.
+    val submits = mutable.ArrayBuffer.empty[(Array[Byte], Array[Byte])]
     def submit(token: Array[Byte], frame: Array[Byte]): Boolean =
+      submits += ((token, frame))
       if acceptSubmit then store(hex(token)) = frame
       acceptSubmit
     def mailWaiting(roundId: Long, clientLabel: Array[Byte]): Boolean = mail
@@ -104,6 +107,60 @@ class RoundTransportSpec extends AnyFunSuite:
     bob.tick(4)
     val got = bob.drainEvents().collect { case EngineEvent.MessageReceived(_, txt, _) => txt }
     assert(got == Seq("important"))
+
+  test("cover traffic: every round makes exactly one store write whether active or idle"):
+    val t = FakeTransport()
+    val (e, pairId) = confirmedEngine(t, BuddyRole.Initiator)
+    // 5 rounds: alternate active (a real message queued) and idle (nothing queued).
+    for r <- 1 to 5 do
+      if r % 2 == 1 then e.sendMessage(pairId, s"msg$r")
+      e.tick(r)
+    assert(t.submits.size == 5, "exactly one store write per round (no missing/extra writes)")
+    assert(e.internalAnomalyCount == 0, "no internal invariant breaks in normal operation")
+
+  test("one store write per round holds under a transient submit failure (actual store, not attempts)"):
+    val t = FakeTransport()
+    val (e, pairId) = confirmedEngine(t, BuddyRole.Initiator)
+    // Idle round with the backend up ⇒ exactly one cover frame lands in the store.
+    e.tick(1)
+    assert(t.store.size == 1, "an idle round writes one cover frame")
+    // Idle round with the backend down ⇒ one write ATTEMPT, nothing lands (store unchanged).
+    t.acceptSubmit = false
+    e.tick(2)
+    assert(t.submits.size == 2, "still exactly one write attempt this round")
+    assert(t.store.size == 1, "the failed cover write does not land — and is not silently doubled")
+    // Real message while the backend is down ⇒ one attempt, frame stays queued, store unchanged.
+    e.sendMessage(pairId, "later")
+    e.tick(3)
+    assert(t.submits.size == 3 && t.store.size == 1)
+    // Backend recovers ⇒ the queued real frame is delivered (no loss).
+    t.acceptSubmit = true
+    e.tick(4)
+    assert(t.store.size == 2, "the retried real frame now lands")
+
+  test("active and idle STORE-WRITE traces are indistinguishable (T041 send path)"):
+    // Two clients: one sends a real message every round, one is idle every round. An observer of the
+    // store's WRITE side sees, per round, one write with a fixed-size frame under a fixed-size token
+    // — IDENTICAL for both, so it cannot tell active from idle by the write trace (FR-012, send path).
+    //
+    // NOT yet uniform (tracked, T041 fetch path + T042): the FETCH side still leaks (an active
+    // receiver drains more frames than an idle one), and frame *content* (real plaintext vs all-zero
+    // carrier) distinguishes until the message-content ratchet is in the frame path. This asserts the
+    // store-WRITE shape only.
+    val rounds = 20
+    val active = FakeTransport()
+    val idle   = FakeTransport()
+    val (ea, pid) = confirmedEngine(active, BuddyRole.Initiator)
+    val (ei, _)   = confirmedEngine(idle, BuddyRole.Initiator)
+    for r <- 1 to rounds do
+      ea.sendMessage(pid, s"hello$r")
+      ea.tick(r)
+      ei.tick(r) // idle: never sends
+    // Same number of writes, same frame size, same token size — identical observable write shape.
+    assert(active.submits.size == rounds && idle.submits.size == rounds)
+    assert((active.submits ++ idle.submits).forall(_._2.length == frame.Frame.Size))
+    assert((active.submits ++ idle.submits).forall(_._1.length == token.RetrievalToken.Length))
+    assert(active.submits.map(s => (s._1.length, s._2.length)) == idle.submits.map(s => (s._1.length, s._2.length)))
 
   test("the carrier flag reflects whether a real frame was actually submitted (fail+retry uniform)"):
     val t = FakeTransport()

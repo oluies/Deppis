@@ -140,8 +140,8 @@ messages all arrive in order.
 > Ordered before US5/US7 because cover-traffic uniformity underpins the multi-device and
 > compromise stories.
 
-- [ ] T040 [P] [US6] Statistical indistinguishability test (active vs idle traces) in `server/src/test/scala/integration/cover/` (write first, MUST fail)
-- [ ] T041 [US6] Implement uniform per-round carrier frames on send AND fetch paths (shape independent of real-message presence) in `protocol-core/shared/src/main/scala/schedule/` + `server/src/main/scala/round/` (FR-012)
+- [~] T040 [P] [US6] Statistical indistinguishability test (active vs idle traces) in `server/src/test/scala/integration/cover/` (write first, MUST fail) — PARTIAL: `RoundTransportSpec` asserts active and idle engines produce an **identical store-WRITE trace** (one write/round, fixed 256-byte frame, fixed 32-byte token). The **fetch-side** trace + frame **content** distinguishers are still open (see T041/T042), so this is the send-path slice of the full active-vs-idle indistinguishability claim.
+- [~] T041 [US6] Implement uniform per-round carrier frames on send AND fetch paths (shape independent of real-message presence) in `protocol-core/shared/src/main/scala/schedule/` + `server/src/main/scala/round/` (FR-012) — SEND path DONE: `Engine.tick` makes exactly one store write per round — a real frame under its directional token if queued, else a carrier under a fresh `random.Rand`-derived cover token (platform-split CSPRNG: JVM `SecureRandom` / JS Web-Crypto `getRandomValues`). FETCH path PENDING: the retrieve loop currently drains all waiting frames (one retrieve per waiting message), so an active receiver issues more fetches than an idle one — needs a round-robin **one retrieve per round** (real expected token, else cover read) to make the fetch trace uniform too.
 - [ ] T042 [US6] Verify carrier frames are wire-indistinguishable from real frames in `server/pong/` Retrieve responses (FR-012)
 
 **Checkpoint**: US6 complete; cover traffic enforced.
