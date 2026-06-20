@@ -22,14 +22,25 @@ class JsRoundTransportSpec extends AnyFunSuite:
 
   private def u8(s: String): Uint8Array = Uint8.toJs(s.getBytes("UTF-8"))
 
+  // The single pair's per-buddy notify bit (secret "shared"), from the single source of truth.
+  private val sharedBit: Int =
+    NotifyDigest.bit(handshake.Handshake.init("shared".getBytes("UTF-8")).pairKey)
+
   /** A synchronous in-memory JS transport (a real JS object with the methods the host supplies). */
   private final class FakeJsTransport(store: mutable.Map[String, Uint8Array]) extends js.Object:
-    var mail: Boolean         = false
     var acceptSubmit: Boolean = true // false ⇒ simulate a transient backend failure on send
+    private val digest = new Uint8Array(64)
+    /** Signal the (single) buddy has mail this round. */
+    def signalMail(): Unit =
+      digest(sharedBit >> 3) = (digest(sharedBit >> 3).toInt | (1 << (sharedBit & 7))).toShort
     def submit(token: Uint8Array, frame: Uint8Array): Boolean =
       if acceptSubmit then store(hexU8(token)) = frame
       acceptSubmit
-    def mailWaiting(roundId: Double, clientLabel: Uint8Array): Boolean = mail
+    def fetchDigest(roundId: Double, clientLabel: Uint8Array): Uint8Array =
+      val out = new Uint8Array(64)
+      var i = 0
+      while i < 64 do { out(i) = digest(i); digest(i) = 0; i += 1 } // copy + per-round reset
+      out
     def retrieve(token: Uint8Array): Uint8Array = store.remove(hexU8(token)).orNull
 
   private def addBuddy(e: EngineJs, role: String): String =
@@ -62,7 +73,7 @@ class JsRoundTransportSpec extends AnyFunSuite:
     assert(!tickEvents(alice, 1).contains("messageReceived"))
 
     // Bob has mail this round; his tick emits notified BEFORE the retrieved message.
-    fakeB.mail = true
+    fakeB.signalMail()
     val bobResp = ujson.read(bob.handle("""{"apiVersion":"1","command":"tick","args":{"roundId":2}}"""))
     val events  = bobResp("events").arr.toSeq
     val names   = events.map(_("event").str)
@@ -89,7 +100,7 @@ class JsRoundTransportSpec extends AnyFunSuite:
     assert(!tickEvents(bob, 2).contains("messageReceived"))
     fakeA.acceptSubmit = true
     tickEvents(alice, 3)             // retry succeeds
-    fakeB.mail = true                // Bob is now notified
+    fakeB.signalMail()                // Bob is now notified
     assert(tickEvents(bob, 4).contains("messageReceived"))
 
   test("retrieve returning JS null yields no messageReceived (and no exception)"):
@@ -116,7 +127,7 @@ class JsRoundTransportSpec extends AnyFunSuite:
     assert(store.isEmpty, "the frame must NOT have been submitted on the rejected round")
     // The message survives: a valid round delivers it (the send side effect was not half-applied).
     tickEvents(alice, 1)
-    fakeB.mail = true // Bob is notified
+    fakeB.signalMail() // Bob is notified
     assert(tickEvents(bob, 2).contains("messageReceived"))
 
   test("with no transport the engine is local-only (no delivery events)"):

@@ -3,45 +3,49 @@ package engine
 import org.scalatest.funsuite.AnyFunSuite
 import scala.collection.mutable
 
-/** T032a/T041: the engine drives the notify/store backend through [[RoundTransport]] with
-  * notify-before-retrieval (FR-004) and uniform per-round cover traffic on BOTH the send and fetch
-  * paths (FR-012). A real read happens only when the backend signals mail this round, so a real
-  * expected token is read at most once (non-recurrent, FR-014); otherwise a fresh cover read.
-  *
-  * Tests model an ACCURATE notify: `mail` is set true exactly when a message is present to retrieve
-  * (this is what the PING/PONG protocol guarantees — a signal accompanies a successful store write). */
+/** T032a/T041/T041b: the engine drives the notify/store backend through [[RoundTransport]] with
+  * per-buddy notify-before-retrieval (FR-004) and uniform per-round cover traffic on BOTH the send
+  * and fetch paths (FR-012). The PING digest carries one bit per buddy; the engine reads EXACTLY the
+  * buddy whose bit is set this round, so a real read is always a hit and its token never recurs
+  * (FR-014) — for any buddy count. */
 class RoundTransportSpec extends AnyFunSuite:
 
-  private def hex(b: Array[Byte]): String = b.map(x => f"${x & 0xff}%02x").mkString
+  private def hex(b: Array[Byte]): String   = b.map(x => f"${x & 0xff}%02x").mkString
   private def secret(s: String): Array[Byte] = s.getBytes("UTF-8")
+  private def pairKeyOf(s: String): Array[Byte] = handshake.Handshake.init(secret(s)).pairKey
+  private def bitOf(pairKey: Array[Byte]): Int = NotifyDigest.bit(pairKey) // single source of truth
 
-  /** In-memory store + a controllable "mail waiting" flag, recording the observable submit + fetch
-    * traces. Separate transports can share one `store` map so a sender's write reaches a receiver. */
+  /** In-memory store + a 512-bit PING digest, recording the observable submit + fetch traces.
+    * `fetchDigest` is per-round: it returns the current digest and RESETS it (obsd semantics), so a
+    * signal must be set each round mail should be delivered. Separate transports can share a store. */
   private final class FakeTransport(val store: mutable.Map[String, Array[Byte]] = mutable.Map.empty)
       extends RoundTransport:
-    var mail: Boolean         = false
     var acceptSubmit: Boolean = true
+    private val digest        = new Array[Byte](64)
     val submits   = mutable.ArrayBuffer.empty[(Array[Byte], Array[Byte])]
     val retrieves = mutable.ArrayBuffer.empty[Array[Byte]]
+    /** Signal that the buddy with `pairKey` has mail this round (sets its one-hot bit). */
+    def signalMail(pairKey: Array[Byte]): Unit =
+      val bit = bitOf(pairKey); digest(bit >> 3) = (digest(bit >> 3) | (1 << (bit & 7))).toByte
     def submit(token: Array[Byte], frame: Array[Byte]): Boolean =
       submits += ((token, frame))
       if acceptSubmit then store(hex(token)) = frame
       acceptSubmit
-    def mailWaiting(roundId: Long, clientLabel: Array[Byte]): Boolean = mail
+    def fetchDigest(roundId: Long, clientLabel: Array[Byte]): Array[Byte] =
+      val out = digest.clone()
+      var i = 0; while i < digest.length do { digest(i) = 0; i += 1 } // per-round reset
+      out
     def retrieve(token: Array[Byte]): Option[Array[Byte]] =
       retrieves += token
       store.remove(hex(token))
 
-  /** One confirmed buddy on an engine with its own transport + role. */
   private def confirmedEngine(t: RoundTransport, role: BuddyRole): (Engine, String) =
     val e = Engine(Some(t), clientLabel = "client".getBytes)
     val r = e.addBuddy(secret("shared"), role).toOption.get
-    e.confirmBuddy(r.pairId, matched = true)
-    e.drainEvents()
+    e.confirmBuddy(r.pairId, matched = true); e.drainEvents()
     (e, r.pairId)
 
-  /** Alice (Initiator) + Bob (Responder), each with its own transport over ONE shared store, both
-    * confirmed on the same pair (same secret ⇒ same pairId). */
+  /** Alice (Initiator) + Bob (Responder), each with its own transport over ONE shared store. */
   private def sharedPair(): (Engine, Engine, String, FakeTransport, FakeTransport) =
     val store = mutable.Map.empty[String, Array[Byte]]
     val ta = new FakeTransport(store)
@@ -63,14 +67,14 @@ class RoundTransportSpec extends AnyFunSuite:
     assert(e.tick(1).isRight)
     assert(e.drainEvents().isEmpty)
 
-  test("tick emits notified when the backend reports mail waiting (FR-004)"):
+  test("tick emits notified when the buddy's digest bit is set (FR-004)"):
     val t = FakeTransport()
     val (bob, _) = confirmedEngine(t, BuddyRole.Responder)
-    t.mail = true
+    t.signalMail(pairKeyOf("shared"))
     bob.tick(1)
     assert(bob.drainEvents().contains(EngineEvent.Notified(1)))
 
-  test("tick emits no notified when no mail is waiting"):
+  test("tick emits no notified when no bit is set"):
     val t = FakeTransport()
     val (bob, _) = confirmedEngine(t, BuddyRole.Responder)
     bob.tick(1)
@@ -79,15 +83,15 @@ class RoundTransportSpec extends AnyFunSuite:
   test("a message submitted by the sender is retrieved + surfaced by the receiver"):
     val (alice, bob, pairId, _, tb) = sharedPair()
     assert(alice.sendMessage(pairId, "meet at noon") == Right(1))
-    alice.tick(1)              // Alice writes the frame to the shared store
-    tb.mail = true             // Bob is notified this round
+    alice.tick(1)
+    tb.signalMail(pairKeyOf("shared"))
     bob.tick(2)
     assert(msgs(bob) == Seq("meet at noon"))
 
   test("notify is emitted BEFORE the retrieved message (notify-before-retrieval order)"):
     val (alice, bob, pairId, _, tb) = sharedPair()
     alice.sendMessage(pairId, "hi"); alice.tick(1)
-    tb.mail = true
+    tb.signalMail(pairKeyOf("shared"))
     bob.tick(2)
     val evs = bob.drainEvents()
     val ni  = evs.indexWhere(_.isInstanceOf[EngineEvent.Notified])
@@ -97,24 +101,22 @@ class RoundTransportSpec extends AnyFunSuite:
   test("single-use: the same message is not delivered twice"):
     val (alice, bob, pairId, _, tb) = sharedPair()
     alice.sendMessage(pairId, "once"); alice.tick(1)
-    tb.mail = true
-    bob.tick(2)
+    tb.signalMail(pairKeyOf("shared")); bob.tick(2)
     assert(msgs(bob) == Seq("once"))
-    bob.tick(3) // still notified but the slot is consumed (counter advanced)
+    bob.tick(3) // no signal this round ⇒ cover read, nothing redelivered
     assert(msgs(bob).isEmpty)
 
   test("a failed submit keeps the frame queued and retries it next round (no message loss)"):
     val (alice, bob, pairId, ta, tb) = sharedPair()
     alice.sendMessage(pairId, "important")
     ta.acceptSubmit = false
-    alice.tick(1)              // submit fails → nothing stored, frame stays queued
+    alice.tick(1)
     assert(ta.store.isEmpty)
-    bob.tick(2)                // not notified (nothing was sent) ⇒ cover read
+    bob.tick(2)
     assert(msgs(bob).isEmpty)
     ta.acceptSubmit = true
-    alice.tick(3)              // retry succeeds
-    tb.mail = true             // now Bob is notified
-    bob.tick(4)
+    alice.tick(3)
+    tb.signalMail(pairKeyOf("shared")); bob.tick(4)
     assert(msgs(bob) == Seq("important"))
 
   test("cover traffic: every round makes exactly one store write whether active or idle"):
@@ -123,109 +125,102 @@ class RoundTransportSpec extends AnyFunSuite:
     for r <- 1 to 5 do
       if r % 2 == 1 then e.sendMessage(pairId, s"msg$r")
       e.tick(r)
-    assert(t.submits.size == 5, "exactly one store write per round (no missing/extra writes)")
-    assert(e.internalAnomalyCount == 0, "no internal invariant breaks in normal operation")
+    assert(t.submits.size == 5)
+    assert(e.internalAnomalyCount == 0)
 
   test("one store write per round holds under a transient submit failure (actual store, not attempts)"):
     val t = FakeTransport()
     val (e, pairId) = confirmedEngine(t, BuddyRole.Initiator)
     e.tick(1)
-    assert(t.store.size == 1, "an idle round writes one cover frame")
+    assert(t.store.size == 1)
     t.acceptSubmit = false
     e.tick(2)
-    assert(t.submits.size == 2, "still exactly one write attempt this round")
-    assert(t.store.size == 1, "the failed cover write does not land — and is not silently doubled")
+    assert(t.submits.size == 2 && t.store.size == 1)
     e.sendMessage(pairId, "later"); e.tick(3)
     assert(t.submits.size == 3 && t.store.size == 1)
     t.acceptSubmit = true; e.tick(4)
-    assert(t.store.size == 2, "the retried real frame now lands")
+    assert(t.store.size == 2)
 
   test("active and idle STORE-WRITE traces are indistinguishable (T041 send path)"):
     val rounds = 20
-    val active = FakeTransport()
-    val idle   = FakeTransport()
+    val active = FakeTransport(); val idle = FakeTransport()
     val (ea, pid) = confirmedEngine(active, BuddyRole.Initiator)
     val (ei, _)   = confirmedEngine(idle, BuddyRole.Initiator)
     for r <- 1 to rounds do
-      ea.sendMessage(pid, s"hello$r"); ea.tick(r)
-      ei.tick(r)
+      ea.sendMessage(pid, s"hello$r"); ea.tick(r); ei.tick(r)
     assert(active.submits.size == rounds && idle.submits.size == rounds)
     assert((active.submits ++ idle.submits).forall(_._2.length == frame.Frame.Size))
     assert((active.submits ++ idle.submits).forall(_._1.length == token.RetrievalToken.Length))
-    assert(active.submits.map(s => (s._1.length, s._2.length)) == idle.submits.map(s => (s._1.length, s._2.length)))
 
   test("the carrier flag reflects whether a real frame was actually submitted (fail+retry uniform)"):
     val t = FakeTransport()
     val (alice, pairId) = confirmedEngine(t, BuddyRole.Initiator)
     alice.sendMessage(pairId, "x")
     t.acceptSubmit = false
-    assert(alice.tick(1).toOption.get.carrier, "a failed send reports as a carrier round")
+    assert(alice.tick(1).toOption.get.carrier)
     t.acceptSubmit = true
-    assert(!alice.tick(2).toOption.get.carrier, "a successful send reports a real round")
-    assert(alice.tick(3).toOption.get.carrier, "an empty round is a carrier")
+    assert(!alice.tick(2).toOption.get.carrier)
+    assert(alice.tick(3).toOption.get.carrier)
 
   test("multiple waiting messages are delivered one per round (uniform fetch, FR-012)"):
     val (alice, bob, pairId, _, tb) = sharedPair()
     alice.sendMessage(pairId, "m1"); alice.tick(1)
     alice.sendMessage(pairId, "m2"); alice.tick(2)
-    tb.mail = true // notified each receiving round (a message is present)
-    bob.tick(3); assert(msgs(bob) == Seq("m1"))
-    bob.tick(4); assert(msgs(bob) == Seq("m2"))
+    tb.signalMail(pairKeyOf("shared")); bob.tick(3); assert(msgs(bob) == Seq("m1"))
+    tb.signalMail(pairKeyOf("shared")); bob.tick(4); assert(msgs(bob) == Seq("m2"))
 
-  test("SINGLE-BUDDY fetch trace is non-recurrent and identical for active vs idle (T041, FR-014)"):
-    // Active receiver: notified on each round a message is present, reading a real (advancing) token.
-    // Idle receiver: never notified, reading a fresh cover token each round. BOTH issue exactly one
-    // read per round and — crucially — NO read token recurs, so an observer of the token stream can't
-    // tell active from idle (closes the fixed-token-poll recurrence distinguisher). Holds for a single
-    // buddy; the multi-buddy case is the next test (recurrence remains until per-buddy notify, T041b).
+  test("MULTI-BUDDY fetch is non-recurrent: read exactly the signaled buddy (T041b, FR-014)"):
+    // Bob has two confirmed buddies A and B. Only B is sending. Each round, the digest signals B's
+    // bit (B has mail) and never A's. Bob reads B's (advancing, fresh) real token on signaled rounds
+    // and a fresh cover token otherwise — A's frozen token is NEVER read, so NO token recurs even
+    // with multiple buddies (the recurrence the previous round-robin design left open).
     val store = mutable.Map.empty[String, Array[Byte]]
-    val senderT = new FakeTransport(store)
-    val activeT = new FakeTransport(store)
-    val idleT   = new FakeTransport()
-    val sender = Engine(Some(senderT), clientLabel = "s".getBytes)
-    val pid = sender.addBuddy(secret("shared"), BuddyRole.Initiator).toOption.get.pairId
-    sender.confirmBuddy(pid, matched = true); sender.drainEvents()
-    val active = Engine(Some(activeT), clientLabel = "a".getBytes)
-    active.addBuddy(secret("shared"), BuddyRole.Responder); active.confirmBuddy(pid, matched = true); active.drainEvents()
-    val (idle, _) = confirmedEngine(idleT, BuddyRole.Responder)
-    // Sender stages 5 messages (rounds 1..5).
-    for r <- 1 to 5 do { sender.sendMessage(pid, s"m$r"); sender.tick(r) }
+    val tb = new FakeTransport(store)
+    val tsB = new FakeTransport(store) // B's sender, shares the store
+    val bob = Engine(Some(tb), clientLabel = "bob".getBytes)
+    val pidA = handshake.Handshake.init(secret("buddy-A")).pairId
+    val pidB = handshake.Handshake.init(secret("buddy-B")).pairId
+    bob.addBuddy(secret("buddy-A"), BuddyRole.Responder); bob.confirmBuddy(pidA, matched = true)
+    bob.addBuddy(secret("buddy-B"), BuddyRole.Responder); bob.confirmBuddy(pidB, matched = true)
+    bob.drainEvents()
+    val senderB = Engine(Some(tsB), clientLabel = "B".getBytes)
+    senderB.addBuddy(secret("buddy-B"), BuddyRole.Initiator); senderB.confirmBuddy(pidB, matched = true); senderB.drainEvents()
+    for r <- 1 to 5 do { senderB.sendMessage(pidB, s"b$r"); senderB.tick(r) }
+    tb.retrieves.clear()
 
     val rounds = 12
     var delivered = 0
     for r <- 1 to rounds do
-      activeT.mail = r <= 5 // notified exactly while a staged message is present
-      active.tick(r)
-      delivered += active.drainEvents().count(_.isInstanceOf[EngineEvent.MessageReceived])
-      idle.tick(r) // idleT.mail stays false
-    // One read per round each.
-    assert(activeT.retrieves.size == rounds && idleT.retrieves.size == rounds)
-    // No token recurs — the read stream is fresh every round for BOTH (the recurrence distinguisher).
-    def distinct(ts: collection.Seq[Array[Byte]]) = ts.map(hex).toSet.size == ts.size
-    assert(distinct(activeT.retrieves), "active read tokens must be non-recurrent")
-    assert(distinct(idleT.retrieves), "idle read tokens must be non-recurrent")
-    // …and delivery still works.
-    assert(delivered == 5, s"all staged messages delivered, got $delivered")
+      if r <= 5 then tb.signalMail(pairKeyOf("buddy-B")) // B has mail for 5 rounds; A never signals
+      bob.tick(r)
+      delivered += bob.drainEvents().count(_.isInstanceOf[EngineEvent.MessageReceived])
+    assert(tb.retrieves.size == rounds, "one read per round")
+    assert(tb.retrieves.map(hex).toSet.size == rounds, "NO read token recurs, even multi-buddy")
+    assert(delivered == 5, s"all of B's messages delivered, got $delivered")
 
-  test("MULTI-BUDDY fetch keeps one read per round, but token non-recurrence is NOT yet held (T041b)"):
-    // Documents the known limitation: with ≥2 confirmed buddies and a per-CLIENT notify, the
-    // round-robin cursor can land on a buddy with no mail and re-read its frozen token. The COUNT
-    // stays uniform (one read/round) — what's NOT yet uniform is token recurrence, which needs
-    // per-buddy notify (T041b). This test pins the current behavior so a future fix is visible.
-    val t = FakeTransport()
-    val bob = Engine(Some(t), clientLabel = "bob".getBytes)
-    bob.addBuddy(secret("buddy-A"), BuddyRole.Responder)
-    bob.addBuddy(secret("buddy-B"), BuddyRole.Responder)
-    bob.confirmBuddy(handshake.Handshake.init(secret("buddy-A")).pairId, matched = true)
-    bob.confirmBuddy(handshake.Handshake.init(secret("buddy-B")).pairId, matched = true)
+  test("two buddies signaling the SAME round are both served over time (no starvation, T041c edge)"):
+    // A and B each have several messages and BOTH signal every round. With one read/round, the
+    // fairness cursor must rotate so NEITHER (regardless of pairId order) is starved.
+    val store = mutable.Map.empty[String, Array[Byte]]
+    val tb = new FakeTransport(store)
+    val tsA = new FakeTransport(store); val tsB = new FakeTransport(store)
+    val bob = Engine(Some(tb), clientLabel = "bob".getBytes)
+    val pidA = handshake.Handshake.init(secret("buddy-A")).pairId
+    val pidB = handshake.Handshake.init(secret("buddy-B")).pairId
+    bob.addBuddy(secret("buddy-A"), BuddyRole.Responder); bob.confirmBuddy(pidA, matched = true)
+    bob.addBuddy(secret("buddy-B"), BuddyRole.Responder); bob.confirmBuddy(pidB, matched = true)
     bob.drainEvents()
-    val rounds = 10
-    t.mail = true // notified every round (per-client), but the cursor alternates A/B with no mail
-    for r <- 1 to rounds do bob.tick(r)
-    assert(t.retrieves.size == rounds, "COUNT uniformity holds: exactly one read per round")
-    // Token non-recurrence does NOT yet hold for multi-buddy (the limitation T041b closes). With 2
-    // confirmed buddies, no queued mail, and the floorMod round-robin, every notified round reads one
-    // of exactly TWO frozen recvCounter=0 tokens (alternating A,B,A,B,…). Pin that exact value so any
-    // change — partial fix or regression — trips the assertion, not just a full fix.
-    val distinctTokens = t.retrieves.map(hex).toSet.size
-    assert(distinctTokens == 2, s"pinned multi-buddy recurrence: 2 frozen tokens (pending T041b), got $distinctTokens")
+    val sa = Engine(Some(tsA), clientLabel = "A".getBytes)
+    sa.addBuddy(secret("buddy-A"), BuddyRole.Initiator); sa.confirmBuddy(pidA, matched = true); sa.drainEvents()
+    val sb = Engine(Some(tsB), clientLabel = "B".getBytes)
+    sb.addBuddy(secret("buddy-B"), BuddyRole.Initiator); sb.confirmBuddy(pidB, matched = true); sb.drainEvents()
+    for r <- 1 to 3 do { sa.sendMessage(pidA, s"a$r"); sa.tick(r); sb.sendMessage(pidB, s"b$r"); sb.tick(r) }
+
+    val received = mutable.ArrayBuffer.empty[String]
+    for r <- 1 to 12 do
+      tb.signalMail(pairKeyOf("buddy-A")); tb.signalMail(pairKeyOf("buddy-B")) // BOTH signal
+      bob.tick(r)
+      received ++= bob.drainEvents().collect { case EngineEvent.MessageReceived(_, txt, _) => txt }
+    // Both buddies fully delivered — neither starved — and (distinct messages) all 6 arrived.
+    assert(received.count(_.startsWith("a")) == 3, s"A starved? got $received")
+    assert(received.count(_.startsWith("b")) == 3, s"B starved? got $received")

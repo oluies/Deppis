@@ -17,9 +17,11 @@ trait RoundTransport:
     * next round (so a transient backend failure never silently drops a message). */
   def submit(token: Array[Byte], frame: Array[Byte]): Boolean
 
-  /** Does this round have mail for this client? (PING notify digest for `clientLabel` — true iff
-    * some bit is set.) Polled BEFORE retrieval, so the engine can emit `notified` first (FR-004). */
-  def mailWaiting(roundId: Long, clientLabel: Array[Byte]): Boolean
+  /** This round's PING notify digest for `clientLabel` (one fetch per round). Each of the client's
+    * buddies maps to a one-hot bit; a set bit means THAT buddy signaled mail this round, so the
+    * engine reads exactly the signaled buddy (always a hit ⇒ a non-recurrent read token, FR-014) and
+    * emits `notified` first (FR-004). An all-zero digest (carrier) ⇒ no mail. */
+  def fetchDigest(roundId: Long, clientLabel: Array[Byte]): Array[Byte]
 
   /** Retrieve (and consume) a framed message under a token, if one is present (PONG store read,
     * single-use). `None` means no message under that token this round. */

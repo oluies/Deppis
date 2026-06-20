@@ -22,9 +22,10 @@ final class GrpcRoundTransport(
   def submit(token: Array[Byte], frame: Array[Byte]): Boolean =
     store.write(token, frame).isRight
 
-  /** Mail waits iff this client's notify digest has any bit set this round. */
-  def mailWaiting(roundId: Long, clientLabel: Array[Byte]): Boolean =
-    notify.fetchDigest(roundId, clientLabel).toOption.exists(d => d.exists(_ != 0))
+  /** This round's PING notify digest for the client (per-buddy one-hot bits). On a transient
+    * failure, an all-zero digest (no mail) — the message simply waits for next round. */
+  def fetchDigest(roundId: Long, clientLabel: Array[Byte]): Array[Byte] =
+    notify.fetchDigest(roundId, clientLabel).toOption.getOrElse(Array.emptyByteArray)
 
   def retrieve(token: Array[Byte]): Option[Array[Byte]] =
     store.read(token).toOption.flatten

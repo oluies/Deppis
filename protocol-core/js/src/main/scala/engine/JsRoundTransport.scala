@@ -17,9 +17,9 @@ import scala.scalajs.js.typedarray.Uint8Array
   * Bytes cross as `Uint8Array`; `roundId` crosses as a JS number (round ids are small). */
 @js.native
 trait JsTransport extends js.Object:
-  def submit(token: Uint8Array, frame: Uint8Array): Boolean       = js.native
-  def mailWaiting(roundId: Double, clientLabel: Uint8Array): Boolean = js.native
-  def retrieve(token: Uint8Array): Uint8Array                     = js.native // null when none staged
+  def submit(token: Uint8Array, frame: Uint8Array): Boolean         = js.native
+  def fetchDigest(roundId: Double, clientLabel: Uint8Array): Uint8Array = js.native
+  def retrieve(token: Uint8Array): Uint8Array                       = js.native // null when none staged
 
 /** Adapts a host-supplied [[JsTransport]] to the cross-platform [[RoundTransport]] the engine uses,
   * so the SAME `Engine.tick` notify-before-retrieval logic that runs on the JVM drives a browser
@@ -33,14 +33,14 @@ final class JsRoundTransport(t: JsTransport) extends RoundTransport:
   def submit(token: Array[Byte], frame: Array[Byte]): Boolean =
     t.submit(Uint8.toJs(token), Uint8.toJs(frame))
 
-  def mailWaiting(roundId: Long, clientLabel: Array[Byte]): Boolean =
+  def fetchDigest(roundId: Long, clientLabel: Array[Byte]): Array[Byte] =
     // `roundId` crosses as a JS number; reject anything that would not round-trip exactly rather
     // than silently aliasing a large round id (caught by the codec's guard → bad_request).
     require(
       roundId >= 0 && roundId <= JsRoundTransport.MaxSafeRound,
       "roundId out of JS-safe-integer range"
     )
-    t.mailWaiting(roundId.toDouble, Uint8.toJs(clientLabel))
+    Uint8.toBytes(t.fetchDigest(roundId.toDouble, Uint8.toJs(clientLabel)))
 
   def retrieve(token: Array[Byte]): Option[Array[Byte]] =
     Option(t.retrieve(Uint8.toJs(token))).map(Uint8.toBytes) // JS `null` → None
