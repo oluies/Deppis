@@ -116,6 +116,7 @@ class RoundTransportSpec extends AnyFunSuite:
       if r % 2 == 1 then e.sendMessage(pairId, s"msg$r")
       e.tick(r)
     assert(t.submits.size == 5, "exactly one store write per round (no missing/extra writes)")
+    assert(e.internalAnomalyCount == 0, "no internal invariant breaks in normal operation")
 
   test("one store write per round holds under a transient submit failure (actual store, not attempts)"):
     val t = FakeTransport()

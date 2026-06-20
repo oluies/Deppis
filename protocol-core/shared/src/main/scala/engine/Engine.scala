@@ -81,6 +81,9 @@ final class Engine(
   // one (FR-012 cover traffic). The key never leaves the engine.
   private val coverKey             = random.Rand.bytes(32)
   private var coverCounter         = 0L
+  // Positive diagnostic for the unreachable orphan branch in `tick` (an outbox entry with no
+  // runtime/book). Stays 0 in correct operation; a non-zero value means an internal invariant broke.
+  private var orphanedDrops        = 0L
 
   private final class BuddyRuntime(val role: BuddyRole):
     var sendCounter: Long = 0L
@@ -199,13 +202,13 @@ final class Engine(
                       dropHead(pid, q)
                       realSubmitted = true
                   case _ =>
-                    // Defensive + observable: an outbox entry always has a runtime + book entry
-                    // (sendMessage requires a confirmed buddy; removeBuddy clears both), so this is
-                    // unreachable via the API. Drop the orphaned frame to avoid a stuck queue, but
-                    // deliberately do NOT emit a masking cover write: if this invariant ever breaks,
-                    // the round produces zero writes — an observable anomaly — rather than the loss
-                    // being hidden behind a uniform cover frame.
+                    // Defensive: an outbox entry always has a runtime + book entry (sendMessage
+                    // requires a confirmed buddy; removeBuddy clears both), so this is unreachable via
+                    // the API. Drop the orphaned frame to avoid a stuck queue and record a POSITIVE
+                    // diagnostic (orphanedDrops) — a break surfaces as a non-zero counter, not just a
+                    // missing write. We do NOT emit a masking cover write that would hide the loss.
                     dropHead(pid, q)
+                    orphanedDrops += 1
               case None =>
                 coverCounter += 1
                 t.submit(RetrievalToken.derive(coverKey, "cover", "", coverCounter), Frame.carrier())
@@ -240,3 +243,7 @@ final class Engine(
   /** Active (non-removed) buddy count — presentation helper; carries no key material. */
   def buddyCount: Int = book.size
   def confirmedCount: Int = book.confirmedCount
+
+  /** Count of internal invariant breaks hit in `tick` (orphaned outbox entries). Always 0 in
+    * correct operation — a non-zero value is a positive diagnostic that something is wrong. */
+  def internalAnomalyCount: Long = orphanedDrops
