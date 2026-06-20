@@ -98,9 +98,14 @@ attack surface this note is about).
 
 1. **CPU baseline + differential-test harness** — make the Rust oblivious-sort / AEAD callable
    behind a trait so any accelerator is a drop-in with the CPU path as the always-on oracle.
+   ✅ **Prototyped** — `oblivious-sidecar/src/portable_sort.rs`: `bitonic_schedule(n)` emits the
+   data-independent compare-exchange network as parallel-dispatchable stages, `oblivious_sort_portable`
+   executes it, and a proptest differential KAT asserts it ≡ the recursive CPU oracle byte for byte
+   (plus stage-disjointness + schedule-data-independence checks). Runs in CI without a GPU.
 2. **GPU bitonic sort (Vulkan/wgpu from Rust)** — the highest fun-to-risk ratio: no key material
-   (pure oblivious sort), so gate (1)/(3) are light; prove the fixed-access-pattern kernel matches
-   the CPU output and benchmark vs `n`.
+   (pure oblivious sort), so gate (1)/(3) are light. The schedule from step 1 is exactly the kernel
+   input; a real backend is a drop-in that must pass the same differential KAT. Prove the
+   fixed-access-pattern kernel matches the CPU output and benchmark vs `n`.
 3. **FPGA AEAD offload (SpinalHDL → VHDL)** — uses **vetted** ChaCha20-Poly1305 IP, behind the
    attestation gate; constant-latency datapath; KAT on-device.
 4. **FPGA oblivious-store scan engine** — the most "custom hardware for fun" piece; constant-time
