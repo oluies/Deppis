@@ -9,18 +9,18 @@ import engine.RoundTransport
   * polls the [[EnclaveNotificationClient]] digest. The engine derives every token; this layer only
   * moves opaque bytes, so it learns nothing about sender/receiver or plaintext.
   *
-  * Operations are best-effort at the round boundary: a transient backend failure (mapped to `Left`
-  * by the fronts, with a fixed non-secret message — Constitution II) does not throw out of `tick`;
-  * the message simply isn't delivered this round and is retried next round (the token is unchanged
-  * until a successful retrieval advances the counter). */
+  * A transient backend failure (mapped to `Left` by the fronts, with a fixed non-secret message —
+  * Constitution II) does not throw out of `tick`: `submit` reports `false` so the engine keeps the
+  * frame queued for next round, and `retrieve` returns `None` (the receive counter only advances on
+  * a consumed frame). So neither a send nor a receive is silently lost on a transient failure. */
 final class GrpcRoundTransport(
     store: EnclaveObliviousStore,
     notify: EnclaveNotificationClient
 ) extends RoundTransport:
 
-  def submit(token: Array[Byte], frame: Array[Byte]): Unit =
-    store.write(token, frame) // best-effort; Left is swallowed (retried next round)
-    ()
+  /** `true` iff the store accepted the frame; `false` lets the engine retry next round. */
+  def submit(token: Array[Byte], frame: Array[Byte]): Boolean =
+    store.write(token, frame).isRight
 
   /** Mail waits iff this client's notify digest has any bit set this round. */
   def mailWaiting(roundId: Long, clientLabel: Array[Byte]): Boolean =

@@ -12,8 +12,10 @@ package engine
   * "did some buddy write this round" for this client's aggregation label — never which buddy. */
 trait RoundTransport:
 
-  /** Store a framed message under its retrieval token (PONG store write). */
-  def submit(token: Array[Byte], frame: Array[Byte]): Unit
+  /** Store a framed message under its retrieval token (PONG store write). Returns `true` iff the
+    * frame was accepted by the backend; on `false` the engine keeps the frame queued and retries it
+    * next round (so a transient backend failure never silently drops a message). */
+  def submit(token: Array[Byte], frame: Array[Byte]): Boolean
 
   /** Does this round have mail for this client? (PING notify digest for `clientLabel` — true iff
     * some bit is set.) Polled BEFORE retrieval, so the engine can emit `notified` first (FR-004). */

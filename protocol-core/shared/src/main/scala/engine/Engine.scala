@@ -166,34 +166,45 @@ final class Engine(
     val payload  = nextReal.map { case (_, q) => Frame.unpad(q.head).getOrElse(Array.emptyByteArray) }
     Schedule.planRound(roundId, payload) match
       case Right(plan) =>
-        // Submit the queued frame over the transport (if any) under our outgoing token, then drop it.
-        transport.foreach { t =>
-          nextReal.foreach { case (pid, q) =>
-            for rt <- runtime.get(pid); rel <- book.get(pid) do
-              t.submit(dirToken(rel.pairKey, rt.role, peerRole(rt.role), rt.sendCounter), q.head)
-              rt.sendCounter += 1
-          }
-        }
-        nextReal.foreach { case (pid, q) =>
-          val rest = q.drop(1)
-          if rest.isEmpty then outbox.remove(pid) else outbox(pid) = rest
-        }
-        // Notify-before-retrieval (FR-004): ask whether mail waits, emit `notified`, THEN retrieve.
-        transport.foreach { t =>
-          if t.mailWaiting(roundId, clientLabel) then emit(EngineEvent.Notified(roundId))
-          for (pid, rt) <- runtime.toSeq do
-            book.get(pid).filter(_.state == BuddyState.Confirmed).foreach { rel =>
-              val tok = dirToken(rel.pairKey, peerRole(rt.role), rt.role, rt.recvCounter)
-              t.retrieve(tok).foreach { frame =>
-                Frame.unpad(frame).toOption.foreach { p =>
-                  emit(EngineEvent.MessageReceived(pid, new String(p, UTF_8), roundId))
-                  rt.recvCounter += 1
-                }
-              }
+        transport match
+          case None =>
+            // Local-only: consume the queued frame (no delivery) — preserves prior behavior.
+            nextReal.foreach { case (pid, q) => dropHead(pid, q) }
+          case Some(t) =>
+            // Submit under our outgoing token. Only advance the counter + drop the frame when the
+            // submit SUCCEEDS; on failure the frame stays queued and is retried next round (no
+            // silent message loss).
+            nextReal.foreach { case (pid, q) =>
+              (runtime.get(pid), book.get(pid)) match
+                case (Some(rt), Some(rel)) =>
+                  if t.submit(dirToken(rel.pairKey, rt.role, peerRole(rt.role), rt.sendCounter), q.head) then
+                    rt.sendCounter += 1
+                    dropHead(pid, q)
+                // else: leave the frame queued for the next round
+                case _ => dropHead(pid, q) // orphaned frame (buddy gone) — drop to avoid a stuck queue
             }
-        }
+            // Notify-before-retrieval (FR-004): ask whether mail waits, emit `notified`, THEN drain.
+            if t.mailWaiting(roundId, clientLabel) then emit(EngineEvent.Notified(roundId))
+            for (pid, rt) <- runtime.toSeq do
+              book.get(pid).filter(_.state == BuddyState.Confirmed).foreach { rel =>
+                var more = true
+                while more do
+                  t.retrieve(dirToken(rel.pairKey, peerRole(rt.role), rt.role, rt.recvCounter)) match
+                    case Some(frame) =>
+                      // The frame was consumed (single-use), so advance regardless of decode outcome
+                      // — otherwise a malformed frame would stall this buddy's receive stream.
+                      rt.recvCounter += 1
+                      Frame.unpad(frame).toOption.foreach { p =>
+                        emit(EngineEvent.MessageReceived(pid, new String(p, UTF_8), roundId))
+                      }
+                    case None => more = false // drained this buddy's waiting messages this round
+              }
         Right(RoundDecision(plan.roundId, carrier = plan.kind == Schedule.FrameKind.Carrier, plan.retrieve))
       case Left(reason) => Left(EngineError("tick_failed", reason))
+
+  private def dropHead(pid: String, q: Vector[Array[Byte]]): Unit =
+    val rest = q.drop(1)
+    if rest.isEmpty then outbox.remove(pid) else outbox(pid) = rest
 
   /** Active (non-removed) buddy count — presentation helper; carries no key material. */
   def buddyCount: Int = book.size

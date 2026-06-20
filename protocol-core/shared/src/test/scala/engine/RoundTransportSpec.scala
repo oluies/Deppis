@@ -14,8 +14,11 @@ class RoundTransportSpec extends AnyFunSuite:
     * one submits can be retrieved by the other (single-use). */
   private final class FakeTransport(val store: mutable.Map[String, Array[Byte]] = mutable.Map.empty)
       extends RoundTransport:
-    var mail: Boolean = false
-    def submit(token: Array[Byte], frame: Array[Byte]): Unit = store(hex(token)) = frame
+    var mail: Boolean       = false
+    var acceptSubmit: Boolean = true // set false to simulate a transient backend failure on send
+    def submit(token: Array[Byte], frame: Array[Byte]): Boolean =
+      if acceptSubmit then store(hex(token)) = frame
+      acceptSubmit
     def mailWaiting(roundId: Long, clientLabel: Array[Byte]): Boolean = mail
     def retrieve(token: Array[Byte]): Option[Array[Byte]] = store.remove(hex(token))
 
@@ -85,3 +88,29 @@ class RoundTransportSpec extends AnyFunSuite:
     assert(bob.drainEvents().exists(_.isInstanceOf[EngineEvent.MessageReceived]))
     bob.tick(3)
     assert(!bob.drainEvents().exists(_.isInstanceOf[EngineEvent.MessageReceived]))
+
+  test("a failed submit keeps the frame queued and retries it next round (no message loss)"):
+    val t = FakeTransport()
+    val (alice, pairId) = confirmedEngine(t, BuddyRole.Initiator)
+    val (bob, _)        = confirmedEngine(t, BuddyRole.Responder)
+    alice.sendMessage(pairId, "important")
+    t.acceptSubmit = false
+    alice.tick(1)               // submit fails → frame NOT stored, stays queued
+    assert(t.store.isEmpty)
+    bob.tick(2)
+    assert(!bob.drainEvents().exists(_.isInstanceOf[EngineEvent.MessageReceived]))
+    t.acceptSubmit = true
+    alice.tick(3)               // retry succeeds
+    bob.tick(4)
+    val got = bob.drainEvents().collect { case EngineEvent.MessageReceived(_, txt, _) => txt }
+    assert(got == Seq("important"))
+
+  test("multiple waiting messages are all drained in one receive round"):
+    val t = FakeTransport()
+    val (alice, pairId) = confirmedEngine(t, BuddyRole.Initiator)
+    val (bob, _)        = confirmedEngine(t, BuddyRole.Responder)
+    alice.sendMessage(pairId, "m1"); alice.tick(1)
+    alice.sendMessage(pairId, "m2"); alice.tick(2)
+    bob.tick(3) // both m1 and m2 are waiting under sequential tokens; drain both this round
+    val got = bob.drainEvents().collect { case EngineEvent.MessageReceived(_, txt, _) => txt }
+    assert(got == Seq("m1", "m2"))
