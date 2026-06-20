@@ -54,7 +54,7 @@ Multi-component layout (plan.md): `protocol-core/`, `crypto/`, `server/`, `obliv
 - [X] T016 Define the `ObliviousStore` and `AnonymityLayer` interfaces (config-switchable backends) in `server/pong/src/main/scala/store/` and `anonymity/src/main/scala/` (Constitution VIII)
 - [X] T017 [P] Implement `BuildPrivacyStatus` + `pstatus show` CLI emitting `{backend, metadataPrivate, label}` in `protocol-core/shared/src/main/scala/privacy/` (FR-016, Constitution IV)
 - [X] T018 [P] Configure error handling/logging that never varies on secret values (Constitution II) in `server/src/main/scala/obs/` — `SafeLog` (constant redaction marker, no value/length leak) + `FailureReason` enum (fixed public messages); property-tested for content/length independence
-- [ ] T019 Scaffold the Scala.js engine bundle + versioned Dart platform-channel API per `contracts/engine-api.md` in `protocol-core/js/` (Constitution VII)
+- [X] T019 Scaffold the Scala.js engine bundle + versioned Dart platform-channel API per `contracts/engine-api.md` in `protocol-core/js/` (Constitution VII) — `engine.Engine` + `EngineCodec` (apiVersion-gated JSON boundary; never returns key material) in `shared/`, wiring Handshake+Buddy+Frame+Schedule+Privacy; implemented & tested on JVM (15 tests, real JCA `Kdf`), then cross-compiled to Scala.js. Only `kdf/Kdf` is platform-split (JVM=JCA, JS=Node-crypto facade — both vetted/synchronous). `@JSExportTopLevel("ProtocolEngine")` facade; `fullLinkJS` bundle verified loading in Node; cross-platform KAT (Node HMAC ≡ JCA HMAC). CI `scalajs` job. (Browser Web-Crypto/async bundle = follow-up.)
 - [ ] T020 [P] Stand up the Pekko/Akka server skeleton with gRPC/TLS 1.3 round orchestration in `server/src/main/scala/round/` (per `contracts/messaging.proto`) — PARTIAL: gRPC `RoundService` (ScalaPB) implemented in `transport` + in-process round-trip test green; Pekko actor orchestration and TLS network binding (self-signed certs, bound port) still pending
 
 **Checkpoint**: protocol-core + crypto + interfaces ready; user stories can begin.
@@ -69,11 +69,11 @@ Multi-component layout (plan.md): `protocol-core/`, `crypto/`, `server/`, `obliv
 buddy; a tampered secret fails the comparison and is rejected; re-adding is recognized as a dup.
 
 - [X] T021 [P] [US1] Property test for the add-friend handshake (match → Confirmed; mismatch → rejected; idempotent dup) in `protocol-core/shared/src/test/scala/handshake/` (write first, MUST fail) — HandshakeSpec + BuddySpec, green
-- [ ] T022 [P] [US1] Contract test for engine `addBuddy`/`confirmBuddy` per `contracts/engine-api.md` in `protocol-core/js/src/test/`
+- [X] T022 [P] [US1] Contract test for engine `addBuddy`/`confirmBuddy` per `contracts/engine-api.md` in `protocol-core/js/src/test/` — `engine.EngineSpec` (JVM, 15 tests) + `engine.EngineJsSpec` (JS/Node) drive the JSON boundary: addBuddy result shape, confirmBuddy→buddyConfirmed event, apiVersion refusal, no key-material leak, dev label
 - [X] T023 [US1] Implement the add-friend handshake + safety-number derivation in `protocol-core/shared/src/main/scala/handshake/` + `pcore handshake-init` CLI (FR-001) — symmetric HMAC-derived pairId/safetyNumber/pairKey; tamper ⇒ mismatch
 - [X] T024a [P] [US1] Boundary test for the 512-buddy cap (accept up to 512; 513th rejected predictably; count correct after removals) in `protocol-core/shared/src/test/scala/buddy/` (FR-015) — write first, MUST fail [analyze C1]
 - [X] T024 [US1] Implement `BuddyRelationship` state (`Pending→Confirmed→Removed`), uniqueness/no-dup, removal, AND enforcement of the **512-buddy cap** (reject the 513th predictably) in `protocol-core/shared/src/main/scala/buddy/` (FR-002, FR-015, FR-018)
-- [ ] T025 [US1] Wire `addBuddy`/`confirmBuddy`/`removeBuddy` engine commands + `buddyConfirmed` event in `protocol-core/js/` (FR-001/FR-002/FR-018)
+- [X] T025 [US1] Wire `addBuddy`/`confirmBuddy`/`removeBuddy` engine commands + `buddyConfirmed` event in `protocol-core/js/` (FR-001/FR-002/FR-018) — implemented in `engine.Engine`/`EngineCodec` and exported via `@JSExportTopLevel("ProtocolEngine")`; removeBuddy is silent (FR-018), confirmBuddy(match) emits `buddyConfirmed`
 - [X] T026 [US1] Flutter add-buddy + safety-number-compare UI in `clients/flutter/lib/ui/add_buddy_screen.dart`, showing the privacy-status label (FR-016) — over the `ProtocolEngine` bridge (`DevEngine` stand-in until T019)
 
 **Checkpoint**: US1 fully functional and independently testable (Phase A begins).
