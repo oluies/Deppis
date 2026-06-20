@@ -14,9 +14,12 @@ class RoundTransportSpec extends AnyFunSuite:
     * one submits can be retrieved by the other (single-use). */
   private final class FakeTransport(val store: mutable.Map[String, Array[Byte]] = mutable.Map.empty)
       extends RoundTransport:
-    var mail: Boolean       = false
+    var mail: Boolean         = false
     var acceptSubmit: Boolean = true // set false to simulate a transient backend failure on send
+    // The observable submit trace: (token, frame) per write — what an observer of the store sees.
+    val submits = mutable.ArrayBuffer.empty[(Array[Byte], Array[Byte])]
     def submit(token: Array[Byte], frame: Array[Byte]): Boolean =
+      submits += ((token, frame))
       if acceptSubmit then store(hex(token)) = frame
       acceptSubmit
     def mailWaiting(roundId: Long, clientLabel: Array[Byte]): Boolean = mail
@@ -104,6 +107,40 @@ class RoundTransportSpec extends AnyFunSuite:
     bob.tick(4)
     val got = bob.drainEvents().collect { case EngineEvent.MessageReceived(_, txt, _) => txt }
     assert(got == Seq("important"))
+
+  test("cover traffic: every round makes exactly one store write whether active or idle"):
+    val t = FakeTransport()
+    val (e, pairId) = confirmedEngine(t, BuddyRole.Initiator)
+    // 5 rounds: alternate active (a real message queued) and idle (nothing queued).
+    for r <- 1 to 5 do
+      if r % 2 == 1 then e.sendMessage(pairId, s"msg$r")
+      e.tick(r)
+    assert(t.submits.size == 5, "exactly one store write per round (no missing/extra writes)")
+
+  test("active and idle traces are indistinguishable in the observable metadata (T040)"):
+    // Two clients: one sends a real message every round, one is idle every round. An observer of the
+    // store sees, per round, one write with a fixed-size frame under a fixed-size token — IDENTICAL
+    // for both, so it cannot tell the active client from the idle one by traffic shape (FR-012).
+    // (Frame *content* — real plaintext vs all-zero carrier — is the orthogonal confidentiality
+    // layer, hidden once the message-content ratchet is in the frame path; this asserts the metadata
+    // trace, which is what a metadata-private messenger must keep uniform.)
+    val rounds = 20
+    val active = FakeTransport()
+    val idle   = FakeTransport()
+    val (ea, pid) = confirmedEngine(active, BuddyRole.Initiator)
+    val (ei, _)   = confirmedEngine(idle, BuddyRole.Initiator)
+    for r <- 1 to rounds do
+      ea.sendMessage(pid, s"hello$r")
+      ea.tick(r)
+      ei.tick(r) // idle: never sends
+    // Same number of writes…
+    assert(active.submits.size == rounds && idle.submits.size == rounds)
+    // …same frame size every write…
+    assert((active.submits ++ idle.submits).forall(_._2.length == frame.Frame.Size))
+    // …same token size every write (random-looking HMAC output, real or cover).
+    assert((active.submits ++ idle.submits).forall(_._1.length == token.RetrievalToken.Length))
+    // The per-round observable shape (count, frame size, token size) is identical between the two.
+    assert(active.submits.map(s => (s._1.length, s._2.length)) == idle.submits.map(s => (s._1.length, s._2.length)))
 
   test("the carrier flag reflects whether a real frame was actually submitted (fail+retry uniform)"):
     val t = FakeTransport()
