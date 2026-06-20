@@ -114,7 +114,9 @@ lazy val server = (project in file("server"))
       .map(d => baseDirectory.value / d / "src" / "main" / "scala"),
     Test / unmanagedSourceDirectories ++= Seq("pong", "ping", "provider", "attestation")
       .map(d => baseDirectory.value / d / "src" / "test" / "scala"),
-    libraryDependencies ++= testDeps
+    // ujson (OpenBaoClient) — made a direct dependency rather than relying on a transitive pull
+    // through protocol-core/crypto, so the server keeps compiling if those drop upickle.
+    libraryDependencies ++= testDeps :+ ("com.lihaoyi" %% "upickle" % V.upickle)
   )
 
 // transport: gRPC contracts compiled by ScalaPB + the round service/client over them. Generated
