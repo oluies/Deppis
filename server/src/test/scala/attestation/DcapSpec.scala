@@ -69,3 +69,27 @@ class DcapSpec extends AnyFunSuite:
     assert(Dcap.quoteBody(q.copy(nonce = nonce.updated(0, 0.toByte))).toVector != base)
     assert(Dcap.quoteBody(q.copy(enclavePublicKey = bytes(1))).toVector != base)
     assert(Dcap.quoteBody(q.copy(measurement = Measurement(bytes(0), mrSigner))).toVector != base)
+
+  // ---- Fixed known-answer vectors (independent of the round trip) ----
+
+  private def hex(s: String): Array[Byte] = s.grouped(2).map(Integer.parseInt(_, 16).toByte).toArray
+
+  test("KAT: quoteBody encoding is the exact pinned length-prefixed layout"):
+    // measurement mrEnclave=[1,2,3], mrSigner=[9,9], key=[7,7,7], nonce=[5,5].
+    val q = Quote(Measurement(bytes(1, 2, 3), bytes(9, 9)), bytes(7, 7, 7), bytes(5, 5), Vector.empty)
+    val got = Dcap.quoteBody(q).map(b => f"${b & 0xff}%02x").mkString
+    assert(got == "0000000301020300000002090900000003070707000000020505")
+
+  test("KAT: a fixed (P-256 key, message, signature) verifies — pins SHA256withECDSA on secp256r1"):
+    // A static vector (generated once); a wrong digest or curve would fail to verify it, catching a
+    // silently mis-wired primitive that a fresh-keypair round trip cannot.
+    val pub = hex(
+      "3059301306072a8648ce3d020106082a8648ce3d03010703420004dad972985a5b637b8303a795b5da5dfa" +
+        "17004c9e35c4001e406282ace9a23f0e1a12918633dc8e89143031634aaafb39edf333d90f513043790808bd44bb02f3")
+    val sig = hex(
+      "304502210084630a93695212d64287177a341194e5cbe42c573fc584dcdd2a8e1a91adba50022060100b6fd" +
+        "e596c5e7afbc196d9d4a49a2ea8d1f4400d41658224e2038ccde551")
+    val msg = "dcap-kat-message".getBytes("UTF-8")
+    assert(Dcap.ecdsaVerify(pub, msg, sig), "the pinned vector must verify")
+    assert(!Dcap.ecdsaVerify(pub, msg, sig.updated(sig.length - 1, (sig.last ^ 0x01).toByte)), "flip ⇒ reject")
+    assert(!Dcap.ecdsaVerify(pub, "different".getBytes("UTF-8"), sig), "wrong message ⇒ reject")

@@ -2,6 +2,7 @@ package attestation
 
 import java.security.{KeyFactory, Signature}
 import java.security.spec.X509EncodedKeySpec
+import scala.util.control.NonFatal
 
 /** DCAP (Intel SGX ECDSA) attestation — the cryptographic quote-signature verification.
   *
@@ -40,7 +41,9 @@ object Dcap:
       sig.initVerify(pub)
       sig.update(message)
       sig.verify(signature)
-    catch case _: Throwable => false // any parse/verify failure ⇒ not valid (no secret-dependent path)
+    // Any malformed-key/signature failure ⇒ not valid (fail closed, no secret-dependent path).
+    // `NonFatal` lets fatal/control throwables (OOM, interrupt) propagate rather than be masked.
+    catch case NonFatal(_) => false
 
   private def lp(b: Array[Byte]): Array[Byte] = intBytes(b.length) ++ b
   private def intBytes(v: Int): Array[Byte] =
