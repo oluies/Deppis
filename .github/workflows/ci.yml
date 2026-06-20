@@ -93,6 +93,32 @@ jobs:
       - name: Run the cross-process integration test (Scala fronts ↔ obsd)
         run: OBSD_BIN="$(pwd)/oblivious-sidecar/target/debug/obsd" sbt -batch -no-colors "transport/testOnly transport.SidecarIntegrationSpec"
 
+  scalajs:
+    name: Scala.js engine — cross-build + link (T019)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "24"
+      - uses: sbt/setup-sbt@v1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22" # Scala.js tests + the Node-crypto Kdf run under Node
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cache/coursier
+            ~/.sbt
+            ~/.ivy2/cache
+          key: sbt-${{ runner.os }}-${{ hashFiles('build.sbt', 'project/build.properties', 'project/plugins.sbt') }}
+          restore-keys: sbt-${{ runner.os }}-
+      - name: Test the JS engine under Node (cross-platform KAT vs the JVM build)
+        run: sbt -batch -no-colors "protocolCoreJS/test"
+      - name: Link the production bundle (proves the @JSExportTopLevel facade emits)
+        run: sbt -batch -no-colors "protocolCoreJS/fullLinkJS"
+
   flutter:
     name: Flutter — analyze + widget tests (T005)
     runs-on: ubuntu-latest

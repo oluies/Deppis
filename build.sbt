@@ -23,12 +23,18 @@ lazy val testDeps = Seq(
 
 lazy val commonScalac = Seq("-deprecation", "-feature", "-unchecked", "-Wunused:all")
 
+// protocol-core is the single source of truth (Constitution VII), cross-compiled to JVM + Scala.js
+// from ONE set of `shared/` sources. The ONLY platform-specific file is `kdf/Kdf.scala` (JVM = JCA
+// HMAC; JS = Node-crypto HMAC) — both vetted, both synchronous, so the two builds are identical.
 lazy val protocolCore = (project in file("protocol-core"))
   .settings(
     name := "protocol-core",
-    // Sources live under shared/ so the later Scala.js cross-build reuses them verbatim.
-    Compile / scalaSource := baseDirectory.value / "shared" / "src" / "main" / "scala",
-    Test / scalaSource    := baseDirectory.value / "shared" / "src" / "test" / "scala",
+    // shared/ (cross-platform) + jvm/ (the JCA Kdf). Same `shared/` dir feeds the JS build below.
+    Compile / unmanagedSourceDirectories := Seq(
+      baseDirectory.value / "shared" / "src" / "main" / "scala",
+      baseDirectory.value / "jvm" / "src" / "main" / "scala"
+    ),
+    Test / unmanagedSourceDirectories := Seq(baseDirectory.value / "shared" / "src" / "test" / "scala"),
     scalacOptions ++= Seq("-deprecation", "-feature", "-unchecked", "-Wunused:all"),
     // CLIs read JSON from stdin (Constitution V); fork and connect stdin so `run` forwards it.
     run / fork         := true,
@@ -37,6 +43,27 @@ lazy val protocolCore = (project in file("protocol-core"))
       "com.lihaoyi"       %% "upickle"          % V.upickle,
       "org.scalatest"     %% "scalatest"        % V.scalatest     % Test,
       "org.scalatestplus" %% "scalacheck-1-18"  % V.scalatestPlus % Test
+    )
+  )
+
+// The Scala.js build of protocol-core: the SAME shared/ sources + js/ (Node-crypto Kdf + the
+// @JSExportTopLevel `ProtocolEngine` facade). `fastLinkJS`/`fullLinkJS` emit the bundle Dart loads;
+// the engine tests also run here under Node (real Node-crypto), cross-checked against the JVM.
+lazy val protocolCoreJS = (project in file("protocol-core-js"))
+  .enablePlugins(ScalaJSPlugin)
+  .settings(
+    name := "protocol-core-js",
+    // CommonJS module so `import crypto` (Node) resolves; tests run under Node.
+    scalaJSLinkerConfig ~= (_.withModuleKind(ModuleKind.CommonJSModule)),
+    scalacOptions ++= Seq("-deprecation", "-feature", "-unchecked", "-Wunused:all"),
+    Compile / unmanagedSourceDirectories := Seq(
+      (protocolCore.base / "shared" / "src" / "main" / "scala"),
+      (protocolCore.base / "js" / "src" / "main" / "scala")
+    ),
+    Test / unmanagedSourceDirectories := Seq(protocolCore.base / "js" / "src" / "test" / "scala"),
+    libraryDependencies ++= Seq(
+      "com.lihaoyi"   %%% "upickle"   % V.upickle,
+      "org.scalatest" %%% "scalatest" % V.scalatest % Test
     )
   )
 
@@ -105,5 +132,5 @@ lazy val transport = (project in file("transport"))
   )
 
 lazy val root = (project in file("."))
-  .aggregate(protocolCore, crypto, anonymity, server, transport)
+  .aggregate(protocolCore, protocolCoreJS, crypto, anonymity, server, transport)
   .settings(name := "metadata-messenger", publish / skip := true)
