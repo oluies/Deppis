@@ -172,6 +172,11 @@ final class Engine(
             nextReal.foreach { case (pid, q) => dropHead(pid, q) }
             plan.kind == Schedule.FrameKind.Carrier
           case Some(t) =>
+            // Poll notifications FIRST — before any send side effect. This emits `notified` (FR-004,
+            // still before retrieval) and, crucially, lets a transport reject the round up front
+            // (e.g. an out-of-range round id) so an invalid round fails atomically without a
+            // half-applied send (no submitted frame, no advanced counter).
+            if t.mailWaiting(roundId, clientLabel) then emit(EngineEvent.Notified(roundId))
             // Submit under our outgoing token. Only advance the counter + drop the frame when the
             // submit SUCCEEDS; on failure the frame stays queued and is retried next round (no
             // silent message loss).
@@ -190,8 +195,7 @@ final class Engine(
                   // the API — drop rather than wedge the queue if that invariant ever breaks.
                   dropHead(pid, q)
             }
-            // Notify-before-retrieval (FR-004): ask whether mail waits, emit `notified`, THEN drain.
-            if t.mailWaiting(roundId, clientLabel) then emit(EngineEvent.Notified(roundId))
+            // Retrieve (after notify — FR-004 notify-before-retrieval) and drain delivered frames.
             for (pid, rt) <- runtime.toSeq do
               book.get(pid).filter(_.state == BuddyState.Confirmed).foreach { rel =>
                 var more = true
