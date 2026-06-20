@@ -97,4 +97,3 @@ The security-critical appraisal + gate are implemented and unit-tested today:
   identity follows attestation rather than substituting for it.
 - **Custody compromise** — the barrier key is never stored with OpenBao; unseal needs *M-of-N*
   Shamir shares, so a single stolen disk or operator does not yield the key (Constitution XI).
-```
