@@ -6,6 +6,7 @@ import frame.Frame
 import handshake.Handshake
 import privacy.Privacy
 import schedule.Schedule
+import token.RetrievalToken
 
 import java.nio.charset.StandardCharsets.UTF_8
 import scala.collection.mutable
@@ -59,11 +60,36 @@ final case class AddBuddyResult(pairId: String, safetyNumber: String)
 final case class RoundDecision(roundId: Long, carrier: Boolean, retrieve: Boolean)
 
 /** Stateful engine instance. Single-threaded by contract (one engine per client session); the JS
-  * runtime is single-threaded and the JVM tests drive it from one thread. */
-final class Engine:
+  * runtime is single-threaded and the JVM tests drive it from one thread.
+  *
+  * `transport` is the optional PONG/PING backend (T032a). With `None` the engine is purely local
+  * (schedule decisions only, no delivery) — the dev/bundle-less default. With a [[RoundTransport]],
+  * `tick` submits queued frames, polls notifications (emitting `notified` before retrieval, FR-004),
+  * and retrieves delivered frames (emitting `messageReceived`). `clientLabel` is this client's notify
+  * aggregation label — opaque to the engine; the backend uses it to answer "mail for me?". */
+final class Engine(
+    transport: Option[RoundTransport] = None,
+    clientLabel: Array[Byte] = Array.emptyByteArray
+):
   private var book                 = BuddyBook.empty
   private val outbox               = mutable.Map.empty[String, Vector[Array[Byte]]]
   private val events               = mutable.ArrayBuffer.empty[EngineEvent]
+  // Per-buddy delivery runtime: the role fixes the token direction; counters are non-recurrent.
+  private val runtime              = mutable.Map.empty[String, BuddyRuntime]
+
+  private final class BuddyRuntime(val role: BuddyRole):
+    var sendCounter: Long = 0L
+    var recvCounter: Long = 0L
+
+  private def peerRole(r: BuddyRole): BuddyRole = r match
+    case BuddyRole.Initiator => BuddyRole.Responder
+    case BuddyRole.Responder => BuddyRole.Initiator
+
+  // A directional retrieval token: messages FROM `from` TO `to` for the given counter. Both parties
+  // derive the same token from the shared pair key + the (symmetric) role pair, so the receiver can
+  // reconstruct exactly what the sender stored.
+  private def dirToken(pairKey: Array[Byte], from: BuddyRole, to: BuddyRole, counter: Long): Array[Byte] =
+    RetrievalToken.derive(pairKey, from.toString, to.toString, counter)
 
   /** The current build privacy status. Dev backend ⇒ not private ⇒ the mandatory dev label. */
   def privacyStatus: EngineEvent.PrivacyStatus =
@@ -89,6 +115,7 @@ final class Engine:
       book.add(rel) match
         case Right(nb) =>
           book = nb
+          runtime(init.pairId) = BuddyRuntime(role) // fixes this buddy's token direction
           Right(AddBuddyResult(init.pairId, init.safetyNumber)) // no pairKey
         case Left(reason) =>
           // reason is a fixed, non-secret string ("duplicate buddy" / "buddy cap 512 reached").
@@ -108,7 +135,7 @@ final class Engine:
   /** Remove a buddy. Stops future delivery (FR-018) without leaking prior existence — no event. */
   def removeBuddy(pairId: String): Either[EngineError, Unit] =
     book.remove(pairId) match
-      case Right(nb)    => book = nb; outbox.remove(pairId); Right(())
+      case Right(nb)    => book = nb; outbox.remove(pairId); runtime.remove(pairId); Right(())
       case Left(reason) => Left(EngineError("remove_failed", reason))
 
   /** Frame + enqueue a message for the next round to a confirmed buddy. Returns the queue depth;
@@ -128,15 +155,42 @@ final class Engine:
 
   /** Advance the client schedule by one round. Emits exactly one shape-identical plan: a real
     * frame if one is queued (for any buddy), else a carrier — the decision never reveals which.
-    * Returns only the (carrier?, retrieve) decision; the frame bytes stay inside the engine. */
+    * Returns the (carrier?, retrieve) decision; the frame bytes stay inside the engine.
+    *
+    * With a [[RoundTransport]] this round also: submits the queued frame under its directional
+    * retrieval token, polls "mail waiting?" and emits `notified` BEFORE retrieving (FR-004), then
+    * retrieves any delivered frames and emits `messageReceived`. With no transport none of that
+    * happens (the local-only default). */
   def tick(roundId: Long): Either[EngineError, RoundDecision] =
     val nextReal = outbox.collectFirst { case (pid, q) if q.nonEmpty => (pid, q) }
     val payload  = nextReal.map { case (_, q) => Frame.unpad(q.head).getOrElse(Array.emptyByteArray) }
     Schedule.planRound(roundId, payload) match
       case Right(plan) =>
+        // Submit the queued frame over the transport (if any) under our outgoing token, then drop it.
+        transport.foreach { t =>
+          nextReal.foreach { case (pid, q) =>
+            for rt <- runtime.get(pid); rel <- book.get(pid) do
+              t.submit(dirToken(rel.pairKey, rt.role, peerRole(rt.role), rt.sendCounter), q.head)
+              rt.sendCounter += 1
+          }
+        }
         nextReal.foreach { case (pid, q) =>
           val rest = q.drop(1)
           if rest.isEmpty then outbox.remove(pid) else outbox(pid) = rest
+        }
+        // Notify-before-retrieval (FR-004): ask whether mail waits, emit `notified`, THEN retrieve.
+        transport.foreach { t =>
+          if t.mailWaiting(roundId, clientLabel) then emit(EngineEvent.Notified(roundId))
+          for (pid, rt) <- runtime.toSeq do
+            book.get(pid).filter(_.state == BuddyState.Confirmed).foreach { rel =>
+              val tok = dirToken(rel.pairKey, peerRole(rt.role), rt.role, rt.recvCounter)
+              t.retrieve(tok).foreach { frame =>
+                Frame.unpad(frame).toOption.foreach { p =>
+                  emit(EngineEvent.MessageReceived(pid, new String(p, UTF_8), roundId))
+                  rt.recvCounter += 1
+                }
+              }
+            }
         }
         Right(RoundDecision(plan.roundId, carrier = plan.kind == Schedule.FrameKind.Carrier, plan.retrieve))
       case Left(reason) => Left(EngineError("tick_failed", reason))
