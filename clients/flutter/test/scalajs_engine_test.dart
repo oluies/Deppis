@@ -143,13 +143,18 @@ void main() {
           return jsonEncode({'apiVersion': '1', 'result': null, 'events': events});
         };
 
+    // `events` is a broadcast stream; register the expectation BEFORE `tick` emits so the ordering
+    // guarantee is explicit (emitsThrough skips the initial privacyStatus emission).
     test('a notified event is translated onto the stream', () async {
       final engine = ScalaJsEngine(handleEmitting([
         {'event': 'notified', 'roundId': 5}
       ]));
-      final ev = engine.events.firstWhere((e) => e is Notified);
+      final expectation = expectLater(
+        engine.events,
+        emitsThrough(predicate<EngineEvent>((e) => e is Notified && e.roundId == 5)),
+      );
       await engine.tick(roundId: 5);
-      expect((await ev as Notified).roundId, 5);
+      await expectation;
     });
 
     test('a messageReceived event is translated onto the stream', () async {
@@ -157,23 +162,29 @@ void main() {
       final engine = ScalaJsEngine(handleEmitting([
         {'event': 'messageReceived', 'pairId': 'p1', 'plaintext': 'hi', 'receivedAt': at}
       ]));
-      final ev = engine.events.firstWhere((e) => e is MessageReceived);
+      final expectation = expectLater(
+        engine.events,
+        emitsThrough(predicate<EngineEvent>((e) =>
+            e is MessageReceived &&
+            e.pairId == 'p1' &&
+            e.plaintext == 'hi' &&
+            e.receivedAt.millisecondsSinceEpoch == at)),
+      );
       await engine.tick(roundId: 1);
-      final m = await ev as MessageReceived;
-      expect(m.pairId, 'p1');
-      expect(m.plaintext, 'hi');
-      expect(m.receivedAt.millisecondsSinceEpoch, at);
+      await expectation;
     });
 
     test('a privacyStatus event is translated onto the stream', () async {
       final engine = ScalaJsEngine(handleEmitting([
         {'event': 'privacyStatus', 'backend': 'EnclaveTarget', 'metadataPrivate': true, 'label': 'METADATA PRIVATE'}
       ]));
-      final ev = engine.events.firstWhere(
-        (e) => e is PrivacyStatusChanged && e.status.metadataPrivate,
+      final expectation = expectLater(
+        engine.events,
+        emitsThrough(predicate<EngineEvent>((e) =>
+            e is PrivacyStatusChanged && e.status.metadataPrivate && e.status.backend == 'EnclaveTarget')),
       );
       await engine.tick(roundId: 1);
-      expect((await ev as PrivacyStatusChanged).status.backend, 'EnclaveTarget');
+      await expectation;
     });
 
     test('an unknown event shape is ignored, not thrown', () async {
