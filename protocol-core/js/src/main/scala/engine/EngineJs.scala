@@ -26,7 +26,7 @@ final class EngineJs(
   private val engine: Engine =
     transport.toOption match
       case Some(t) =>
-        val label = clientLabel.toOption.map(u => bytes(u)).getOrElse(Array.emptyByteArray)
+        val label = clientLabel.toOption.map(Uint8.toBytes).getOrElse(Array.emptyByteArray)
         new Engine(Some(new JsRoundTransport(t)), label)
       case None => new Engine()
 
@@ -38,11 +38,3 @@ final class EngineJs(
   /** Handle one JSON command envelope; returns the JSON response (result+events, or error). */
   @JSExport
   def handle(input: String): String = codec.handle(input)
-
-  private def bytes(u: Uint8Array): Array[Byte] =
-    val out = new Array[Byte](u.length)
-    var i = 0
-    while i < u.length do
-      out(i) = u(i).toByte
-      i += 1
-    out

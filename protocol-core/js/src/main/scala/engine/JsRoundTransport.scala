@@ -24,29 +24,23 @@ trait JsTransport extends js.Object:
 /** Adapts a host-supplied [[JsTransport]] to the cross-platform [[RoundTransport]] the engine uses,
   * so the SAME `Engine.tick` notify-before-retrieval logic that runs on the JVM drives a browser
   * backend. This layer only converts byte buffers; it sees no plaintext or keys. */
+object JsRoundTransport:
+  /** Number.MAX_SAFE_INTEGER — the largest integer a JS number represents exactly. */
+  val MaxSafeRound: Long = (1L << 53) - 1
+
 final class JsRoundTransport(t: JsTransport) extends RoundTransport:
 
   def submit(token: Array[Byte], frame: Array[Byte]): Boolean =
-    t.submit(toU8(token), toU8(frame))
+    t.submit(Uint8.toJs(token), Uint8.toJs(frame))
 
   def mailWaiting(roundId: Long, clientLabel: Array[Byte]): Boolean =
-    t.mailWaiting(roundId.toDouble, toU8(clientLabel))
+    // `roundId` crosses as a JS number; reject anything that would not round-trip exactly rather
+    // than silently aliasing a large round id (caught by the codec's guard → bad_request).
+    require(
+      roundId >= 0 && roundId <= JsRoundTransport.MaxSafeRound,
+      "roundId out of JS-safe-integer range"
+    )
+    t.mailWaiting(roundId.toDouble, Uint8.toJs(clientLabel))
 
   def retrieve(token: Array[Byte]): Option[Array[Byte]] =
-    Option(t.retrieve(toU8(token))).map(toBytes) // JS `null` → None
-
-  private def toU8(a: Array[Byte]): Uint8Array =
-    val u = new Uint8Array(a.length)
-    var i = 0
-    while i < a.length do
-      u(i) = (a(i) & 0xff).toShort
-      i += 1
-    u
-
-  private def toBytes(u: Uint8Array): Array[Byte] =
-    val out = new Array[Byte](u.length)
-    var i = 0
-    while i < u.length do
-      out(i) = u(i).toByte
-      i += 1
-    out
+    Option(t.retrieve(Uint8.toJs(token))).map(Uint8.toBytes) // JS `null` → None
