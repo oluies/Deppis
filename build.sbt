@@ -46,9 +46,11 @@ lazy val protocolCore = (project in file("protocol-core"))
     )
   )
 
-// The Scala.js build of protocol-core: the SAME shared/ sources + js/ (Node-crypto Kdf + the
+// The Scala.js build of protocol-core: the SAME shared/ sources + js/ (the @noble/hashes Kdf + the
 // @JSExportTopLevel `ProtocolEngine` facade). `fastLinkJS`/`fullLinkJS` emit the bundle Dart loads;
-// the engine tests also run here under Node (real Node-crypto), cross-checked against the JVM.
+// the engine tests run here under Node (real @noble/hashes HMAC), cross-checked against the JVM JCA.
+// @noble/hashes is browser-safe too, so the same bundle loads in Flutter web (with a bundler/import
+// map resolving the bare `@noble/...` specifiers).
 lazy val protocolCoreJS = (project in file("protocol-core-js"))
   .enablePlugins(ScalaJSPlugin)
   .settings(

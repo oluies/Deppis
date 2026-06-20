@@ -1,0 +1,8 @@
+{
+  "name": "metadata-messenger-js",
+  "private": true,
+  "description": "npm deps for the Scala.js protocol-core engine bundle (vetted, browser-compatible crypto).",
+  "dependencies": {
+    "@noble/hashes": "1.3.3"
+  }
+}

@@ -105,7 +105,9 @@ jobs:
       - uses: sbt/setup-sbt@v1
       - uses: actions/setup-node@v4
         with:
-          node-version: "22" # Scala.js tests + the Node-crypto Kdf run under Node
+          node-version: "22" # Scala.js tests run under Node
+      - name: Install the vetted JS crypto dep (@noble/hashes, pinned)
+        run: npm ci
       - uses: actions/cache@v5
         with:
           path: |
@@ -149,6 +151,7 @@ jobs:
         run: |
           grep -q '^sbt.version=' project/build.properties || { echo "::error::sbt.version must be pinned"; exit 1; }
           test -f oblivious-sidecar/Cargo.lock || { echo "::error::Cargo.lock must be committed"; exit 1; }
+          test -f package-lock.json || { echo "::error::package-lock.json must be committed (pinned JS deps)"; exit 1; }
           echo "pinned-deps OK"
       - name: Secret scan (gitleaks)
         run: |

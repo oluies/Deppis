@@ -6,29 +6,28 @@ import scala.scalajs.js.typedarray.Uint8Array
 
 /** Scala.js platform implementation of [[Kdf]] — the JS counterpart of the JVM's JCA version.
   *
-  * HMAC-SHA256 is provided by Node's built-in `crypto` module (OpenSSL-backed): a vetted primitive,
-  * NOT hand-rolled (Constitution I), and **synchronous**, so the cross-compiled `Handshake`/engine
-  * logic is byte-for-byte identical to the JVM build that the tests validate. The JS engine
-  * therefore runs under a Node-compatible runtime.
+  * HMAC-SHA256 is provided by **@noble/hashes** (audited, widely used): a vetted primitive — NOT
+  * hand-rolled (Constitution I) — that is **synchronous** AND **browser-compatible** (pure JS, no
+  * Node built-ins). So the cross-compiled `Handshake`/engine logic is byte-for-byte identical to the
+  * JVM build the tests validate, and the same bundle loads in a browser (Flutter web) as well as
+  * Node — unlike the earlier Node-`crypto` facade, which was Node-only.
   *
-  * (Browser targets have no `crypto` module; a Web Crypto `SubtleCrypto` facade — which is async —
-  * is the documented follow-up for a browser bundle. It does not change this signature's callers
-  * because the Dart bridge is already Future/stream-based.) */
+  * The dependency is pinned in the repo `package.json` (Constitution XI). Under Node it resolves
+  * from `node_modules`; a browser build resolves the bare `@noble/...` specifiers via a bundler or
+  * import map (the bundle itself is browser-safe). */
 @js.native
-@JSImport("crypto", JSImport.Namespace)
-private object NodeCrypto extends js.Object:
-  def createHmac(algorithm: String, key: Uint8Array): Hmac = js.native
+@JSImport("@noble/hashes/hmac", JSImport.Namespace)
+private object HmacModule extends js.Object:
+  def hmac(hash: js.Any, key: Uint8Array, msg: Uint8Array): Uint8Array = js.native
 
 @js.native
-private trait Hmac extends js.Object:
-  def update(data: Uint8Array): Hmac = js.native
-  def digest(): Uint8Array           = js.native // no encoding arg → a Buffer (Uint8Array)
+@JSImport("@noble/hashes/sha256", JSImport.Namespace)
+private object Sha256Module extends js.Object:
+  val sha256: js.Any = js.native
 
 object Kdf:
   def hmacSha256(key: Array[Byte], info: Array[Byte]): Array[Byte] =
-    val h = NodeCrypto.createHmac("sha256", toU8(key))
-    h.update(toU8(info))
-    toBytes(h.digest())
+    toBytes(HmacModule.hmac(Sha256Module.sha256, toU8(key), toU8(info)))
 
   private def toU8(a: Array[Byte]): Uint8Array =
     val u = new Uint8Array(a.length)
