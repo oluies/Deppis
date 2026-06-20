@@ -23,7 +23,11 @@ class RoundTransportSpec extends AnyFunSuite:
       if acceptSubmit then store(hex(token)) = frame
       acceptSubmit
     def mailWaiting(roundId: Long, clientLabel: Array[Byte]): Boolean = mail
-    def retrieve(token: Array[Byte]): Option[Array[Byte]] = store.remove(hex(token))
+    // The observable fetch trace: the token read on each retrieve call (what the store sees).
+    val retrieves = mutable.ArrayBuffer.empty[Array[Byte]]
+    def retrieve(token: Array[Byte]): Option[Array[Byte]] =
+      retrieves += token
+      store.remove(hex(token))
 
   private def secret(s: String): Array[Byte] = s.getBytes("UTF-8")
 
@@ -175,12 +179,40 @@ class RoundTransportSpec extends AnyFunSuite:
     // An empty round (nothing queued) is a carrier too.
     assert(alice.tick(3).toOption.get.carrier)
 
-  test("multiple waiting messages are all drained in one receive round"):
+  test("multiple waiting messages are delivered one per round (uniform fetch, FR-012)"):
     val t = FakeTransport()
     val (alice, pairId) = confirmedEngine(t, BuddyRole.Initiator)
     val (bob, _)        = confirmedEngine(t, BuddyRole.Responder)
     alice.sendMessage(pairId, "m1"); alice.tick(1)
     alice.sendMessage(pairId, "m2"); alice.tick(2)
-    bob.tick(3) // both m1 and m2 are waiting under sequential tokens; drain both this round
-    val got = bob.drainEvents().collect { case EngineEvent.MessageReceived(_, txt, _) => txt }
-    assert(got == Seq("m1", "m2"))
+    // Exactly one retrieve per round ⇒ messages arrive one per round, not all at once.
+    bob.tick(3)
+    assert(bob.drainEvents().collect { case EngineEvent.MessageReceived(_, txt, _) => txt } == Seq("m1"))
+    bob.tick(4)
+    assert(bob.drainEvents().collect { case EngineEvent.MessageReceived(_, txt, _) => txt } == Seq("m2"))
+
+  test("active and idle FETCH traces are indistinguishable: one retrieve per round (T041 fetch path)"):
+    // An active receiver (messages waiting) and an idle one (none) must issue the SAME number of
+    // retrieves — exactly one per round — so an observer can't tell them apart by fetch volume.
+    val rounds  = 12
+    val activeT = FakeTransport()
+    val idleT   = FakeTransport()
+    val (active, _) = confirmedEngine(activeT, BuddyRole.Responder)
+    val (idle, _)   = confirmedEngine(idleT, BuddyRole.Responder)
+    // Pre-stage several messages into the active receiver's store (as the sender would have).
+    val sender = Engine(Some(activeT), clientLabel = "x".getBytes)
+    val sr = sender.addBuddy(secret("shared"), BuddyRole.Initiator).toOption.get
+    sender.confirmBuddy(sr.pairId, matched = true); sender.drainEvents()
+    for r <- 1 to 5 do { sender.sendMessage(sr.pairId, s"m$r"); sender.tick(r) }
+    activeT.retrieves.clear() // ignore the sender's own reads; measure the receiver only
+    var activeDelivered = 0
+    for r <- 1 to rounds do
+      active.tick(r)
+      activeDelivered += active.drainEvents().count(_.isInstanceOf[EngineEvent.MessageReceived])
+      idle.tick(r)
+    // Exactly one retrieve per round for BOTH — fetch volume reveals nothing about waiting mail.
+    assert(activeT.retrieves.size == rounds, "active receiver issues exactly one retrieve per round")
+    assert(idleT.retrieves.size == rounds, "idle receiver issues exactly one retrieve per round")
+    assert((activeT.retrieves ++ idleT.retrieves).forall(_.length == token.RetrievalToken.Length))
+    // Uniformity didn't drop delivery: the staged messages still arrive (one per round).
+    assert(activeDelivered == 5, s"all staged messages delivered, got $activeDelivered")

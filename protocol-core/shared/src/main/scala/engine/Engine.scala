@@ -80,7 +80,9 @@ final class Engine(
   // tokens derived from this key, so a carrier round's store write is indistinguishable from a real
   // one (FR-012 cover traffic). The key never leaves the engine.
   private val coverKey             = random.Rand.bytes(32)
-  private var coverCounter         = 0L
+  private var coverCounter         = 0L // send-path cover frames
+  private var coverReadCounter     = 0L // fetch-path cover reads
+  private var recvCursor           = 0  // round-robin cursor for the one-retrieve-per-round fetch
   // Positive diagnostic for the unreachable orphan branch in `tick` (an outbox entry with no
   // runtime/book). Stays 0 in correct operation; a non-zero value means an internal invariant broke.
   private var orphanedDrops        = 0L
@@ -212,21 +214,32 @@ final class Engine(
               case None =>
                 coverCounter += 1
                 t.submit(RetrievalToken.derive(coverKey, "cover", "", coverCounter), Frame.carrier())
-            // Retrieve (after notify — FR-004 notify-before-retrieval) and drain delivered frames.
-            for (pid, rt) <- runtime.toSeq do
-              book.get(pid).filter(_.state == BuddyState.Confirmed).foreach { rel =>
-                var more = true
-                while more do
-                  t.retrieve(dirToken(rel.pairKey, peerRole(rt.role), rt.role, rt.recvCounter)) match
-                    case Some(frame) =>
-                      // The frame was consumed (single-use), so advance regardless of decode outcome
-                      // — otherwise a malformed frame would stall this buddy's receive stream.
-                      rt.recvCounter += 1
-                      Frame.unpad(frame).toOption.foreach { p =>
-                        emit(EngineEvent.MessageReceived(pid, new String(p, UTF_8), roundId))
-                      }
-                    case None => more = false // drained this buddy's waiting messages this round
+            // Retrieve AFTER notify (FR-004 notify-before-retrieval). Exactly ONE retrieve per round
+            // (the schedule's one-retrieve invariant, FR-012 fetch path): round-robin over confirmed
+            // buddies so the fetch trace (one read/round under a random token) is uniform regardless
+            // of how many buddies have mail; a client with no confirmed buddies issues a cover read.
+            // The cost is latency — a buddy's stream is checked once every `#buddies` rounds (this is
+            // the cover-traffic tradeoff; a digest-guided scheme with fixed padding is a refinement).
+            val confirmed = runtime.toSeq
+              .flatMap { case (pid, rt) =>
+                book.get(pid).filter(_.state == BuddyState.Confirmed).map(rel => (pid, rt, rel))
               }
+              .sortBy(_._1) // stable order so the round-robin cursor is deterministic
+            if confirmed.nonEmpty then
+              val (pid, rt, rel) = confirmed(recvCursor % confirmed.size)
+              recvCursor += 1
+              t.retrieve(dirToken(rel.pairKey, peerRole(rt.role), rt.role, rt.recvCounter)).foreach { frame =>
+                // The frame was consumed (single-use), so advance regardless of decode outcome —
+                // otherwise a malformed frame would stall this buddy's receive stream.
+                rt.recvCounter += 1
+                Frame.unpad(frame).toOption.foreach { p =>
+                  emit(EngineEvent.MessageReceived(pid, new String(p, UTF_8), roundId))
+                }
+              }
+            else
+              // No confirmed buddies: still issue one (cover) read so the fetch trace stays uniform.
+              coverReadCounter += 1
+              t.retrieve(RetrievalToken.derive(coverKey, "cover-read", "", coverReadCounter)): Unit
             // Report the round as a carrier unless a real frame was ACTUALLY submitted — a failed or
             // absent send is then indistinguishable from any other carrier round (a fail+retry does
             // not produce two "real-payload" rounds). (Full store-level cover traffic — a carrier
