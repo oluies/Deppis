@@ -89,6 +89,7 @@ class JsRoundTransportSpec extends AnyFunSuite:
     assert(!tickEvents(bob, 2).contains("messageReceived"))
     fakeA.acceptSubmit = true
     tickEvents(alice, 3)             // retry succeeds
+    fakeB.mail = true                // Bob is now notified
     assert(tickEvents(bob, 4).contains("messageReceived"))
 
   test("retrieve returning JS null yields no messageReceived (and no exception)"):
@@ -115,6 +116,7 @@ class JsRoundTransportSpec extends AnyFunSuite:
     assert(store.isEmpty, "the frame must NOT have been submitted on the rejected round")
     // The message survives: a valid round delivers it (the send side effect was not half-applied).
     tickEvents(alice, 1)
+    fakeB.mail = true // Bob is notified
     assert(tickEvents(bob, 2).contains("messageReceived"))
 
   test("with no transport the engine is local-only (no delivery events)"):

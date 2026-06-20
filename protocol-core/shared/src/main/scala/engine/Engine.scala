@@ -80,7 +80,9 @@ final class Engine(
   // tokens derived from this key, so a carrier round's store write is indistinguishable from a real
   // one (FR-012 cover traffic). The key never leaves the engine.
   private val coverKey             = random.Rand.bytes(32)
-  private var coverCounter         = 0L
+  private var coverCounter         = 0L // send-path cover frames
+  private var coverReadCounter     = 0L // fetch-path cover reads
+  private var recvCursor           = 0L // round-robin cursor for the one-retrieve-per-round fetch
   // Positive diagnostic for the unreachable orphan branch in `tick` (an outbox entry with no
   // runtime/book). Stays 0 in correct operation; a non-zero value means an internal invariant broke.
   private var orphanedDrops        = 0L
@@ -184,7 +186,8 @@ final class Engine(
             // still before retrieval) and, crucially, lets a transport reject the round up front
             // (e.g. an out-of-range round id) so an invalid round fails atomically without a
             // half-applied send (no submitted frame, no advanced counter).
-            if t.mailWaiting(roundId, clientLabel) then emit(EngineEvent.Notified(roundId))
+            val notified = t.mailWaiting(roundId, clientLabel)
+            if notified then emit(EngineEvent.Notified(roundId))
             // Exactly ONE store write per round (cover traffic, FR-012): a real frame under its
             // outgoing token if one is queued, otherwise a carrier frame under a fresh random-looking
             // cover token. So the store-write trace (one 256-byte write per round, random 32-byte
@@ -212,21 +215,41 @@ final class Engine(
               case None =>
                 coverCounter += 1
                 t.submit(RetrievalToken.derive(coverKey, "cover", "", coverCounter), Frame.carrier())
-            // Retrieve (after notify — FR-004 notify-before-retrieval) and drain delivered frames.
-            for (pid, rt) <- runtime.toSeq do
-              book.get(pid).filter(_.state == BuddyState.Confirmed).foreach { rel =>
-                var more = true
-                while more do
-                  t.retrieve(dirToken(rel.pairKey, peerRole(rt.role), rt.role, rt.recvCounter)) match
-                    case Some(frame) =>
-                      // The frame was consumed (single-use), so advance regardless of decode outcome
-                      // — otherwise a malformed frame would stall this buddy's receive stream.
-                      rt.recvCounter += 1
-                      Frame.unpad(frame).toOption.foreach { p =>
-                        emit(EngineEvent.MessageReceived(pid, new String(p, UTF_8), roundId))
-                      }
-                    case None => more = false // drained this buddy's waiting messages this round
+            // Exactly ONE retrieve per round (the schedule's one-retrieve invariant, FR-012 fetch
+            // path), and it is NOTIFY-GUIDED (FR-004): a *real* read happens only when the backend
+            // says mail is waiting this round — otherwise a cover read under a fresh, random-looking
+            // token. With a SINGLE buddy this fully closes the token-recurrence distinguisher: a real
+            // token is read only when its message is present, so it is read at most once and the
+            // per-round read-token stream is non-recurrent for active and idle clients alike (FR-014).
+            //
+            // KNOWN LIMITATION (multi-buddy, tracked T041b): the notify signal here is per-CLIENT
+            // ("some buddy has mail") while the read target is round-robin per-buddy, so the cursor
+            // can land on a buddy that has no mail — re-reading that buddy's frozen token and
+            // recurring across notified rounds. Fully closing this needs PER-BUDDY notify: the sender
+            // signals under the recipient's per-buddy notify label and the receiver reads exactly the
+            // buddy the signal is for (always a hit ⇒ always fresh). Also gates worst-case receive
+            // latency (a buddy is served only when the cursor lands on it AND notify is set).
+            val confirmed = runtime.toSeq
+              .flatMap { case (pid, rt) =>
+                book.get(pid).filter(_.state == BuddyState.Confirmed).map(rel => (pid, rt, rel))
               }
+              .sortBy(_._1) // stable order so the round-robin cursor is deterministic
+            if notified && confirmed.nonEmpty then
+              val (pid, rt, rel) = confirmed((Math.floorMod(recvCursor, confirmed.size.toLong)).toInt)
+              recvCursor += 1
+              t.retrieve(dirToken(rel.pairKey, peerRole(rt.role), rt.role, rt.recvCounter)).foreach { frame =>
+                // The frame was consumed (single-use), so advance regardless of decode outcome —
+                // otherwise a malformed frame would stall this buddy's receive stream.
+                rt.recvCounter += 1
+                Frame.unpad(frame).toOption.foreach { p =>
+                  emit(EngineEvent.MessageReceived(pid, new String(p, UTF_8), roundId))
+                }
+              }
+            else
+              // No notification (or no confirmed buddies): a cover read under a fresh token, so the
+              // fetch trace stays one-read-per-round with a non-recurrent token.
+              coverReadCounter += 1
+              t.retrieve(RetrievalToken.derive(coverKey, "cover-read", "", coverReadCounter)): Unit
             // Report the round as a carrier unless a real frame was ACTUALLY submitted — a failed or
             // absent send is then indistinguishable from any other carrier round (a fail+retry does
             // not produce two "real-payload" rounds). (Full store-level cover traffic — a carrier
