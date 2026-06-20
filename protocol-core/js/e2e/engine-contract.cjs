@@ -24,9 +24,22 @@ assert.strictEqual(engine.apiVersion, "1", "apiVersion");
 const addRaw = engine.handle(
   '{"apiVersion":"1","command":"addBuddy","args":{"sharedSecret":"abc","role":"initiator"}}'
 );
-assert.ok(!addRaw.includes("pairKey"), "no key material crosses the boundary");
+assert.ok(!addRaw.includes("pairKey"), "no pairKey field on the wire");
 const add = JSON.parse(addRaw);
+// Strong no-key-material invariant: the result is EXACTLY {pairId, safetyNumber} — not just absent
+// of a "pairKey" field, so key bytes cannot hide under any other field name.
+assert.deepStrictEqual(
+  Object.keys(add.result).sort(),
+  ["pairId", "safetyNumber"],
+  "result exposes exactly pairId + safetyNumber (no key material under any field)"
+);
 assert.strictEqual(add.result.safetyNumber.split(" ").length, 6, "safety number shape");
+// And no field carries a long high-entropy hex/base64 blob (a serialized 32-byte key would).
+for (const [k, v] of Object.entries(add.result)) {
+  if (typeof v === "string") {
+    assert.ok(!/[A-Za-z0-9+/=]{40,}/.test(v), `field ${k} must not carry a key-sized blob`);
+  }
+}
 const pairId = add.result.pairId;
 
 // confirmBuddy(match) emits the buddyConfirmed event.

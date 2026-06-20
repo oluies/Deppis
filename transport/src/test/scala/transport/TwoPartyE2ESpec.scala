@@ -53,17 +53,20 @@ class TwoPartyE2ESpec extends AnyFunSuite with ObsdHarness:
       val frame     = Frame.pad(plaintext.getBytes).toOption.get
       assert(aliceStore.write(tokenA, frame).isRight)
 
-      // Bob retrieves with the independently-derived token and recovers the plaintext.
+      // Obliviousness / token isolation — checked WHILE the message is still present: a token for a
+      // different counter must NOT retrieve the message stored under tokenA (no false delivery, and
+      // the wrong read must not consume it either).
+      val wrong = RetrievalToken.derive(pair.pairKey, Alice, Bob, counter = 99L)
+      assert(bobStore.read(wrong).toOption.flatten.isEmpty)
+
+      // Bob retrieves with the independently-derived token and recovers the plaintext — proving the
+      // message survived the wrong-token read above.
       val got = bobStore.read(tokenB).toOption.flatten
       assert(got.exists(_.sameElements(frame)))
       assert(Frame.unpad(got.get).toOption.map(new String(_)).contains(plaintext))
 
       // Single-use: a replayed retrieval returns nothing (FR — no residual retention).
       assert(bobStore.read(tokenB).toOption.flatten.isEmpty)
-
-      // Obliviousness: a token for a different counter never yields a false delivery.
-      val wrong = RetrievalToken.derive(pair.pairKey, Alice, Bob, counter = 99L)
-      assert(bobStore.read(wrong).toOption.flatten.isEmpty)
     }
 
   test("notify: Bob learns 'mail waiting' for the round without the store revealing who wrote"):
