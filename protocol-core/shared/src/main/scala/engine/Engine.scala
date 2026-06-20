@@ -218,10 +218,17 @@ final class Engine(
             // Exactly ONE retrieve per round (the schedule's one-retrieve invariant, FR-012 fetch
             // path), and it is NOTIFY-GUIDED (FR-004): a *real* read happens only when the backend
             // says mail is waiting this round — otherwise a cover read under a fresh, random-looking
-            // token. Because a real expected token is read only when its message is actually present,
-            // it is read at most once and its counter advances, so the per-round read-token stream is
-            // ALWAYS fresh (non-recurrent) whether the client is active or idle — closing the
-            // token-recurrence distinguisher of a fixed-token poll (FR-014 non-recurrence).
+            // token. With a SINGLE buddy this fully closes the token-recurrence distinguisher: a real
+            // token is read only when its message is present, so it is read at most once and the
+            // per-round read-token stream is non-recurrent for active and idle clients alike (FR-014).
+            //
+            // KNOWN LIMITATION (multi-buddy, tracked T041b): the notify signal here is per-CLIENT
+            // ("some buddy has mail") while the read target is round-robin per-buddy, so the cursor
+            // can land on a buddy that has no mail — re-reading that buddy's frozen token and
+            // recurring across notified rounds. Fully closing this needs PER-BUDDY notify: the sender
+            // signals under the recipient's per-buddy notify label and the receiver reads exactly the
+            // buddy the signal is for (always a hit ⇒ always fresh). Also gates worst-case receive
+            // latency (a buddy is served only when the cursor lands on it AND notify is set).
             val confirmed = runtime.toSeq
               .flatMap { case (pid, rt) =>
                 book.get(pid).filter(_.state == BuddyState.Confirmed).map(rel => (pid, rt, rel))

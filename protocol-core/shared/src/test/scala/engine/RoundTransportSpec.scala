@@ -172,11 +172,12 @@ class RoundTransportSpec extends AnyFunSuite:
     bob.tick(3); assert(msgs(bob) == Seq("m1"))
     bob.tick(4); assert(msgs(bob) == Seq("m2"))
 
-  test("fetch trace is non-recurrent and identical for active vs idle (T041 fetch path, FR-014)"):
+  test("SINGLE-BUDDY fetch trace is non-recurrent and identical for active vs idle (T041, FR-014)"):
     // Active receiver: notified on each round a message is present, reading a real (advancing) token.
     // Idle receiver: never notified, reading a fresh cover token each round. BOTH issue exactly one
     // read per round and — crucially — NO read token recurs, so an observer of the token stream can't
-    // tell active from idle (closes the fixed-token-poll recurrence distinguisher).
+    // tell active from idle (closes the fixed-token-poll recurrence distinguisher). Holds for a single
+    // buddy; the multi-buddy case is the next test (recurrence remains until per-buddy notify, T041b).
     val store = mutable.Map.empty[String, Array[Byte]]
     val senderT = new FakeTransport(store)
     val activeT = new FakeTransport(store)
@@ -205,3 +206,23 @@ class RoundTransportSpec extends AnyFunSuite:
     assert(distinct(idleT.retrieves), "idle read tokens must be non-recurrent")
     // …and delivery still works.
     assert(delivered == 5, s"all staged messages delivered, got $delivered")
+
+  test("MULTI-BUDDY fetch keeps one read per round, but token non-recurrence is NOT yet held (T041b)"):
+    // Documents the known limitation: with ≥2 confirmed buddies and a per-CLIENT notify, the
+    // round-robin cursor can land on a buddy with no mail and re-read its frozen token. The COUNT
+    // stays uniform (one read/round) — what's NOT yet uniform is token recurrence, which needs
+    // per-buddy notify (T041b). This test pins the current behavior so a future fix is visible.
+    val t = FakeTransport()
+    val bob = Engine(Some(t), clientLabel = "bob".getBytes)
+    bob.addBuddy(secret("buddy-A"), BuddyRole.Responder)
+    bob.addBuddy(secret("buddy-B"), BuddyRole.Responder)
+    bob.confirmBuddy(handshake.Handshake.init(secret("buddy-A")).pairId, matched = true)
+    bob.confirmBuddy(handshake.Handshake.init(secret("buddy-B")).pairId, matched = true)
+    bob.drainEvents()
+    val rounds = 10
+    t.mail = true // notified every round (per-client), but the cursor alternates A/B with no mail
+    for r <- 1 to rounds do bob.tick(r)
+    assert(t.retrieves.size == rounds, "COUNT uniformity holds: exactly one read per round")
+    // Token non-recurrence does NOT yet hold for multi-buddy (the limitation T041b closes):
+    val distinctTokens = t.retrieves.map(hex).toSet.size
+    assert(distinctTokens < rounds, "known limitation: frozen per-buddy tokens recur (pending T041b)")
