@@ -1,0 +1,70 @@
+# Envoy: translate browser gRPC-web (HTTP/1.1) ⇄ server gRPC (HTTP/2) for the metadata-private
+# messenger (T032c). The browser ProtocolEngine's gRPC-web host transport talks to :8080 here;
+# Envoy forwards to the Scala gRPC server (ObliviousStore + NotificationService). Deployment config
+# — pin the image, restrict CORS to the real app origin, and terminate TLS at/above Envoy.
+#
+# Run:  envoy -c deploy/envoy/envoy.yaml
+# Pinned image (reproducible builds, Constitution XI):  envoyproxy/envoy:v1.31.2
+
+static_resources:
+  listeners:
+    - name: grpc_web_listener
+      address:
+        socket_address: { address: 0.0.0.0, port_value: 8080 }
+      filter_chains:
+        - filters:
+            - name: envoy.filters.network.http_connection_manager
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                stat_prefix: ingress_grpc_web
+                codec_type: AUTO
+                route_config:
+                  name: local_route
+                  virtual_hosts:
+                    - name: backend
+                      domains: ["*"]
+                      routes:
+                        - match: { prefix: "/" }
+                          route:
+                            cluster: scala_grpc
+                            # gRPC needs a generous timeout; round calls are small but the round
+                            # cadence is minute-order (SC-001).
+                            timeout: 30s
+                      typed_per_filter_config:
+                        envoy.filters.http.cors:
+                          "@type": type.googleapis.com/envoy.extensions.filters.http.cors.v3.CorsPolicy
+                          # RESTRICT to the real app origin in production (not "*").
+                          allow_origin_string_match:
+                            - exact: "https://mm.example"
+                          allow_methods: "GET, POST, OPTIONS"
+                          allow_headers: "keep-alive,user-agent,cache-control,content-type,content-transfer-encoding,x-grpc-web,grpc-timeout"
+                          expose_headers: "grpc-status,grpc-message"
+                          max_age: "1728000"
+                http_filters:
+                  - name: envoy.filters.http.grpc_web
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.grpc_web.v3.GrpcWeb
+                  - name: envoy.filters.http.cors
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.cors.v3.Cors
+                  - name: envoy.filters.http.router
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+
+  clusters:
+    - name: scala_grpc
+      type: STRICT_DNS
+      lb_policy: ROUND_ROBIN
+      # The server speaks HTTP/2 gRPC.
+      typed_extension_protocol_options:
+        envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+          "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+          explicit_http_config:
+            http2_protocol_options: {}
+      load_assignment:
+        cluster_name: scala_grpc
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address: { address: messenger-server, port_value: 9090 }
