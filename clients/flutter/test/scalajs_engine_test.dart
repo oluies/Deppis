@@ -126,4 +126,61 @@ void main() {
       await engine.tick(roundId: 7); // no throw
     });
   });
+
+  group('ScalaJsEngine event translation', () {
+    // A handle whose privacyStatus is fixed and whose `tick` returns a caller-supplied events array,
+    // so the adapter's _translate of every engine event shape is exercised. (A backend-connected
+    // engine is what would actually emit notified/messageReceived — see T032a follow-up.)
+    String Function(String) handleEmitting(List<Map<String, dynamic>> events) => (request) {
+          final req = jsonDecode(request) as Map<String, dynamic>;
+          if (req['command'] == 'privacyStatus') {
+            return jsonEncode({
+              'apiVersion': '1',
+              'result': {'event': 'privacyStatus', 'backend': 'Dev', 'metadataPrivate': false, 'label': devNoPrivacyLabel},
+              'events': <Map<String, dynamic>>[],
+            });
+          }
+          return jsonEncode({'apiVersion': '1', 'result': null, 'events': events});
+        };
+
+    test('a notified event is translated onto the stream', () async {
+      final engine = ScalaJsEngine(handleEmitting([
+        {'event': 'notified', 'roundId': 5}
+      ]));
+      final ev = engine.events.firstWhere((e) => e is Notified);
+      await engine.tick(roundId: 5);
+      expect((await ev as Notified).roundId, 5);
+    });
+
+    test('a messageReceived event is translated onto the stream', () async {
+      final at = DateTime(2026, 6, 20).millisecondsSinceEpoch;
+      final engine = ScalaJsEngine(handleEmitting([
+        {'event': 'messageReceived', 'pairId': 'p1', 'plaintext': 'hi', 'receivedAt': at}
+      ]));
+      final ev = engine.events.firstWhere((e) => e is MessageReceived);
+      await engine.tick(roundId: 1);
+      final m = await ev as MessageReceived;
+      expect(m.pairId, 'p1');
+      expect(m.plaintext, 'hi');
+      expect(m.receivedAt.millisecondsSinceEpoch, at);
+    });
+
+    test('a privacyStatus event is translated onto the stream', () async {
+      final engine = ScalaJsEngine(handleEmitting([
+        {'event': 'privacyStatus', 'backend': 'EnclaveTarget', 'metadataPrivate': true, 'label': 'METADATA PRIVATE'}
+      ]));
+      final ev = engine.events.firstWhere(
+        (e) => e is PrivacyStatusChanged && e.status.metadataPrivate,
+      );
+      await engine.tick(roundId: 1);
+      expect((await ev as PrivacyStatusChanged).status.backend, 'EnclaveTarget');
+    });
+
+    test('an unknown event shape is ignored, not thrown', () async {
+      final engine = ScalaJsEngine(handleEmitting([
+        {'event': 'somethingNew', 'x': 1}
+      ]));
+      await engine.tick(roundId: 1); // no throw; unknown events are dropped
+    });
+  });
 }

@@ -16,10 +16,18 @@ extension type _JsProtocolEngine._(JSObject _) implements JSObject {
 
 /// On web, use the real Scala.js engine if the bundle is loaded (the `web/index.html` script tag),
 /// otherwise fall back to the labeled [DevEngine] so the app still runs in a bundle-less build.
+///
+/// Construction is guarded: an incompatible or malformed bundle (which would throw on the first
+/// `handle` call in the [ScalaJsEngine] constructor) degrades to the clearly-labeled [DevEngine]
+/// rather than crashing the app at startup — the bundle-presence check alone is not enough.
 ProtocolEngine createPlatformEngine() {
   if (!globalContext.has('ProtocolEngine')) {
     return DevEngine();
   }
-  final js = _JsProtocolEngine();
-  return ScalaJsEngine((input) => js.handle(input));
+  try {
+    final js = _JsProtocolEngine();
+    return ScalaJsEngine((input) => js.handle(input));
+  } catch (_) {
+    return DevEngine();
+  }
 }
