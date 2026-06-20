@@ -43,6 +43,27 @@ npx esbuild protocol-core-js/target/scala-3.3.4/protocol-core-js-opt/main.js \
 (The bundling is a deployment build step — not part of `flutter test`/CI, which
 exercise the adapter via the fake handle and the engine via the Node e2e.)
 
+### Enabling real delivery (notify-before-retrieval) on web
+
+By default `new ProtocolEngine()` is **local-only** (no delivery). To make the
+"mail waiting" indicator (FR-004) and incoming messages fire on web, construct it
+with a host **transport** + this client's notify label:
+`new ProtocolEngine(transport, label)`.
+
+The engine calls the transport **synchronously** during `tick`, but browser
+network I/O (gRPC-web / connect-web) is async — so the host uses a *staging*
+model per round:
+
+1. (async) fetch this round's notify digest + any retrievable frames → buffer them;
+2. call `engine.tick(roundId)` — the transport reads the buffer synchronously:
+   `mailWaiting`/`retrieve` return staged answers; `submit` records frames to send;
+3. (async) flush the buffered `submit`s to the server.
+
+The `JsTransport` shape (`submit(token, frame) -> bool`, `mailWaiting(round, label)
+-> bool`, `retrieve(token) -> Uint8Array|null`) is proven by `JsRoundTransportSpec`
+under Node. The actual gRPC-web client + Envoy/connect proxy that backs it against
+a running server is the remaining deployment piece (T032c).
+
 ## Screens
 
 - **Home** — privacy banner + multi-conversation buddy list (T036).
