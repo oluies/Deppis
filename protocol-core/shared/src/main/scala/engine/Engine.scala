@@ -166,22 +166,29 @@ final class Engine(
     val payload  = nextReal.map { case (_, q) => Frame.unpad(q.head).getOrElse(Array.emptyByteArray) }
     Schedule.planRound(roundId, payload) match
       case Right(plan) =>
-        transport match
+        val carrier: Boolean = transport match
           case None =>
             // Local-only: consume the queued frame (no delivery) — preserves prior behavior.
             nextReal.foreach { case (pid, q) => dropHead(pid, q) }
+            plan.kind == Schedule.FrameKind.Carrier
           case Some(t) =>
             // Submit under our outgoing token. Only advance the counter + drop the frame when the
             // submit SUCCEEDS; on failure the frame stays queued and is retried next round (no
             // silent message loss).
+            var realSubmitted = false
             nextReal.foreach { case (pid, q) =>
               (runtime.get(pid), book.get(pid)) match
                 case (Some(rt), Some(rel)) =>
                   if t.submit(dirToken(rel.pairKey, rt.role, peerRole(rt.role), rt.sendCounter), q.head) then
                     rt.sendCounter += 1
                     dropHead(pid, q)
+                    realSubmitted = true
                 // else: leave the frame queued for the next round
-                case _ => dropHead(pid, q) // orphaned frame (buddy gone) — drop to avoid a stuck queue
+                case _ =>
+                  // Defensive: an outbox entry always has a runtime + book entry (sendMessage
+                  // requires a confirmed buddy; removeBuddy clears both), so this is unreachable via
+                  // the API — drop rather than wedge the queue if that invariant ever breaks.
+                  dropHead(pid, q)
             }
             // Notify-before-retrieval (FR-004): ask whether mail waits, emit `notified`, THEN drain.
             if t.mailWaiting(roundId, clientLabel) then emit(EngineEvent.Notified(roundId))
@@ -199,7 +206,13 @@ final class Engine(
                       }
                     case None => more = false // drained this buddy's waiting messages this round
               }
-        Right(RoundDecision(plan.roundId, carrier = plan.kind == Schedule.FrameKind.Carrier, plan.retrieve))
+            // Report the round as a carrier unless a real frame was ACTUALLY submitted — a failed or
+            // absent send is then indistinguishable from any other carrier round (a fail+retry does
+            // not produce two "real-payload" rounds). (Full store-level cover traffic — a carrier
+            // write every round so the store-write pattern itself is uniform — is the broader FR-012
+            // integration, gated on Phase C.)
+            !realSubmitted
+        Right(RoundDecision(plan.roundId, carrier = carrier, plan.retrieve))
       case Left(reason) => Left(EngineError("tick_failed", reason))
 
   private def dropHead(pid: String, q: Vector[Array[Byte]]): Unit =

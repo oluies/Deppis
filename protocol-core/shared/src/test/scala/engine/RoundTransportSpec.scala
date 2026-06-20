@@ -105,6 +105,19 @@ class RoundTransportSpec extends AnyFunSuite:
     val got = bob.drainEvents().collect { case EngineEvent.MessageReceived(_, txt, _) => txt }
     assert(got == Seq("important"))
 
+  test("the carrier flag reflects whether a real frame was actually submitted (fail+retry uniform)"):
+    val t = FakeTransport()
+    val (alice, pairId) = confirmedEngine(t, BuddyRole.Initiator)
+    alice.sendMessage(pairId, "x")
+    t.acceptSubmit = false
+    val failed = alice.tick(1).toOption.get
+    assert(failed.carrier, "a failed send must report as a carrier round, not a real one")
+    t.acceptSubmit = true
+    val ok = alice.tick(2).toOption.get
+    assert(!ok.carrier, "a successful send reports a real round")
+    // An empty round (nothing queued) is a carrier too.
+    assert(alice.tick(3).toOption.get.carrier)
+
   test("multiple waiting messages are all drained in one receive round"):
     val t = FakeTransport()
     val (alice, pairId) = confirmedEngine(t, BuddyRole.Initiator)
