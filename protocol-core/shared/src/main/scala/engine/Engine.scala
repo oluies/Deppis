@@ -105,6 +105,27 @@ final class Engine(
   private def dirToken(pairKey: Array[Byte], from: BuddyRole, to: BuddyRole, counter: Long): Array[Byte] =
     RetrievalToken.derive(pairKey, from.toString, to.toString, counter)
 
+  // Frame-content encryption (T042). A wire frame is exactly the store's 256 bytes:
+  // nonce(12) ‖ ChaCha20-Poly1305(inner). The inner plaintext block is therefore 228 bytes. Every
+  // wire frame — real or carrier — is encrypted, so real and carrier are uniform random-looking
+  // bytes (the last active-vs-idle distinguisher). The per-message AEAD key is directional +
+  // non-recurrent (same derivation domain as the retrieval token), so both sides derive it.
+  private val WireSize  = frame.Frame.Size                              // 256, the store's fixed size
+  private val InnerSize = WireSize - aead.Aead.NonceBytes - aead.Aead.TagBytes // 228
+
+  private def aeadKey(pairKey: Array[Byte], from: BuddyRole, to: BuddyRole, counter: Long): Array[Byte] =
+    kdf.Kdf.hmacSha256(pairKey, s"aead/${from.toString}/${to.toString}/$counter".getBytes(UTF_8))
+
+  /** Encrypt a 228-byte inner block into a 256-byte wire frame (`nonce ‖ ciphertext‖tag`). */
+  private def encryptFrame(key: Array[Byte], inner: Array[Byte]): Array[Byte] =
+    val nonce = random.Rand.bytes(aead.Aead.NonceBytes)
+    nonce ++ aead.Aead.seal(key, nonce, inner)
+
+  /** Decrypt a 256-byte wire frame back to the 228-byte inner block; `None` on auth failure. */
+  private def decryptFrame(key: Array[Byte], wire: Array[Byte]): Option[Array[Byte]] =
+    if wire.length != WireSize then None
+    else aead.Aead.open(key, wire.take(aead.Aead.NonceBytes), wire.drop(aead.Aead.NonceBytes))
+
   /** The current build privacy status. Dev backend ⇒ not private ⇒ the mandatory dev label. */
   def privacyStatus: EngineEvent.PrivacyStatus =
     val s = Privacy.BuildPrivacyStatus(Privacy.Backend.Dev, attestationPassed = false)
@@ -157,7 +178,7 @@ final class Engine(
   def sendMessage(pairId: String, plaintext: String): Either[EngineError, Int] =
     book.get(pairId) match
       case Some(r) if r.state == BuddyState.Confirmed =>
-        Frame.pad(plaintext.getBytes(UTF_8)) match
+        Frame.pad(plaintext.getBytes(UTF_8), InnerSize) match // 228-byte inner block (encrypted to 256)
           case Right(fr) =>
             val q = outbox.getOrElse(pairId, Vector.empty) :+ fr
             outbox(pairId) = q
@@ -177,7 +198,7 @@ final class Engine(
     * happens (the local-only default). */
   def tick(roundId: Long): Either[EngineError, RoundDecision] =
     val nextReal = outbox.collectFirst { case (pid, q) if q.nonEmpty => (pid, q) }
-    val payload  = nextReal.map { case (_, q) => Frame.unpad(q.head).getOrElse(Array.emptyByteArray) }
+    val payload  = nextReal.map { case (_, q) => Frame.unpad(q.head, InnerSize).getOrElse(Array.emptyByteArray) }
     Schedule.planRound(roundId, payload) match
       case Right(plan) =>
         val carrier: Boolean = transport match
@@ -205,7 +226,9 @@ final class Engine(
               case Some((pid, q)) =>
                 (runtime.get(pid), book.get(pid)) match
                   case (Some(rt), Some(rel)) =>
-                    if t.submit(dirToken(rel.pairKey, rt.role, peerRole(rt.role), rt.sendCounter), q.head) then
+                    // Encrypt the inner frame to a 256-byte wire frame (real ⇒ per-message AEAD key).
+                    val wire = encryptFrame(aeadKey(rel.pairKey, rt.role, peerRole(rt.role), rt.sendCounter), q.head)
+                    if t.submit(dirToken(rel.pairKey, rt.role, peerRole(rt.role), rt.sendCounter), wire) then
                       rt.sendCounter += 1
                       dropHead(pid, q)
                       realSubmitted = true
@@ -219,7 +242,10 @@ final class Engine(
                     orphanedDrops += 1
               case None =>
                 coverCounter += 1
-                t.submit(RetrievalToken.derive(coverKey, "cover", "", coverCounter), Frame.carrier())
+                // Carrier: encrypt an all-zero inner block under a fresh RANDOM key (never decrypted)
+                // ⇒ a 256-byte random-looking wire frame, byte-indistinguishable from a real one.
+                val coverWire = encryptFrame(random.Rand.bytes(aead.Aead.KeyBytes), Frame.carrier(InnerSize))
+                t.submit(RetrievalToken.derive(coverKey, "cover", "", coverCounter), coverWire)
             // Exactly ONE retrieve per round (the schedule's one-retrieve invariant, FR-012 fetch
             // path), NOTIFY-GUIDED per-buddy (FR-004): read EXACTLY the buddy whose digest bit is set
             // this round. Because that buddy's message is actually present, the read is a hit and its
@@ -242,11 +268,13 @@ final class Engine(
               // recvCounter advances ⇒ next read token is fresh). It only fails to advance on a
               // birthday-rate bit COLLISION (a wrong buddy signaled) — so non-recurrence is
               // conditional on collision-freedom, which the T041c bit-lease makes unconditional.
-              t.retrieve(dirToken(rel.pairKey, peerRole(rt.role), rt.role, rt.recvCounter)).foreach { frame =>
+              val c = rt.recvCounter
+              t.retrieve(dirToken(rel.pairKey, peerRole(rt.role), rt.role, c)).foreach { wire =>
                 rt.recvCounter += 1 // consumed (single-use) ⇒ advance regardless of decode outcome
-                Frame.unpad(frame).toOption.foreach { p =>
-                  emit(EngineEvent.MessageReceived(pid, new String(p, UTF_8), roundId))
-                }
+                // Decrypt the wire frame with the matching per-message key, then unpad the inner block.
+                decryptFrame(aeadKey(rel.pairKey, peerRole(rt.role), rt.role, c), wire)
+                  .flatMap(inner => Frame.unpad(inner, InnerSize).toOption)
+                  .foreach(p => emit(EngineEvent.MessageReceived(pid, new String(p, UTF_8), roundId)))
               }
             else
               // No buddy signaled: a cover read under a fresh token (one-read-per-round, fresh).

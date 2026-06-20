@@ -41,11 +41,16 @@ class EngineBackendE2ESpec extends AnyFunSuite with ObsdHarness:
 
       // --- Alice's side (played by the test) ---
       val pairKey = Handshake.init(secret).pairKey // same key Bob derived
-      // Alice (Initiator) stores her first message under her outgoing token.
+      // Alice (Initiator) stores her first message under her outgoing token — ENCRYPTED exactly as
+      // the engine's send path does (T042): inner 228-byte frame, ChaCha20-Poly1305, nonce ‖ ct.
       val aliceToken = RetrievalToken.derive(pairKey, "Initiator", "Responder", 0L)
-      val frame      = Frame.pad("see you at the bridge".getBytes).toOption.get
+      val innerSize  = Frame.Size - aead.Aead.NonceBytes - aead.Aead.TagBytes
+      val inner      = Frame.pad("see you at the bridge".getBytes, innerSize).toOption.get
+      val aeadKey    = kdf.Kdf.hmacSha256(pairKey, "aead/Initiator/Responder/0".getBytes)
+      val nonce      = Array.tabulate(aead.Aead.NonceBytes)(i => (i * 11 + 1).toByte)
+      val wire       = nonce ++ aead.Aead.seal(aeadKey, nonce, inner)
       val aliceStore = new EnclaveObliviousStore(storeStub, attested = false)
-      assert(aliceStore.write(aliceToken, frame).isRight)
+      assert(aliceStore.write(aliceToken, wire).isRight)
       // Alice signals Bob's notification under the PER-BUDDY bit Bob's engine checks.
       val buddyBit     = engine.NotifyDigest.bit(pairKey)
       val sealer       = DevNotificationServer(notifyKey)
