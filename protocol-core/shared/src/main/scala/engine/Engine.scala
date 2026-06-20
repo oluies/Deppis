@@ -108,11 +108,15 @@ final class Engine(
   // Frame-content encryption (T042). A wire frame is exactly the store's 256 bytes:
   // nonce(12) ‖ ChaCha20-Poly1305(inner). The inner plaintext block is therefore 228 bytes. Every
   // wire frame — real or carrier — is encrypted, so real and carrier are uniform random-looking
-  // bytes (the last active-vs-idle distinguisher). The per-message AEAD key is directional +
-  // non-recurrent (same derivation domain as the retrieval token), so both sides derive it.
+  // bytes (the last active-vs-idle distinguisher).
   private val WireSize  = frame.Frame.Size                              // 256, the store's fixed size
   private val InnerSize = WireSize - aead.Aead.NonceBytes - aead.Aead.TagBytes // 228
 
+  // The per-message AEAD key is directional + non-recurrent, derived from the SAME pair key as the
+  // retrieval token — but under a SEPARATE "aead/" HMAC domain. This domain separation is
+  // load-bearing: the retrieval token is PUBLIC (the store observer sees it), so if the secret AEAD
+  // key shared the token's `info` it would equal an observable value and leak. Keep the two domains
+  // distinct — never unify them.
   private def aeadKey(pairKey: Array[Byte], from: BuddyRole, to: BuddyRole, counter: Long): Array[Byte] =
     kdf.Kdf.hmacSha256(pairKey, s"aead/${from.toString}/${to.toString}/$counter".getBytes(UTF_8))
 
@@ -198,8 +202,11 @@ final class Engine(
     * happens (the local-only default). */
   def tick(roundId: Long): Either[EngineError, RoundDecision] =
     val nextReal = outbox.collectFirst { case (pid, q) if q.nonEmpty => (pid, q) }
-    val payload  = nextReal.map { case (_, q) => Frame.unpad(q.head, InnerSize).getOrElse(Array.emptyByteArray) }
-    Schedule.planRound(roundId, payload) match
+    // We only consume the plan's `kind`/`retrieve`/`roundId`; its built frame is UNUSED (the wire
+    // frame is the encrypted one from `encryptFrame` below). So pass an empty sentinel payload to get
+    // the Real-vs-Carrier decision without unpadding the real plaintext or building a stray frame.
+    val plannerPayload = Option.when(nextReal.isDefined)(Array.emptyByteArray)
+    Schedule.planRound(roundId, plannerPayload) match
       case Right(plan) =>
         val carrier: Boolean = transport match
           case None =>

@@ -4,7 +4,14 @@ import frame.Frame
 import token.RetrievalToken
 
 /** A prepared outgoing message: its fixed-size frame and the single-use retrieval token a buddy
-  * will use to fetch it. */
+  * will use to fetch it.
+  *
+  * NOTE (T042): this is a per-buddy queue/token MODEL (T034) — NOT a wire send path. The live send
+  * path is `Engine.tick`, which encrypts every frame (`nonce ‖ ChaCha20-Poly1305`) so real and
+  * carrier frames are byte-indistinguishable. The `frame` here is a plaintext-shaped block; it must
+  * NOT be submitted to the store directly (that would emit an unencrypted, active-vs-idle-
+  * distinguishable frame). If this abstraction is ever wired to transport, route it through the
+  * engine's `encryptFrame`/`InnerSize` path. */
 final case class Outgoing(frame: Array[Byte], retrievalToken: Array[Byte])
 
 private[session] final case class ConversationState(
