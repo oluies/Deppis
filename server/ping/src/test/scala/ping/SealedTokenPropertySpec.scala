@@ -89,21 +89,21 @@ class SealedTokenPropertySpec extends AnyFunSuite with ScalaCheckDrivenPropertyC
 
   test("a tampered sealed blob (single flipped byte) is rejected (AEAD authentication)"):
     forAll(rounds, positions, labels, Gen.choose(0, Int.MaxValue)) { (round, bit, lbl, raw) =>
-      val s = server()
+      val s = withWitness(round)
       val tok = s.issueToken(round, bit, lbl)
       val idx = raw % tok.length
       tok(idx) = (tok(idx) ^ 0x01).toByte // flip one bit of one byte (nonce or ciphertext)
       assert(s.signal(round, tok).isLeft)
-      assert(s.digest(round, lbl).isEmpty) // tamper flipped nothing on a fresh server
+      assertWitnessIntact(s, round) // tamper flipped no real bit (the planted witness survives)
     }
 
   test("a truncated sealed blob is rejected (both the malformed and AEAD paths)"):
     forAll(rounds, positions, labels, Gen.choose(0, Int.MaxValue)) { (round, bit, lbl, raw) =>
-      val s = server()
+      val s = withWitness(round)
       val tok = s.issueToken(round, bit, lbl)
       val keep = raw % tok.length // 0..len-1, always strictly shorter than the sealed blob
       assert(s.signal(round, tok.take(keep)).isLeft)
-      assert(s.digest(round, lbl).isEmpty)
+      assertWitnessIntact(s, round) // truncated blob flipped no real bit
     }
 
   test("a sender cannot forge another buddy's bit or label by tampering the sealed blob (FR-003)"):
