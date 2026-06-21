@@ -11,7 +11,8 @@
 # `DEV, NO METADATA PRIVACY` label throughout.
 #
 # Usage: scripts/run-demo.sh
-# Requires: cargo (Rust), sbt (JDK 21+ for the Foreign Function & Memory API).
+# Requires: cargo (Rust), sbt with JDK 22+ (the crypto layer uses the finalized Foreign
+#           Function & Memory API — JEP 454, GA in JDK 22 — to call libsodium).
 
 set -euo pipefail
 

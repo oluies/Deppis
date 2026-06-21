@@ -36,8 +36,9 @@ backend=Dev  metadataPrivate=false  label="DEV, NO METADATA PRIVACY"
 Every round each client writes exactly one 256-byte frame (real or cover) and reads once, so active
 and idle rounds are indistinguishable (FR-012).
 
-**Requirements:** `cargo` (Rust) and `sbt` with **JDK 21+** (the crypto layer uses the Foreign
-Function & Memory API to call libsodium). The demo prints the `DEV, NO METADATA PRIVACY` label.
+**Requirements:** `cargo` (Rust) and `sbt` with **JDK 22+** (the crypto layer uses the finalized
+Foreign Function & Memory API — JEP 454, GA in JDK 22 — to call libsodium). The demo prints the
+`DEV, NO METADATA PRIVACY` label.
 
 ## Components
 
