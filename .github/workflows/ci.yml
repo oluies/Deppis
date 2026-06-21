@@ -43,9 +43,11 @@ jobs:
       - name: Labeling gate (T008) — a build without the real backend MUST report no privacy
         run: |
           # sbt 2.0's `export fullClasspath` returns a List(${OUT}/…) of virtual paths (for build
-          # caching), not a usable -cp string, so let sbt run the CLI itself and capture its JSON.
-          out="$(sbt -batch -no-colors -error 'protocolCore/runMain cli.Pstatus show' | grep metadataPrivate)"
-          echo "pstatus -> $out"
+          # caching), not a usable -cp string, so let sbt run the CLI itself and capture its output.
+          # Grep both assertions against the WHOLE output (not a pre-filtered line) so the gate holds
+          # even if the status JSON is ever pretty-printed across lines. Fail-closed.
+          out="$(sbt -batch -no-colors -error 'protocolCore/runMain cli.Pstatus show')"
+          echo "pstatus -> $(echo "$out" | grep metadataPrivate || true)"
           echo "$out" | grep -q '"metadataPrivate":false' \
             && echo "$out" | grep -q 'DEV, NO METADATA PRIVACY' \
             || { echo "::error::labeling gate failed — a dev build must report no metadata privacy (Constitution IV)"; exit 1; }
