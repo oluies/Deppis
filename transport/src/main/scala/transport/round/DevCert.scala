@@ -2,6 +2,7 @@ package transport.round
 
 import org.bouncycastle.cert.jcajce.{JcaX509CertificateConverter, JcaX509v3CertificateBuilder}
 import org.bouncycastle.asn1.x500.X500Name
+import org.bouncycastle.asn1.x509.{Extension, GeneralName, GeneralNames}
 import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder
 import java.math.BigInteger
 import java.security.cert.X509Certificate
@@ -30,6 +31,13 @@ object DevCert:
 
     val builder =
       new JcaX509v3CertificateBuilder(name, serial, notBefore, notAfter, name, kp.getPublic)
+    // A dNSName=localhost SAN so TLS hostname verification doesn't depend on the deprecated CN
+    // fallback (RFC 6125; some JDK/provider versions reject CN-only certs).
+    builder.addExtension(
+      Extension.subjectAlternativeName,
+      false,
+      new GeneralNames(new GeneralName(GeneralName.dNSName, "localhost"))
+    )
     val signer = new JcaContentSignerBuilder("SHA256withECDSA").build(kp.getPrivate)
     val cert = new JcaX509CertificateConverter().getCertificate(builder.build(signer))
     (kp.getPrivate, cert)
