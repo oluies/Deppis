@@ -16,8 +16,8 @@ object Handshake:
 
   def init(sharedSecret: Array[Byte]): PairInit =
     val pairKey = Kdf.hmacSha256(sharedSecret, "mm/pair-key".getBytes(UTF_8))
-    val pairId  = hex(Kdf.hmacSha256(sharedSecret, "mm/pair-id".getBytes(UTF_8))).take(32)
-    val safety  = safetyNumber(Kdf.hmacSha256(sharedSecret, "mm/safety".getBytes(UTF_8)))
+    val pairId = hex(Kdf.hmacSha256(sharedSecret, "mm/pair-id".getBytes(UTF_8))).take(32)
+    val safety = safetyNumber(Kdf.hmacSha256(sharedSecret, "mm/safety".getBytes(UTF_8)))
     PairInit(pairId, safety, pairKey)
 
   private def hex(b: Array[Byte]): String = b.map(x => f"${x & 0xff}%02x").mkString
@@ -28,7 +28,9 @@ object Handshake:
   private def safetyNumber(b: Array[Byte]): String =
     (0 until 6)
       .map { i =>
-        val v = (((b(3 * i) & 0xff) << 16) | ((b(3 * i + 1) & 0xff) << 8) | (b(3 * i + 2) & 0xff)) % 100000
+        val v = (((b(3 * i) & 0xff) << 16) | ((b(3 * i + 1) & 0xff) << 8) | (b(
+          3 * i + 2
+        ) & 0xff)) % 100000
         f"$v%05d"
       }
       .mkString(" ")

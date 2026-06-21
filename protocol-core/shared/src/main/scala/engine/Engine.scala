@@ -40,7 +40,7 @@ object BuddyRole:
   def parse(s: String): Either[EngineError, BuddyRole] = s match
     case "initiator" => Right(Initiator)
     case "responder" => Right(Responder)
-    case _           => Left(EngineError("invalid_arg", "role must be initiator or responder"))
+    case _ => Left(EngineError("invalid_arg", "role must be initiator or responder"))
 
 /** Fixed, non-secret-dependent error (Constitution II). */
 final case class EngineError(code: String, message: String)
@@ -48,10 +48,11 @@ final case class EngineError(code: String, message: String)
 /** Engine → caller events (engine-api.md). No event ever carries key material. */
 sealed trait EngineEvent
 object EngineEvent:
-  final case class BuddyConfirmed(pairId: String, safetyNumber: String)             extends EngineEvent
-  final case class MessageReceived(pairId: String, plaintext: String, at: Long)     extends EngineEvent
-  final case class Notified(roundId: Long)                                          extends EngineEvent
-  final case class PrivacyStatus(backend: String, metadataPrivate: Boolean, label: String) extends EngineEvent
+  final case class BuddyConfirmed(pairId: String, safetyNumber: String) extends EngineEvent
+  final case class MessageReceived(pairId: String, plaintext: String, at: Long) extends EngineEvent
+  final case class Notified(roundId: Long) extends EngineEvent
+  final case class PrivacyStatus(backend: String, metadataPrivate: Boolean, label: String)
+      extends EngineEvent
 
 /** Result of `addBuddy` — the comparable safety number for out-of-band comparison. NEVER the key. */
 final case class AddBuddyResult(pairId: String, safetyNumber: String)
@@ -71,20 +72,20 @@ final class Engine(
     transport: Option[RoundTransport] = None,
     clientLabel: Array[Byte] = Array.emptyByteArray
 ):
-  private var book                 = BuddyBook.empty
-  private val outbox               = mutable.Map.empty[String, Vector[Array[Byte]]]
-  private val events               = mutable.ArrayBuffer.empty[EngineEvent]
+  private var book = BuddyBook.empty
+  private val outbox = mutable.Map.empty[String, Vector[Array[Byte]]]
+  private val events = mutable.ArrayBuffer.empty[EngineEvent]
   // Per-buddy delivery runtime: the role fixes the token direction; counters are non-recurrent.
-  private val runtime              = mutable.Map.empty[String, BuddyRuntime]
+  private val runtime = mutable.Map.empty[String, BuddyRuntime]
   // Per-session cover-traffic key + counter. Cover (carrier) writes go to fresh, random-looking
   // tokens derived from this key, so a carrier round's store write is indistinguishable from a real
   // one (FR-012 cover traffic). The key never leaves the engine.
-  private val coverKey             = random.Rand.bytes(32)
-  private var coverCounter         = 0L // send-path cover frames
-  private var coverReadCounter     = 0L // fetch-path cover reads
+  private val coverKey = random.Rand.bytes(32)
+  private var coverCounter = 0L // send-path cover frames
+  private var coverReadCounter = 0L // fetch-path cover reads
   // Positive diagnostic for the unreachable orphan branch in `tick` (an outbox entry with no
   // runtime/book). Stays 0 in correct operation; a non-zero value means an internal invariant broke.
-  private var orphanedDrops        = 0L
+  private var orphanedDrops = 0L
 
   private final class BuddyRuntime(val role: BuddyRole):
     var sendCounter: Long = 0L
@@ -102,14 +103,19 @@ final class Engine(
   // A directional retrieval token: messages FROM `from` TO `to` for the given counter. Both parties
   // derive the same token from the shared pair key + the (symmetric) role pair, so the receiver can
   // reconstruct exactly what the sender stored.
-  private def dirToken(pairKey: Array[Byte], from: BuddyRole, to: BuddyRole, counter: Long): Array[Byte] =
+  private def dirToken(
+      pairKey: Array[Byte],
+      from: BuddyRole,
+      to: BuddyRole,
+      counter: Long
+  ): Array[Byte] =
     RetrievalToken.derive(pairKey, from.toString, to.toString, counter)
 
   // Frame-content encryption (T042). A wire frame is exactly the store's 256 bytes:
   // nonce(12) ‖ ChaCha20-Poly1305(inner). The inner plaintext block is therefore 228 bytes. Every
   // wire frame — real or carrier — is encrypted, so real and carrier are uniform random-looking
   // bytes (the last active-vs-idle distinguisher).
-  private val WireSize  = frame.Frame.Size                              // 256, the store's fixed size
+  private val WireSize = frame.Frame.Size // 256, the store's fixed size
   private val InnerSize = WireSize - aead.Aead.NonceBytes - aead.Aead.TagBytes // 228
 
   // The per-message AEAD key is directional + non-recurrent, derived from the SAME pair key as the
@@ -117,7 +123,12 @@ final class Engine(
   // load-bearing: the retrieval token is PUBLIC (the store observer sees it), so if the secret AEAD
   // key shared the token's `info` it would equal an observable value and leak. Keep the two domains
   // distinct — never unify them.
-  private def aeadKey(pairKey: Array[Byte], from: BuddyRole, to: BuddyRole, counter: Long): Array[Byte] =
+  private def aeadKey(
+      pairKey: Array[Byte],
+      from: BuddyRole,
+      to: BuddyRole,
+      counter: Long
+  ): Array[Byte] =
     kdf.Kdf.hmacSha256(pairKey, s"aead/${from.toString}/${to.toString}/$counter".getBytes(UTF_8))
 
   /** Encrypt a 228-byte inner block into a 256-byte wire frame (`nonce ‖ ciphertext‖tag`). */
@@ -150,7 +161,7 @@ final class Engine(
     if sharedSecret.isEmpty then Left(EngineError("invalid_arg", "shared secret required"))
     else
       val init = Handshake.init(sharedSecret)
-      val rel  = BuddyRelationship(init.pairId, init.safetyNumber, BuddyState.Pending, init.pairKey)
+      val rel = BuddyRelationship(init.pairId, init.safetyNumber, BuddyState.Pending, init.pairKey)
       book.add(rel) match
         case Right(nb) =>
           book = nb
@@ -174,7 +185,7 @@ final class Engine(
   /** Remove a buddy. Stops future delivery (FR-018) without leaking prior existence — no event. */
   def removeBuddy(pairId: String): Either[EngineError, Unit] =
     book.remove(pairId) match
-      case Right(nb)    => book = nb; outbox.remove(pairId); runtime.remove(pairId); Right(())
+      case Right(nb) => book = nb; outbox.remove(pairId); runtime.remove(pairId); Right(())
       case Left(reason) => Left(EngineError("remove_failed", reason))
 
   /** Frame + enqueue a message for the next round to a confirmed buddy. Returns the queue depth;
@@ -182,7 +193,10 @@ final class Engine(
   def sendMessage(pairId: String, plaintext: String): Either[EngineError, Int] =
     book.get(pairId) match
       case Some(r) if r.state == BuddyState.Confirmed =>
-        Frame.pad(plaintext.getBytes(UTF_8), InnerSize) match // 228-byte inner block (encrypted to 256)
+        Frame.pad(
+          plaintext.getBytes(UTF_8),
+          InnerSize
+        ) match // 228-byte inner block (encrypted to 256)
           case Right(fr) =>
             val q = outbox.getOrElse(pairId, Vector.empty) :+ fr
             outbox(pairId) = q
@@ -234,8 +248,15 @@ final class Engine(
                 (runtime.get(pid), book.get(pid)) match
                   case (Some(rt), Some(rel)) =>
                     // Encrypt the inner frame to a 256-byte wire frame (real ⇒ per-message AEAD key).
-                    val wire = encryptFrame(aeadKey(rel.pairKey, rt.role, peerRole(rt.role), rt.sendCounter), q.head)
-                    if t.submit(dirToken(rel.pairKey, rt.role, peerRole(rt.role), rt.sendCounter), wire) then
+                    val wire = encryptFrame(
+                      aeadKey(rel.pairKey, rt.role, peerRole(rt.role), rt.sendCounter),
+                      q.head
+                    )
+                    if t.submit(
+                        dirToken(rel.pairKey, rt.role, peerRole(rt.role), rt.sendCounter),
+                        wire
+                      )
+                    then
                       rt.sendCounter += 1
                       dropHead(pid, q)
                       realSubmitted = true
@@ -251,7 +272,8 @@ final class Engine(
                 coverCounter += 1
                 // Carrier: encrypt an all-zero inner block under a fresh RANDOM key (never decrypted)
                 // ⇒ a 256-byte random-looking wire frame, byte-indistinguishable from a real one.
-                val coverWire = encryptFrame(random.Rand.bytes(aead.Aead.KeyBytes), Frame.carrier(InnerSize))
+                val coverWire =
+                  encryptFrame(random.Rand.bytes(aead.Aead.KeyBytes), Frame.carrier(InnerSize))
                 t.submit(RetrievalToken.derive(coverKey, "cover", "", coverCounter), coverWire)
             // Exactly ONE retrieve per round (the schedule's one-retrieve invariant, FR-012 fetch
             // path), NOTIFY-GUIDED per-buddy (FR-004): read EXACTLY the buddy whose digest bit is set
@@ -263,9 +285,12 @@ final class Engine(
               .flatMap { case (pid, rt) =>
                 book.get(pid).filter(_.state == BuddyState.Confirmed).map(rel => (pid, rt, rel))
               }
-              .filter { case (_, _, rel) => NotifyDigest.isSet(digest, NotifyDigest.bit(rel.pairKey)) }
+              .filter { case (_, _, rel) =>
+                NotifyDigest.isSet(digest, NotifyDigest.bit(rel.pairKey))
+              }
               .sortBy(_._1) // stable order; the cursor below rotates fairly within it
-            if signaled.nonEmpty then emit(EngineEvent.Notified(roundId)) // some buddy has mail (FR-004)
+            if signaled.nonEmpty then
+              emit(EngineEvent.Notified(roundId)) // some buddy has mail (FR-004)
             if signaled.nonEmpty then
               // Serve one signaled buddy per round, ROTATING the start so co-signaling buddies are
               // not starved (the rest re-signal next round — T041c covers the multi-sender edge).
@@ -281,7 +306,9 @@ final class Engine(
                 // Decrypt the wire frame with the matching per-message key, then unpad the inner block.
                 decryptFrame(aeadKey(rel.pairKey, peerRole(rt.role), rt.role, c), wire)
                   .flatMap(inner => Frame.unpad(inner, InnerSize).toOption)
-                  .foreach(p => emit(EngineEvent.MessageReceived(pid, new String(p, UTF_8), roundId)))
+                  .foreach(p =>
+                    emit(EngineEvent.MessageReceived(pid, new String(p, UTF_8), roundId))
+                  )
               }
             else
               // No buddy signaled: a cover read under a fresh token (one-read-per-round, fresh).

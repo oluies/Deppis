@@ -21,7 +21,7 @@ private def fail(msg: String): Nothing =
   * pass the counter as a JSON string to preserve the full range. */
 private def exactLong(v: ujson.Value): Long = v match
   case ujson.Str(s) => s.toLong
-  case other        => other.num.toLong
+  case other => other.num.toLong
 
 /** `pcore <subcommand>` — retrieval-token | frame | deframe | schedule-next (T013/T014/T015). */
 object Pcore:
@@ -36,27 +36,32 @@ object Pcore:
           val pi = Handshake.init(b64d(j("sharedSecret").str))
           Right(
             ujson.Obj(
-              "pairId"       -> pi.pairId,
+              "pairId" -> pi.pairId,
               "safetyNumber" -> pi.safetyNumber,
-              "pairKey"      -> b64e(pi.pairKey)
+              "pairKey" -> b64e(pi.pairKey)
             )
           )
         case "retrieval-token" =>
           val key = j.obj.get("key").map(k => b64d(k.str)).getOrElse("dev-key".getBytes)
-          val tok = RetrievalToken.derive(key, j("senderId").str, j("receiverId").str, exactLong(j("counter")))
+          val tok = RetrievalToken.derive(
+            key,
+            j("senderId").str,
+            j("receiverId").str,
+            exactLong(j("counter"))
+          )
           Right(ujson.Obj("token" -> b64e(tok)))
         case "frame" =>
           Frame.pad(b64d(j("payload").str)).map(f => ujson.Obj("frame" -> b64e(f)))
         case "deframe" =>
           Frame.unpad(b64d(j("frame").str)).map(p => ujson.Obj("payload" -> b64e(p)))
         case "schedule-next" =>
-          val rid     = j.obj.get("roundId").map(_.num.toLong).getOrElse(0L)
+          val rid = j.obj.get("roundId").map(_.num.toLong).getOrElse(0L)
           val payload = j.obj.get("payload").map(p => b64d(p.str))
           Schedule.planRound(rid, payload).map { plan =>
             ujson.Obj(
-              "roundId"  -> plan.roundId,
-              "kind"     -> plan.kind.toString,
-              "frame"    -> b64e(plan.frame),
+              "roundId" -> plan.roundId,
+              "kind" -> plan.kind.toString,
+              "frame" -> b64e(plan.frame),
               "retrieve" -> plan.retrieve
             )
           }
@@ -65,7 +70,7 @@ object Pcore:
 
   def main(args: Array[String]): Unit =
     val sub = args.headOption.getOrElse("")
-    val in  = scala.io.Source.stdin.mkString
+    val in = scala.io.Source.stdin.mkString
     run(sub, in).fold(fail, out => println(ujson.write(out)))
 
 /** `pstatus show` — emits {backend, metadataPrivate, label}. Backend/attestation from env
@@ -76,14 +81,14 @@ object Pstatus:
   def run(env: Map[String, String]): ujson.Value =
     val backend = env.getOrElse("STORE_BACKEND", "dev") match
       case "enclave-target" => Backend.EnclaveTarget
-      case "groove-target"  => Backend.GrooveTarget
-      case "groove-stub"    => Backend.GrooveStub
-      case _                => Backend.Dev
+      case "groove-target" => Backend.GrooveTarget
+      case "groove-stub" => Backend.GrooveStub
+      case _ => Backend.Dev
     val status = BuildPrivacyStatus(backend, env.get("ATTESTATION_PASSED").contains("true"))
     ujson.Obj(
-      "backend"         -> backend.toString,
+      "backend" -> backend.toString,
       "metadataPrivate" -> status.metadataPrivate,
-      "label"           -> status.label
+      "label" -> status.label
     )
 
   def main(args: Array[String]): Unit =

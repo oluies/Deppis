@@ -15,13 +15,13 @@ class DevObliviousStoreSpec extends AnyFunSuite:
     assert(s.label == Privacy.DevLabel)
 
   test("write then read returns the frame; second read is empty (non-recurrence, FR-014)"):
-    val s   = DevObliviousStore()
+    val s = DevObliviousStore()
     val tok = "tok-1".getBytes
     assert(s.write(tok, frame(7)).isRight)
     assert(s.read(tok).toOption.get.exists(_.sameElements(frame(7))))
     assert(s.read(tok).toOption.get.isEmpty) // single-use
   test("writing the same token twice is rejected (no two messages under one token)"):
-    val s   = DevObliviousStore()
+    val s = DevObliviousStore()
     val tok = "tok-2".getBytes
     assert(s.write(tok, frame(1)).isRight)
     assert(s.write(tok, frame(2)).isLeft)

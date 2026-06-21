@@ -24,17 +24,17 @@ class TwoPartyE2ESpec extends AnyFunSuite with ObsdHarness:
 
   // Symmetric, derivation-only ids shared by the convention "lower party is the sender label".
   private val Alice = "alice"
-  private val Bob   = "bob"
+  private val Bob = "bob"
 
   test("pairing: both parties derive the same safety number; a tampered secret does not"):
     val secret = "shared-out-of-band-secret".getBytes
     val a = Handshake.init(secret)
     val b = Handshake.init(secret)
     assert(a.pairId == b.pairId)
-    assert(a.safetyNumber == b.safetyNumber)        // out-of-band comparison succeeds
-    assert(a.pairKey.sameElements(b.pairKey))        // same per-pair key derived independently
+    assert(a.safetyNumber == b.safetyNumber) // out-of-band comparison succeeds
+    assert(a.pairKey.sameElements(b.pairKey)) // same per-pair key derived independently
     val tampered = Handshake.init("shared-out-of-band-secreT".getBytes)
-    assert(tampered.safetyNumber != a.safetyNumber)  // tamper ⇒ mismatch ⇒ rejected
+    assert(tampered.safetyNumber != a.safetyNumber) // tamper ⇒ mismatch ⇒ rejected
 
   test("Alice → Bob message is delivered through obsd (oblivious, single-use), wrong token misses"):
     val notifyKey = Array.tabulate(Crypto.KeyBytes)(i => (i * 3 + 1).toByte)
@@ -45,12 +45,14 @@ class TwoPartyE2ESpec extends AnyFunSuite with ObsdHarness:
       val tokenB = RetrievalToken.derive(pair.pairKey, Alice, Bob, counter = 0L)
       assert(RetrievalToken.equalsCT(tokenA, tokenB))
 
-      val aliceStore = new EnclaveObliviousStore(spb.ObliviousStoreGrpc.blockingStub(channel), attested = false)
-      val bobStore   = new EnclaveObliviousStore(spb.ObliviousStoreGrpc.blockingStub(channel), attested = false)
+      val aliceStore =
+        new EnclaveObliviousStore(spb.ObliviousStoreGrpc.blockingStub(channel), attested = false)
+      val bobStore =
+        new EnclaveObliviousStore(spb.ObliviousStoreGrpc.blockingStub(channel), attested = false)
 
       // Alice frames + stores under the retrieval token (the store never learns sender/receiver).
       val plaintext = "meet at the usual place"
-      val frame     = Frame.pad(plaintext.getBytes).toOption.get
+      val frame = Frame.pad(plaintext.getBytes).toOption.get
       assert(aliceStore.write(tokenA, frame).isRight)
 
       // Obliviousness / token isolation — checked WHILE the message is still present: a token for a
@@ -73,9 +75,12 @@ class TwoPartyE2ESpec extends AnyFunSuite with ObsdHarness:
     val notifyKey = Array.tabulate(Crypto.KeyBytes)(i => (i * 5 + 2).toByte)
     withObsd(notifyKey) { channel =>
       val receiver = DevNotificationServer(notifyKey) // seals tokens with the key obsd opens with
-      val notify   = new EnclaveNotificationClient(npb.NotificationServiceGrpc.blockingStub(channel), attested = false)
+      val notify = new EnclaveNotificationClient(
+        npb.NotificationServiceGrpc.blockingStub(channel),
+        attested = false
+      )
       val bobLabel = "bob-agg-label".getBytes
-      val bobBit   = 7
+      val bobBit = 7
 
       // No mail yet → all-zero digest (carrier-indistinguishable: reveals nothing).
       assert(notify.fetchDigest(10L, bobLabel).toOption.get.forall(_ == 0))
@@ -88,7 +93,8 @@ class TwoPartyE2ESpec extends AnyFunSuite with ObsdHarness:
 
   test("an unattested enclave-target front is labeled DEV (no metadata privacy claim)"):
     withObsd(Array.fill(Crypto.KeyBytes)(0.toByte)) { channel =>
-      val store = new EnclaveObliviousStore(spb.ObliviousStoreGrpc.blockingStub(channel), attested = false)
+      val store =
+        new EnclaveObliviousStore(spb.ObliviousStoreGrpc.blockingStub(channel), attested = false)
       assert(!store.metadataPrivate)
       assert(store.label == Privacy.DevLabel)
     }

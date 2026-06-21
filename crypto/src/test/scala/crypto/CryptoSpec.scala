@@ -9,12 +9,18 @@ import org.scalatestplus.scalacheck.ScalaCheckDrivenPropertyChecks
 
 class CryptoSpec extends AnyFunSuite with ScalaCheckDrivenPropertyChecks:
 
-  private val keys: Gen[Array[Byte]]   = Gen.listOfN(Crypto.KeyBytes, arbitrary[Byte]).map(_.toArray)
-  private val nonces: Gen[Array[Byte]] = Gen.listOfN(Crypto.NonceBytes, arbitrary[Byte]).map(_.toArray)
-  private val bytes: Gen[Array[Byte]]  = Gen.listOf(arbitrary[Byte]).map(_.toArray)
+  private val keys: Gen[Array[Byte]] = Gen.listOfN(Crypto.KeyBytes, arbitrary[Byte]).map(_.toArray)
+  private val nonces: Gen[Array[Byte]] =
+    Gen.listOfN(Crypto.NonceBytes, arbitrary[Byte]).map(_.toArray)
+  private val bytes: Gen[Array[Byte]] = Gen.listOf(arbitrary[Byte]).map(_.toArray)
 
   /** JDK's own (independent, vetted) ChaCha20-Poly1305 — IETF 12-byte nonce, tag appended. */
-  private def jdkSeal(key: Array[Byte], nonce: Array[Byte], ad: Array[Byte], pt: Array[Byte]): Array[Byte] =
+  private def jdkSeal(
+      key: Array[Byte],
+      nonce: Array[Byte],
+      ad: Array[Byte],
+      pt: Array[Byte]
+  ): Array[Byte] =
     val c = Cipher.getInstance("ChaCha20-Poly1305")
     c.init(Cipher.ENCRYPT_MODE, new SecretKeySpec(key, "ChaCha20"), new IvParameterSpec(nonce))
     if ad.nonEmpty then c.updateAAD(ad)

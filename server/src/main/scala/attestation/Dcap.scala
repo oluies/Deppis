@@ -34,7 +34,11 @@ object Dcap:
       lp(q.enclavePublicKey.toArray) ++ lp(q.nonce.toArray)
 
   /** Verify an ECDSA-P256 signature (`SHA256withECDSA`, X.509-encoded public key). */
-  def ecdsaVerify(publicKeyDer: Array[Byte], message: Array[Byte], signature: Array[Byte]): Boolean =
+  def ecdsaVerify(
+      publicKeyDer: Array[Byte],
+      message: Array[Byte],
+      signature: Array[Byte]
+  ): Boolean =
     try
       val pub = KeyFactory.getInstance("EC").generatePublic(new X509EncodedKeySpec(publicKeyDer))
       val sig = Signature.getInstance("SHA256withECDSA")
@@ -47,7 +51,12 @@ object Dcap:
 
   private def lp(b: Array[Byte]): Array[Byte] = intBytes(b.length) ++ b
   private def intBytes(v: Int): Array[Byte] =
-    Array(((v >> 24) & 0xff).toByte, ((v >> 16) & 0xff).toByte, ((v >> 8) & 0xff).toByte, (v & 0xff).toByte)
+    Array(
+      ((v >> 24) & 0xff).toByte,
+      ((v >> 16) & 0xff).toByte,
+      ((v >> 8) & 0xff).toByte,
+      (v & 0xff).toByte
+    )
 
 /** Production attestation verifier: real ECDSA-P256 quote-signature verification (Constitution IX).
   *

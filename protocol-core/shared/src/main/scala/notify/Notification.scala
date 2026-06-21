@@ -7,7 +7,7 @@ package notify
   * and hands the sealed token to that buddy at add-buddy time. A sender can therefore only ever
   * cause its OWN bit to be set; the digest reveals THAT mail waits, never WHICH buddy. */
 object Notification:
-  val MaxBits: Int     = 512        // one bit per possible buddy (FR-015)
+  val MaxBits: Int = 512 // one bit per possible buddy (FR-015)
   val DigestBytes: Int = MaxBits / 8 // 64
 
   final case class NotificationToken(bitPosition: Int, label: Array[Byte]):
@@ -18,7 +18,7 @@ object Notification:
     * being replayed into a DIFFERENT round (the opener validates the round matches the request). */
   def serialize(roundId: Long, t: NotificationToken): Array[Byte] =
     val out = new Array[Byte](10 + t.label.length)
-    var i   = 0
+    var i = 0
     while i < 8 do
       out(i) = ((roundId >>> (56 - 8 * i)) & 0xff).toByte
       i += 1
@@ -32,7 +32,7 @@ object Notification:
     if b.length < 10 then Left("token too short")
     else
       var round = 0L
-      var i     = 0
+      var i = 0
       while i < 8 do
         round = (round << 8) | (b(i) & 0xffL)
         i += 1
@@ -52,10 +52,11 @@ object Notification:
       new Digest(c)
     def or(other: Digest): Digest =
       new Digest(bytes.zip(other.bytes).map((a, b) => (a | b).toByte))
-    def isEmpty: Boolean      = bytes.forall(_ == 0)
-    def popcount: Int         = bytes.iterator.map(b => Integer.bitCount(b & 0xff)).sum
+    def isEmpty: Boolean = bytes.forall(_ == 0)
+    def popcount: Int = bytes.iterator.map(b => Integer.bitCount(b & 0xff)).sum
 
   object Digest:
-    def empty: Digest   = new Digest(new Array[Byte](DigestBytes))
+    def empty: Digest = new Digest(new Array[Byte](DigestBytes))
+
     /** All-zero digest emitted for traffic uniformity when a client has no waiting mail. */
     def carrier: Digest = empty

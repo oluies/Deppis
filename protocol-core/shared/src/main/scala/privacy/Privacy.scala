@@ -5,7 +5,7 @@ package privacy
   * other build (dev store, Groove single-shuffler stub, or an unattested real backend) is NOT
   * private and MUST surface the dev label in code, logs, and UI. */
 object Privacy:
-  val DevLabel: String     = "DEV, NO METADATA PRIVACY"
+  val DevLabel: String = "DEV, NO METADATA PRIVACY"
   val PrivateLabel: String = "METADATA PRIVATE"
 
   enum Backend:
@@ -13,8 +13,8 @@ object Privacy:
 
   final case class BuildPrivacyStatus(backend: Backend, attestationPassed: Boolean):
     def metadataPrivate: Boolean = backend match
-      case Backend.EnclaveTarget            => attestationPassed
-      case Backend.GrooveTarget             => attestationPassed
+      case Backend.EnclaveTarget => attestationPassed
+      case Backend.GrooveTarget => attestationPassed
       case Backend.Dev | Backend.GrooveStub => false
 
     def label: String = if metadataPrivate then PrivateLabel else DevLabel

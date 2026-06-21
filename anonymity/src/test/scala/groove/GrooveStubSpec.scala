@@ -15,7 +15,7 @@ class GrooveStubSpec extends AnyFunSuite:
     assert(g.label == Privacy.DevLabel)
 
   test("fetch returns exactly the round's frames as a multiset (shuffle preserves content)"):
-    val g  = GrooveStub()
+    val g = GrooveStub()
     val fs = frames(8)
     fs.foreach(f => assert(g.submit(1L, f).isRight))
     val out = g.fetch(1L, 8).toOption.get
@@ -38,7 +38,7 @@ class GrooveStubSpec extends AnyFunSuite:
     import scala.concurrent.{Await, Future}
     import scala.concurrent.ExecutionContext.Implicits.global
     import scala.concurrent.duration.*
-    val g  = GrooveStub()
+    val g = GrooveStub()
     val fs = frames(200)
     val submits = fs.map(f => Future(g.submit(3L, f)))
     val fetches = (0 until 50).map(_ => Future(g.fetch(3L, 200))) // racing reads during writes

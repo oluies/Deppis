@@ -6,7 +6,7 @@ import org.scalatest.funsuite.AnyFunSuite
   * the JS (`@noble/ciphers`) build must reproduce byte-for-byte (cross-platform KAT). */
 class AeadSpec extends AnyFunSuite:
 
-  private val key   = Array.tabulate(32)(_.toByte)
+  private val key = Array.tabulate(32)(_.toByte)
   private val nonce = Array.tabulate(12)(_.toByte)
 
   test("seal/open round-trips"):

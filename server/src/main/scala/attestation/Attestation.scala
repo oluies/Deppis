@@ -50,8 +50,8 @@ enum AttestationResult:
 
 object AttestationResult:
   // Fixed, value-independent reasons (Constitution II — logs/errors must not vary on secrets).
-  val WeakNonce        = "attestation: expected freshness nonce too short"
-  val NonceMismatch    = "attestation: freshness nonce mismatch"
+  val WeakNonce = "attestation: expected freshness nonce too short"
+  val NonceMismatch = "attestation: freshness nonce mismatch"
   val SignatureInvalid = "attestation: quote signature invalid"
   val MeasurementUntrusted =
     "attestation: measurement not in transparency-logged reference set"

@@ -7,7 +7,7 @@ import protocbridge.{Artifact, SandboxedJvmGenerator, Target}
 
 ThisBuild / scalaVersion := "3.3.4" // LTS
 ThisBuild / organization := "io.deppis.messenger"
-ThisBuild / version      := "0.1.0-SNAPSHOT"
+ThisBuild / version := "0.1.0-SNAPSHOT"
 
 // sbt 2.0 no longer auto-detects the ScalaTest framework from the test classpath, so register it
 // explicitly for every module (without this, `test` reports "No tests to run" / Total 0).
@@ -15,7 +15,7 @@ ThisBuild / Test / testFrameworks := Seq(TestFramework("org.scalatest.tools.Fram
 
 // Pinned dependency versions live in `project/V.scala` (reliably in metabuild scope under sbt 2.0).
 lazy val testDeps = Seq(
-  "org.scalatest"     %% "scalatest"       % V.scalatest     % Test,
+  "org.scalatest" %% "scalatest" % V.scalatest % Test,
   "org.scalatestplus" %% "scalacheck-1-18" % V.scalatestPlus % Test
 )
 
@@ -32,15 +32,17 @@ lazy val protocolCore = (project in file("protocol-core"))
       baseDirectory.value / "shared" / "src" / "main" / "scala",
       baseDirectory.value / "jvm" / "src" / "main" / "scala"
     ),
-    Test / unmanagedSourceDirectories := Seq(baseDirectory.value / "shared" / "src" / "test" / "scala"),
+    Test / unmanagedSourceDirectories := Seq(
+      baseDirectory.value / "shared" / "src" / "test" / "scala"
+    ),
     scalacOptions ++= Seq("-deprecation", "-feature", "-unchecked", "-Wunused:all"),
     // CLIs read JSON from stdin (Constitution V); fork and connect stdin so `run` forwards it.
-    run / fork         := true,
+    run / fork := true,
     run / connectInput := true,
     libraryDependencies ++= Seq(
-      "com.lihaoyi"       %% "upickle"          % V.upickle,
-      "org.scalatest"     %% "scalatest"        % V.scalatest     % Test,
-      "org.scalatestplus" %% "scalacheck-1-18"  % V.scalatestPlus % Test
+      "com.lihaoyi" %% "upickle" % V.upickle,
+      "org.scalatest" %% "scalatest" % V.scalatest % Test,
+      "org.scalatestplus" %% "scalacheck-1-18" % V.scalatestPlus % Test
     )
   )
 
@@ -64,7 +66,7 @@ lazy val protocolCoreJS = (project in file("protocol-core-js"))
     libraryDependencies ++= Seq(
       // sbt-scalajs 1.22.0 (sbt 2.0) no longer provides the `%%%` operator for plain JS projects,
       // so we name the Scala.js artifacts explicitly (Scala.js 1.x + Scala 3 ⇒ `_sjs1_3`).
-      "com.lihaoyi"   % "upickle_sjs1_3"   % V.upickle,
+      "com.lihaoyi" % "upickle_sjs1_3" % V.upickle,
       "org.scalatest" % "scalatest_sjs1_3" % V.scalatest % Test
     )
   )
@@ -80,12 +82,12 @@ lazy val crypto = (project in file("crypto"))
     run / javaOptions += "--enable-native-access=ALL-UNNAMED",
     Test / javaOptions += "--enable-native-access=ALL-UNNAMED",
     libraryDependencies ++= testDeps ++ Seq(
-      "com.lihaoyi"      %% "upickle"        % V.upickle,
+      "com.lihaoyi" %% "upickle" % V.upickle,
       // Audited Signal double-ratchet (T012/T012a, Constitution I — no hand-rolled ratchet). The
       // MAINTAINED libsignal (Rust core + Java bindings); we wrap it, never reimplement the ratchet.
       "org.signal" % "libsignal-client" % "0.61.0",
       // independent vetted Blake2b impl, used only to cross-validate libsodium in KATs
-      "org.bouncycastle"  % "bcprov-jdk18on" % "1.78.1" % Test
+      "org.bouncycastle" % "bcprov-jdk18on" % "1.78.1" % Test
     )
   )
 
@@ -150,10 +152,10 @@ lazy val transport = (project in file("transport"))
       )
     ),
     libraryDependencies ++= Seq(
-      "com.thesamet.scalapb" %% "scalapb-runtime"      % V.scalapb  % "protobuf",
+      "com.thesamet.scalapb" %% "scalapb-runtime" % V.scalapb % "protobuf",
       "com.thesamet.scalapb" %% "scalapb-runtime-grpc" % V.scalapb,
-      "io.grpc"               % "grpc-netty-shaded"     % V.grpcJava,
-      "io.grpc"               % "grpc-inprocess"        % V.grpcJava % Test
+      "io.grpc" % "grpc-netty-shaded" % V.grpcJava,
+      "io.grpc" % "grpc-inprocess" % V.grpcJava % Test
     ) ++ testDeps
   )
 

@@ -15,17 +15,24 @@ private object chacha20poly1305 extends js.Object:
 
 @js.native
 private trait Cipher extends js.Object:
-  def encrypt(plaintext: Uint8Array): Uint8Array  = js.native
+  def encrypt(plaintext: Uint8Array): Uint8Array = js.native
   def decrypt(ciphertext: Uint8Array): Uint8Array = js.native
 
 object Aead:
-  val KeyBytes: Int   = 32
+  val KeyBytes: Int = 32
   val NonceBytes: Int = 12
-  val TagBytes: Int   = 16
+  val TagBytes: Int = 16
 
   def seal(key: Array[Byte], nonce: Array[Byte], plaintext: Array[Byte]): Array[Byte] =
-    Uint8.toBytes(chacha20poly1305(Uint8.toJs(key), Uint8.toJs(nonce)).encrypt(Uint8.toJs(plaintext)))
+    Uint8.toBytes(
+      chacha20poly1305(Uint8.toJs(key), Uint8.toJs(nonce)).encrypt(Uint8.toJs(plaintext))
+    )
 
   def open(key: Array[Byte], nonce: Array[Byte], ciphertext: Array[Byte]): Option[Array[Byte]] =
-    try Some(Uint8.toBytes(chacha20poly1305(Uint8.toJs(key), Uint8.toJs(nonce)).decrypt(Uint8.toJs(ciphertext))))
+    try
+      Some(
+        Uint8.toBytes(
+          chacha20poly1305(Uint8.toJs(key), Uint8.toJs(nonce)).decrypt(Uint8.toJs(ciphertext))
+        )
+      )
     catch case _: Throwable => None

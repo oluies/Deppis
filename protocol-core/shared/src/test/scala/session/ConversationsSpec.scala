@@ -18,31 +18,54 @@ class ConversationsSpec extends AnyFunSuite:
     assert(c2.pending("p1") == 0)
 
   test("successive sends to one buddy use distinct (non-recurrent) tokens"):
-    val c = reg("p1").enqueue("p1", "a".getBytes).toOption.get.enqueue("p1", "b".getBytes).toOption.get
+    val c =
+      reg("p1").enqueue("p1", "a".getBytes).toOption.get.enqueue("p1", "b".getBytes).toOption.get
     val (o1, c1) = c.dequeueSend("p1").toOption.get
-    val (o2, _)  = c1.dequeueSend("p1").toOption.get
+    val (o2, _) = c1.dequeueSend("p1").toOption.get
     assert(!RetrievalToken.equalsCT(o1.retrievalToken, o2.retrievalToken))
 
-  test("send direction is domain-separated: A->B and B->A tokens differ at equal counters (FR-014)"):
-    val ab = reg("pair", "A", "B").enqueue("pair", "m".getBytes).toOption.get.dequeueSend("pair").toOption.get._1
-    val ba = reg("pair", "B", "A").enqueue("pair", "m".getBytes).toOption.get.dequeueSend("pair").toOption.get._1
+  test(
+    "send direction is domain-separated: A->B and B->A tokens differ at equal counters (FR-014)"
+  ):
+    val ab = reg("pair", "A", "B")
+      .enqueue("pair", "m".getBytes)
+      .toOption
+      .get
+      .dequeueSend("pair")
+      .toOption
+      .get
+      ._1
+    val ba = reg("pair", "B", "A")
+      .enqueue("pair", "m".getBytes)
+      .toOption
+      .get
+      .dequeueSend("pair")
+      .toOption
+      .get
+      ._1
     assert(!RetrievalToken.equalsCT(ab.retrievalToken, ba.retrievalToken))
 
   test("re-register is a no-op: counter and queue are preserved (no token rewind, FR-014)"):
-    val c  = reg("p").enqueue("p", "x".getBytes).toOption.get
+    val c = reg("p").enqueue("p", "x".getBytes).toOption.get
     val c2 = c.register("p", "A", "B", key) // must not reset
     assert(c2.pending("p") == 1)
 
   // T033 — three concurrent conversations, none blocking another
-  test("conversations are independent: enqueue/dequeue on one buddy doesn't affect others (FR-006)"):
-    val c = reg("a").register("b", "A", "C", key).register("c", "A", "D", key)
-      .enqueue("a", "1".getBytes).toOption.get
+  test(
+    "conversations are independent: enqueue/dequeue on one buddy doesn't affect others (FR-006)"
+  ):
+    val c = reg("a")
+      .register("b", "A", "C", key)
+      .register("c", "A", "D", key)
+      .enqueue("a", "1".getBytes)
+      .toOption
+      .get
     assert(c.pending("a") == 1 && c.pending("b") == 0 && c.pending("c") == 0)
     val c2 = c.dequeueSend("a").toOption.get._2
     assert(c2.pending("a") == 0 && c2.pending("b") == 0)
 
   test("a new conversation proceeds without disturbing an in-progress one"):
-    val c  = reg("a").enqueue("a", "x".getBytes).toOption.get
+    val c = reg("a").enqueue("a", "x".getBytes).toOption.get
     val c2 = c.register("b", "A", "C", key).enqueue("b", "y".getBytes).toOption.get
     assert(c2.pending("a") == 1 && c2.pending("b") == 1)
 

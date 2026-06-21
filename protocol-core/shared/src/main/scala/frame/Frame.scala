@@ -18,7 +18,8 @@ object Frame:
 
   /** Pad a payload into a fixed `size`-byte frame. */
   def pad(payload: Array[Byte], size: Int = Size): Either[String, Array[Byte]] =
-    if payload.length > maxPayload(size) then Left(s"payload ${payload.length} > max ${maxPayload(size)}")
+    if payload.length > maxPayload(size) then
+      Left(s"payload ${payload.length} > max ${maxPayload(size)}")
     else
       val out = new Array[Byte](size) // zero-filled
       out(0) = ((payload.length >> 8) & 0xff).toByte

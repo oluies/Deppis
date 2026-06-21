@@ -20,9 +20,9 @@ final class EnclaveObliviousStore(
 ) extends ObliviousStore:
 
   // Derive both from the canonical labeling logic (single source of truth) — no literal drift.
-  private val status           = Privacy.BuildPrivacyStatus(Privacy.Backend.EnclaveTarget, attested)
+  private val status = Privacy.BuildPrivacyStatus(Privacy.Backend.EnclaveTarget, attested)
   def metadataPrivate: Boolean = status.metadataPrivate
-  def label: String            = status.label
+  def label: String = status.label
 
   // gRPC failures surface as exceptions from the blocking stub; map them to the trait's Left
   // channel. Error text is generic (no secret-dependent content, Constitution II).
@@ -32,7 +32,12 @@ final class EnclaveObliviousStore(
         spb.WriteBatchRequest(
           roundId = 0L,
           batchSize = 1,
-          entries = Seq(spb.WriteEntry(writeToken = ByteString.copyFrom(writeToken), frame = ByteString.copyFrom(frame)))
+          entries = Seq(
+            spb.WriteEntry(
+              writeToken = ByteString.copyFrom(writeToken),
+              frame = ByteString.copyFrom(frame)
+            )
+          )
         )
       )
       Right(())

@@ -17,14 +17,16 @@ final class EnclaveNotificationClient(
     attested: Boolean
 ):
   // Derive both from the canonical labeling logic (single source of truth) — no literal drift.
-  private val status           = Privacy.BuildPrivacyStatus(Privacy.Backend.EnclaveTarget, attested)
+  private val status = Privacy.BuildPrivacyStatus(Privacy.Backend.EnclaveTarget, attested)
   def metadataPrivate: Boolean = status.metadataPrivate
-  def label: String            = status.label
+  def label: String = status.label
 
   /** Submit a receiver-sealed token for a round; always succeeds uniformly server-side. */
   def signal(roundId: Long, sealedToken: Array[Byte]): Either[String, Unit] =
     try
-      stub.signal(npb.SignalRequest(roundId = roundId, sealedToken = ByteString.copyFrom(sealedToken)))
+      stub.signal(
+        npb.SignalRequest(roundId = roundId, sealedToken = ByteString.copyFrom(sealedToken))
+      )
       Right(())
     catch case NonFatal(_) => Left("notification signal failed")
 
@@ -32,6 +34,8 @@ final class EnclaveNotificationClient(
     * mail waits, so the response reveals only that some buddy wrote, never which. */
   def fetchDigest(roundId: Long, clientLabel: Array[Byte]): Either[String, Array[Byte]] =
     try
-      val resp = stub.fetchDigest(npb.FetchDigestRequest(roundId = roundId, clientLabel = ByteString.copyFrom(clientLabel)))
+      val resp = stub.fetchDigest(
+        npb.FetchDigestRequest(roundId = roundId, clientLabel = ByteString.copyFrom(clientLabel))
+      )
       Right(resp.digest.toByteArray)
     catch case NonFatal(_) => Left("notification fetch failed")

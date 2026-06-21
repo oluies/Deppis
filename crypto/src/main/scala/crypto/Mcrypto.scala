@@ -5,8 +5,8 @@ import java.util.Base64
 /** `mcrypto` CLI (Constitution V): JSON in (stdin) -> JSON out (stdout); errors -> stderr.
   * Subcommands: aead-seal | aead-open | kdf | kat. Byte fields are base64. */
 object Mcrypto:
-  private def b64e(b: Array[Byte]): String       = Base64.getEncoder.encodeToString(b)
-  private def b64d(s: String): Array[Byte]       = Base64.getDecoder.decode(s)
+  private def b64e(b: Array[Byte]): String = Base64.getEncoder.encodeToString(b)
+  private def b64d(s: String): Array[Byte] = Base64.getDecoder.decode(s)
   private def optBytes(j: ujson.Value, k: String): Array[Byte] =
     j.obj.get(k).map(v => b64d(v.str)).getOrElse(Array.emptyByteArray)
   private def fail(msg: String): Nothing =
@@ -20,13 +20,29 @@ object Mcrypto:
       val j = if in.trim.isEmpty then ujson.Obj() else ujson.read(in)
       sub match
         case "aead-seal" =>
-          val ct = Crypto.aeadSeal(b64d(j("key").str), b64d(j("nonce").str), optBytes(j, "ad"), b64d(j("plaintext").str))
+          val ct = Crypto.aeadSeal(
+            b64d(j("key").str),
+            b64d(j("nonce").str),
+            optBytes(j, "ad"),
+            b64d(j("plaintext").str)
+          )
           Right(ujson.Obj("ciphertext" -> b64e(ct)))
         case "aead-open" =>
-          Crypto.aeadOpen(b64d(j("key").str), b64d(j("nonce").str), optBytes(j, "ad"), b64d(j("ciphertext").str))
+          Crypto
+            .aeadOpen(
+              b64d(j("key").str),
+              b64d(j("nonce").str),
+              optBytes(j, "ad"),
+              b64d(j("ciphertext").str)
+            )
             .map(pt => ujson.Obj("plaintext" -> b64e(pt)))
         case "kdf" =>
-          val okm = Crypto.kdf(b64d(j("ikm").str), optBytes(j, "salt"), optBytes(j, "info"), j("len").num.toInt)
+          val okm = Crypto.kdf(
+            b64d(j("ikm").str),
+            optBytes(j, "salt"),
+            optBytes(j, "info"),
+            j("len").num.toInt
+          )
           Right(ujson.Obj("okm" -> b64e(okm)))
         case "kat" =>
           // Two published static vectors: RFC 7693 Blake2b + RFC 8439 ChaCha20-Poly1305.
@@ -36,8 +52,8 @@ object Mcrypto:
             .sameElements(Kat.Rfc8439.ciphertext)
           Right(
             ujson.Obj(
-              "suites"  -> ujson.Arr("blake2b-512 (RFC 7693)", "chacha20poly1305-ietf (RFC 8439)"),
-              "pass"    -> (blakeOk && aeadOk),
+              "suites" -> ujson.Arr("blake2b-512 (RFC 7693)", "chacha20poly1305-ietf (RFC 8439)"),
+              "pass" -> (blakeOk && aeadOk),
               "vectors" -> 2
             )
           )
@@ -46,5 +62,5 @@ object Mcrypto:
 
   def main(args: Array[String]): Unit =
     val sub = args.headOption.getOrElse("")
-    val in  = scala.io.Source.stdin.mkString
+    val in = scala.io.Source.stdin.mkString
     run(sub, in).fold(fail, out => println(ujson.write(out)))

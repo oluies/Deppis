@@ -11,7 +11,7 @@ class DevNotificationServerSpec extends AnyFunSuite:
 
   private val labelA = "alice".getBytes
   private val labelB = "bob".getBytes
-  private val R      = 1L
+  private val R = 1L
 
   test("dev notification server is labeled and never metadata-private (Constitution IV)"):
     val s = server()
@@ -19,7 +19,7 @@ class DevNotificationServerSpec extends AnyFunSuite:
     assert(s.label == Privacy.DevLabel)
 
   test("a sealed token flips exactly its own bit; digest reveals presence not identity"):
-    val s   = server()
+    val s = server()
     val tok = s.issueToken(R, 5, labelA)
     assert(s.signal(R, tok).isRight)
     val d = s.digest(R, labelA)
@@ -48,12 +48,14 @@ class DevNotificationServerSpec extends AnyFunSuite:
 
   test("a high-bit (uint64) round binds correctly (-1L == u64::MAX)"):
     val s = server()
-    assert(s.signal(-1L, s.issueToken(-1L, 5, labelA)).isRight) // accepted in its own (high-bit) round
+    assert(
+      s.signal(-1L, s.issueToken(-1L, 5, labelA)).isRight
+    ) // accepted in its own (high-bit) round
     assert(s.digest(-1L, labelA).get(5))
     assert(s.signal(2L, s.issueToken(-1L, 5, labelA)).isLeft) // bound to -1L, rejected at round 2
 
   test("a token bound to one round cannot be replayed into another (round binding)"):
-    val s   = server()
+    val s = server()
     val tok = s.issueToken(1L, 4, labelA) // bound to round 1
     assert(s.signal(2L, tok).isLeft) // replay to round 2 rejected
     assert(s.digest(2L, labelA).isEmpty)
@@ -81,7 +83,7 @@ class DevNotificationServerSpec extends AnyFunSuite:
     assert(s.signal(R, Array.fill[Byte](40)(0)).isLeft)
 
   test("tampered sealed token is rejected (AEAD authentication)"):
-    val s   = server()
+    val s = server()
     val tok = s.issueToken(R, 2, labelA)
     tok(tok.length - 1) = (tok(tok.length - 1) ^ 0x01).toByte
     assert(s.signal(R, tok).isLeft)
@@ -91,7 +93,7 @@ class DevNotificationServerSpec extends AnyFunSuite:
     import scala.concurrent.{Await, Future}
     import scala.concurrent.ExecutionContext.Implicits.global
     import scala.concurrent.duration.*
-    val s    = server()
+    val s = server()
     val toks = (0 until 200).map(i => s.issueToken(R, i, labelA))
     Await.result(Future.sequence(toks.map(t => Future(s.signal(R, t)))), 30.seconds)
     assert(s.digest(R, labelA).popcount == 200)

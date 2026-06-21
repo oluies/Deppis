@@ -31,7 +31,8 @@ object DeppisDemo:
 
   /** The dev notify key obsd opens tokens with AND the PING-front stand-in seals with — one source
     * so the two never silently diverge. A fresh array per call (never shared mutable state). */
-  private[transport] def devNotifyKey: Array[Byte] = Array.tabulate(Crypto.KeyBytes)(i => (i * 7 + 3).toByte)
+  private[transport] def devNotifyKey: Array[Byte] =
+    Array.tabulate(Crypto.KeyBytes)(i => (i * 7 + 3).toByte)
 
   def main(args: Array[String]): Unit =
     val notifyKey = devNotifyKey
@@ -67,26 +68,28 @@ object DeppisDemo:
     * message reached Bob. Pure of process management / `sys.exit`, so the integration suite can run
     * it against the test `ObsdHarness`. */
   def run(channel: ManagedChannel, notifyKey: Array[Byte]): Boolean =
-    val storeStub  = spb.ObliviousStoreGrpc.blockingStub(channel)
+    val storeStub = spb.ObliviousStoreGrpc.blockingStub(channel)
     val notifyStub = npb.NotificationServiceGrpc.blockingStub(channel)
 
     val aliceLabel = "alice-client".getBytes
-    val bobLabel   = "bob-client".getBytes
+    val bobLabel = "bob-client".getBytes
     def front(): GrpcRoundTransport =
       new GrpcRoundTransport(
         new EnclaveObliviousStore(storeStub, attested = false),
         new EnclaveNotificationClient(notifyStub, attested = false)
       )
     val alice = Engine(Some(front()), clientLabel = aliceLabel)
-    val bob   = Engine(Some(front()), clientLabel = bobLabel)
+    val bob = Engine(Some(front()), clientLabel = bobLabel)
 
     println("\n== Deppis metadata-private messenger — headless demo ==")
     val ps = alice.privacyStatus
-    println(s"""  backend=${ps.backend}  metadataPrivate=${ps.metadataPrivate}  label="${ps.label}"\n""")
+    println(
+      s"""  backend=${ps.backend}  metadataPrivate=${ps.metadataPrivate}  label="${ps.label}"\n"""
+    )
 
     // 1) Out-of-band pairing: same shared secret, opposite roles; safety numbers compared by hand.
     val secret = "meet-me-at-the-old-bridge".getBytes
-    val a      = alice.addBuddy(secret, BuddyRole.Initiator).toOption.get
+    val a = alice.addBuddy(secret, BuddyRole.Initiator).toOption.get
     alice.confirmBuddy(a.pairId, matched = true); alice.drainEvents()
     val b = bob.addBuddy(secret, BuddyRole.Responder).toOption.get
     bob.confirmBuddy(b.pairId, matched = true); bob.drainEvents()
@@ -102,10 +105,10 @@ object DeppisDemo:
     // front would. `sealer` only mints the token (it shares obsd's notify key); `pingSignal` is the
     // actual gRPC call into obsd, whose digest Bob's engine then reads. This bridge is not yet a
     // standalone process.
-    val sealer     = DevNotificationServer(notifyKey)
+    val sealer = DevNotificationServer(notifyKey)
     val pingSignal = new EnclaveNotificationClient(notifyStub, attested = false)
-    val pairKey    = Handshake.init(secret).pairKey
-    val bobBit     = NotifyDigest.bit(pairKey)
+    val pairKey = Handshake.init(secret).pairKey
+    val bobBit = NotifyDigest.bit(pairKey)
 
     // 2) Alice queues a message.
     val message = "see you at dusk"
@@ -116,10 +119,10 @@ object DeppisDemo:
     // 3) Run rounds until delivered or the budget is spent. Bob also writes a cover frame each round
     //    (uniform traffic, FR-012) — we narrate the Alice→Bob direction.
     var delivered = false
-    var round     = 1L
+    var round = 1L
     val maxRounds = 5L
     while !delivered && round <= maxRounds do
-      val ad        = alice.tick(round).toOption.get
+      val ad = alice.tick(round).toOption.get
       val aliceReal = !ad.carrier
       // DEV stand-in only: signalling obsd ONLY on real rounds makes the notify RPC volume depend on
       // whether a real message was sent — an active-vs-idle distinguisher at the front. The engine's
@@ -127,13 +130,17 @@ object DeppisDemo:
       // timing/volume from real-message presence (aggregation + cover signalling). Safe here only
       // because the whole run is DEV, NO METADATA PRIVACY.
       if aliceReal then pingSignal.signal(round, sealer.issueToken(round, bobBit, bobLabel))
-      log("alice", f"round $round: wrote ${if aliceReal then "REAL  frame" else "cover frame"} (256B, indistinguishable)")
+      log(
+        "alice",
+        f"round $round: wrote ${if aliceReal then "REAL  frame" else "cover frame"} (256B, indistinguishable)"
+      )
 
       bob.tick(round)
-      val evs       = bob.drainEvents()
+      val evs = bob.drainEvents()
       val gotNotify = evs.exists(_.isInstanceOf[EngineEvent.Notified])
-      val gotMsg    = evs.collectFirst { case m: EngineEvent.MessageReceived => m }
-      if gotNotify then log("bob", f"round $round: notified — mail waiting (sender identity NOT revealed)")
+      val gotMsg = evs.collectFirst { case m: EngineEvent.MessageReceived => m }
+      if gotNotify then
+        log("bob", f"round $round: notified — mail waiting (sender identity NOT revealed)")
       gotMsg match
         case Some(EngineEvent.MessageReceived(pid, txt, _)) =>
           log("bob", s"""round $round: retrieved from $pid: "$txt"""")
@@ -143,7 +150,8 @@ object DeppisDemo:
       round += 1
 
     println()
-    if delivered then println(s"""  ✓ delivered end-to-end through the real obsd sidecar: "$message"""")
+    if delivered then
+      println(s"""  ✓ delivered end-to-end through the real obsd sidecar: "$message"""")
     else println("  ✗ not delivered within the round budget")
     println(s"""  privacy label throughout: "${alice.privacyStatus.label}"\n""")
     delivered
@@ -176,12 +184,12 @@ object DeppisDemo:
     pb.environment().put("OBSD_NOTIFY_KEY", hex(notifyKey))
     pb.environment().put("OBSD_CAPACITY", "64")
     pb.redirectOutput(ProcessBuilder.Redirect.DISCARD) // keep demo output readable
-    pb.redirectError(ProcessBuilder.Redirect.INHERIT)  // but surface obsd errors
+    pb.redirectError(ProcessBuilder.Redirect.INHERIT) // but surface obsd errors
     pb.start()
 
   private def awaitReady(port: Int, deadlineMs: Long): Boolean =
     val end = System.nanoTime() + deadlineMs * 1000000L
-    var ok  = false
+    var ok = false
     while !ok && System.nanoTime() < end do
       try
         val sock = new Socket()

@@ -9,9 +9,9 @@ import javax.crypto.spec.{IvParameterSpec, SecretKeySpec}
   * cross-compiled engine encrypts frames identically on JVM and JS. Used to make every wire frame —
   * real or carrier — uniform random-looking bytes (T042). */
 object Aead:
-  val KeyBytes: Int   = 32
+  val KeyBytes: Int = 32
   val NonceBytes: Int = 12
-  val TagBytes: Int   = 16
+  val TagBytes: Int = 16
 
   /** Encrypt: returns `ciphertext ‖ tag` (plaintext.length + 16). */
   def seal(key: Array[Byte], nonce: Array[Byte], plaintext: Array[Byte]): Array[Byte] =

@@ -24,7 +24,7 @@ object Buddy:
 
   final class BuddyBook private (private val rels: Map[String, BuddyRelationship]):
     /** Active (non-removed) buddies — the quantity the 512 cap applies to. */
-    def size: Int           = rels.valuesIterator.count(_.state != BuddyState.Removed)
+    def size: Int = rels.valuesIterator.count(_.state != BuddyState.Removed)
     def confirmedCount: Int = rels.valuesIterator.count(_.state == BuddyState.Confirmed)
     def get(pairId: String): Option[BuddyRelationship] = rels.get(pairId)
 
@@ -39,13 +39,13 @@ object Buddy:
           val next = if matched then BuddyState.Confirmed else BuddyState.Removed
           Right(BuddyBook(rels.updated(pairId, r.copy(state = next))))
         case Some(_) => Left("relationship is not pending")
-        case None    => Left("unknown pair")
+        case None => Left("unknown pair")
 
     def remove(pairId: String): Either[String, BuddyBook] =
       rels.get(pairId) match
         case Some(r) => Right(BuddyBook(rels.updated(pairId, r.copy(state = BuddyState.Removed))))
-        case None    => Left("unknown pair")
+        case None => Left("unknown pair")
 
   object BuddyBook:
-    def empty: BuddyBook                                       = BuddyBook(Map.empty)
+    def empty: BuddyBook = BuddyBook(Map.empty)
     private def apply(m: Map[String, BuddyRelationship]): BuddyBook = new BuddyBook(m)

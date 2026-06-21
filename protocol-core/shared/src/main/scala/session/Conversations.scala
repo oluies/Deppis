@@ -34,28 +34,37 @@ final class Conversations private (private val convs: Map[String, ConversationSt
 
   /** Register a conversation. No-op if `pairId` already exists, so a re-register can never rewind
     * an in-progress counter (which would re-derive used tokens) or drop queued messages. */
-  def register(pairId: String, selfId: String, buddyId: String, pairKey: Array[Byte]): Conversations =
+  def register(
+      pairId: String,
+      selfId: String,
+      buddyId: String,
+      pairKey: Array[Byte]
+  ): Conversations =
     if convs.contains(pairId) then this
-    else new Conversations(convs.updated(pairId, ConversationState(selfId, buddyId, pairKey, 0L, Vector.empty)))
+    else
+      new Conversations(
+        convs.updated(pairId, ConversationState(selfId, buddyId, pairKey, 0L, Vector.empty))
+      )
 
   def pending(pairId: String): Int = convs.get(pairId).map(_.queue.size).getOrElse(0)
 
   def enqueue(pairId: String, plaintext: Array[Byte]): Either[String, Conversations] =
     convs.get(pairId) match
-      case None     => Left(s"unknown conversation $pairId")
-      case Some(st) => Right(new Conversations(convs.updated(pairId, st.copy(queue = st.queue :+ plaintext))))
+      case None => Left(s"unknown conversation $pairId")
+      case Some(st) =>
+        Right(new Conversations(convs.updated(pairId, st.copy(queue = st.queue :+ plaintext))))
 
   /** Pop and prepare the next outgoing message for ONE buddy, independent of every other
     * conversation. Advances only that buddy's counter and queue. */
   def dequeueSend(pairId: String): Either[String, (Outgoing, Conversations)] =
     convs.get(pairId) match
-      case None                         => Left(s"unknown conversation $pairId")
+      case None => Left(s"unknown conversation $pairId")
       case Some(st) if st.queue.isEmpty => Left(s"no pending message for $pairId")
       case Some(st) =>
         Frame.pad(st.queue.head).map { fr =>
           val counter = st.sendCounter + 1
-          val token   = RetrievalToken.derive(st.pairKey, st.selfId, st.buddyId, counter)
-          val next    = st.copy(sendCounter = counter, queue = st.queue.tail)
+          val token = RetrievalToken.derive(st.pairKey, st.selfId, st.buddyId, counter)
+          val next = st.copy(sendCounter = counter, queue = st.queue.tail)
           (Outgoing(fr, token), new Conversations(convs.updated(pairId, next)))
         }
 

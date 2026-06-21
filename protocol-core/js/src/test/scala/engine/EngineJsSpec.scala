@@ -19,14 +19,18 @@ class EngineJsSpec extends AnyFunSuite:
 
   test("JSON boundary works on JS: addBuddy → confirmBuddy emits buddyConfirmed, no key leak"):
     val codec = new EngineCodec(new Engine())
-    val add = ujson.read(codec.handle(
-      """{"apiVersion":"1","command":"addBuddy","args":{"sharedSecret":"abc","role":"initiator"}}"""
-    ))
+    val add = ujson.read(
+      codec.handle(
+        """{"apiVersion":"1","command":"addBuddy","args":{"sharedSecret":"abc","role":"initiator"}}"""
+      )
+    )
     assert(add("result")("pairId").str == RefPairId)
     val pairId = add("result")("pairId").str
-    val resp = ujson.read(codec.handle(
-      s"""{"apiVersion":"1","command":"confirmBuddy","args":{"pairId":"$pairId","matched":true}}"""
-    ))
+    val resp = ujson.read(
+      codec.handle(
+        s"""{"apiVersion":"1","command":"confirmBuddy","args":{"pairId":"$pairId","matched":true}}"""
+      )
+    )
     assert(resp("events").arr.head("event").str == "buddyConfirmed")
 
   test("apiVersion mismatch is refused on JS too"):
