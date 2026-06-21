@@ -37,6 +37,7 @@ class BuddySpec extends AnyFunSuite:
     assert(over == Left(s"buddy cap $MaxBuddies reached"))
 
   test("after removing one at the cap, a new buddy can be added"):
-    val full = (1 to MaxBuddies).foldLeft(BuddyBook.empty)((b, i) => b.add(rel(s"p$i")).toOption.get)
+    val full =
+      (1 to MaxBuddies).foldLeft(BuddyBook.empty)((b, i) => b.add(rel(s"p$i")).toOption.get)
     val freed = full.remove("p1").toOption.get
     assert(freed.add(rel("pNew")).isRight)

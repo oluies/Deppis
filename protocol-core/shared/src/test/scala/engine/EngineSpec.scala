@@ -23,8 +23,10 @@ class EngineSpec extends AnyFunSuite:
     assert(a.safetyNumber.nonEmpty)
 
   test("empty shared secret is rejected without leaking detail"):
-    assert(Engine().addBuddy(Array.emptyByteArray, BuddyRole.Initiator)
-      == Left(EngineError("invalid_arg", "shared secret required")))
+    assert(
+      Engine().addBuddy(Array.emptyByteArray, BuddyRole.Initiator)
+        == Left(EngineError("invalid_arg", "shared secret required"))
+    )
 
   test("confirmBuddy(matched) confirms and emits buddyConfirmed"):
     val e = Engine()
@@ -53,7 +55,11 @@ class EngineSpec extends AnyFunSuite:
   test("sendMessage to a confirmed buddy queues; unknown/unconfirmed is rejected"):
     val e = Engine()
     val r = e.addBuddy(secret("s"), BuddyRole.Initiator).toOption.get
-    assert(e.sendMessage(r.pairId, "hi") == Left(EngineError("unknown_pair", "no confirmed buddy for that pair")))
+    assert(
+      e.sendMessage(r.pairId, "hi") == Left(
+        EngineError("unknown_pair", "no confirmed buddy for that pair")
+      )
+    )
     e.confirmBuddy(r.pairId, matched = true)
     assert(e.sendMessage(r.pairId, "hi") == Right(1))
     assert(e.sendMessage(r.pairId, "again") == Right(2))
@@ -63,7 +69,11 @@ class EngineSpec extends AnyFunSuite:
     val r = e.addBuddy(secret("s"), BuddyRole.Initiator).toOption.get
     e.confirmBuddy(r.pairId, matched = true)
     val big = "x" * 1000
-    assert(e.sendMessage(r.pairId, big) == Left(EngineError("message_too_long", "message exceeds the frame payload limit")))
+    assert(
+      e.sendMessage(r.pairId, big) == Left(
+        EngineError("message_too_long", "message exceeds the frame payload limit")
+      )
+    )
 
   test("tick yields a carrier when nothing is queued and a real frame when one is"):
     val e = Engine()
@@ -104,13 +114,17 @@ class EngineSpec extends AnyFunSuite:
 
   test("handle(confirmBuddy) surfaces the buddyConfirmed event in the events array"):
     val codec = EngineCodec(Engine())
-    val add = ujson.read(codec.handle(
-      """{"apiVersion":"1","command":"addBuddy","args":{"sharedSecret":"abc","role":"initiator"}}"""
-    ))
+    val add = ujson.read(
+      codec.handle(
+        """{"apiVersion":"1","command":"addBuddy","args":{"sharedSecret":"abc","role":"initiator"}}"""
+      )
+    )
     val pairId = add("result")("pairId").str
-    val resp = ujson.read(codec.handle(
-      s"""{"apiVersion":"1","command":"confirmBuddy","args":{"pairId":"$pairId","matched":true}}"""
-    ))
+    val resp = ujson.read(
+      codec.handle(
+        s"""{"apiVersion":"1","command":"confirmBuddy","args":{"pairId":"$pairId","matched":true}}"""
+      )
+    )
     val evs = resp("events").arr
     assert(evs.size == 1 && evs.head("event").str == "buddyConfirmed")
 
@@ -139,14 +153,16 @@ class EngineSpec extends AnyFunSuite:
     val codec = EngineCodec(Engine())
     // A big round id sent as a string is parsed exactly (no bad_request) — this is the precision-safe
     // input path; a non-numeric string would map to bad_request via the guard.
-    val s = ujson.read(codec.handle(
-      """{"apiVersion":"1","command":"tick","args":{"roundId":"9007199254740993"}}"""))
+    val s = ujson.read(
+      codec.handle("""{"apiVersion":"1","command":"tick","args":{"roundId":"9007199254740993"}}""")
+    )
     assert(s.obj.contains("result"))
     val n = ujson.read(codec.handle("""{"apiVersion":"1","command":"tick","args":{"roundId":3}}"""))
     assert(n("result")("roundId").num.toLong == 3L)
     // A present-but-wrong-typed roundId is an error, not a silent default to 0.
     for bad <- Seq("true", "null", "\"abc\"") do
-      val j = ujson.read(codec.handle(s"""{"apiVersion":"1","command":"tick","args":{"roundId":$bad}}"""))
+      val j =
+        ujson.read(codec.handle(s"""{"apiVersion":"1","command":"tick","args":{"roundId":$bad}}"""))
       assert(j("error")("code").str == "bad_request", s"roundId:$bad")
     // A missing roundId still defaults to 0 (round 0).
     val miss = ujson.read(codec.handle("""{"apiVersion":"1","command":"tick","args":{}}"""))

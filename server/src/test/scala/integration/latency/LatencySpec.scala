@@ -18,7 +18,10 @@ class LatencySpec extends AnyFunSuite:
   test("a full round-trip exchange is single-digit rounds and minute-order (SC-001)"):
     val rt = Latency.RoundTripRoundsWorstCase
     assert(Latency.isSingleDigitRounds(rt), s"round-trip rounds $rt must be single digit")
-    assert(Latency.meetsSc001(rt), s"round-trip latency ${Latency.latencySeconds(rt)}s must be minute-order")
+    assert(
+      Latency.meetsSc001(rt),
+      s"round-trip latency ${Latency.latencySeconds(rt)}s must be minute-order"
+    )
 
   test("the round count is consistent with the Schedule invariant (one retrieve per round)"):
     // Each planned round emits exactly one retrieve, so a message stored in round r is retrievable
@@ -32,4 +35,7 @@ class LatencySpec extends AnyFunSuite:
     // longer be minute-order — this is the regression the constant guards against.
     val tooSlow = 60
     assert(Latency.RoundTripRoundsWorstCase.toLong * tooSlow > 120, "guard rationale holds")
-    assert(Latency.meetsSc001(Latency.RoundTripRoundsWorstCase), "the ACTUAL tuned interval still passes")
+    assert(
+      Latency.meetsSc001(Latency.RoundTripRoundsWorstCase),
+      "the ACTUAL tuned interval still passes"
+    )

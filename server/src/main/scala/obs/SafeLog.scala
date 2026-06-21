@@ -16,7 +16,7 @@ object SafeLog:
   val Redacted: String = "<redacted>"
 
   def redact(secret: Array[Byte]): String = Redacted
-  def redact(secret: String): String      = Redacted
+  def redact(secret: String): String = Redacted
 
 /** The closed set of public failure reasons secret-handling code may surface. Each maps to a
   * fixed message that carries no secret-dependent content. */
@@ -30,8 +30,8 @@ enum FailureReason:
 
   def message: String = this match
     case FailureReason.AuthenticationFailed => "authentication failed"
-    case FailureReason.MalformedInput       => "malformed input"
-    case FailureReason.NotFound             => "not found"
-    case FailureReason.LimitReached         => "limit reached"
-    case FailureReason.Unauthorized         => "unauthorized"
-    case FailureReason.Unavailable          => "temporarily unavailable"
+    case FailureReason.MalformedInput => "malformed input"
+    case FailureReason.NotFound => "not found"
+    case FailureReason.LimitReached => "limit reached"
+    case FailureReason.Unauthorized => "unauthorized"
+    case FailureReason.Unavailable => "temporarily unavailable"

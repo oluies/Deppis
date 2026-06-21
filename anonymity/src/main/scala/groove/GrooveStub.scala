@@ -16,10 +16,10 @@ import scala.jdk.CollectionConverters.*
   * Per-round buffers are `CopyOnWriteArrayList`s so a `fetch` iterating a round cannot race a
   * concurrent `submit` (no `ConcurrentModificationException`). */
 final class GrooveStub extends AnonymityLayer:
-  private val rng    = new SecureRandom()
+  private val rng = new SecureRandom()
   private val rounds = new ConcurrentHashMap[Long, CopyOnWriteArrayList[Array[Byte]]]()
 
-  val label: String            = Privacy.DevLabel
+  val label: String = Privacy.DevLabel
   def metadataPrivate: Boolean = false
 
   def submit(roundId: Long, frame: Array[Byte]): Either[String, Unit] =
@@ -32,8 +32,9 @@ final class GrooveStub extends AnonymityLayer:
   def fetch(roundId: Long, count: Int): Either[String, Seq[Array[Byte]]] =
     if count < 0 then Left("count must be >= 0")
     else
-      val buf = Option(rounds.get(roundId)).map(_.asScala.toArray).getOrElse(Array.empty[Array[Byte]])
-      var i   = buf.length - 1
+      val buf =
+        Option(rounds.get(roundId)).map(_.asScala.toArray).getOrElse(Array.empty[Array[Byte]])
+      var i = buf.length - 1
       while i > 0 do
         val j = rng.nextInt(i + 1)
         val t = buf(i); buf(i) = buf(j); buf(j) = t

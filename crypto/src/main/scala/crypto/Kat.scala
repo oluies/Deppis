@@ -19,9 +19,9 @@ object Kat:
   /** RFC 8439 §2.8.2: ChaCha20-Poly1305 (IETF) AEAD. `ciphertext` is the 114-byte ciphertext
     * followed by the 16-byte Poly1305 tag (libsodium and the JDK both emit tag-appended). */
   object Rfc8439:
-    val key: Array[Byte]   = hex("808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f")
+    val key: Array[Byte] = hex("808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f")
     val nonce: Array[Byte] = hex("070000004041424344454647")
-    val aad: Array[Byte]   = hex("50515253c0c1c2c3c4c5c6c7")
+    val aad: Array[Byte] = hex("50515253c0c1c2c3c4c5c6c7")
     val plaintext: Array[Byte] =
       "Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, sunscreen would be it."
         .getBytes("US-ASCII")

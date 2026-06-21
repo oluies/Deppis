@@ -16,10 +16,13 @@ import scala.concurrent.{ExecutionContext, Future}
   *     write token; a carrier carries none, so token presence alone drops carriers (FR-012).
   *   - `retrieve` reads each single-use retrieval token and pads misses with a carrier zero-frame,
   *     so the response count matches the request and reveals nothing about hits vs. misses. */
-final class RoundServiceImpl(store: ObliviousStore)(using ec: ExecutionContext) extends RoundService:
+final class RoundServiceImpl(store: ObliviousStore)(using ec: ExecutionContext)
+    extends RoundService:
   // Surface the backend's privacy status (Constitution IV — labeling rule).
   System.err.println(
-    s"[transport] RoundService bound to store: ${if store.metadataPrivate then "metadata-private" else Privacy.DevLabel}"
+    s"[transport] RoundService bound to store: ${
+        if store.metadataPrivate then "metadata-private" else Privacy.DevLabel
+      }"
   )
 
   def sendFrame(req: SendFrameRequest): Future[SendFrameResponse] = Future {

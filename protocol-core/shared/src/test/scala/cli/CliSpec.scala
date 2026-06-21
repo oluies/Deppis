@@ -20,33 +20,40 @@ class CliSpec extends AnyFunSuite:
 
   test("pcore handshake-init mirrors Handshake.init"):
     val secret = "out-of-band-secret".getBytes(UTF_8)
-    val out    = Pcore.run("handshake-init", s"""{"sharedSecret":"${b64e(secret)}"}""").toOption.get
-    val want   = Handshake.init(secret)
+    val out = Pcore.run("handshake-init", s"""{"sharedSecret":"${b64e(secret)}"}""").toOption.get
+    val want = Handshake.init(secret)
     assert(out("pairId").str == want.pairId)
     assert(out("safetyNumber").str == want.safetyNumber)
     assert(b64d(out("pairKey").str).sameElements(want.pairKey))
 
   test("pcore retrieval-token mirrors RetrievalToken.derive"):
     val key = Array.tabulate(32)(_.toByte)
-    val in  = s"""{"key":"${b64e(key)}","senderId":"alice","receiverId":"bob","counter":7}"""
+    val in = s"""{"key":"${b64e(key)}","senderId":"alice","receiverId":"bob","counter":7}"""
     val tok = Pcore.run("retrieval-token", in).toOption.get("token").str
     assert(b64d(tok).sameElements(RetrievalToken.derive(key, "alice", "bob", 7L)))
 
   test("pcore retrieval-token: counter as a JSON string parses exactly (precision-safe path)"):
     val key = Array.tabulate(32)(_.toByte)
     def tokFor(c: String): String =
-      Pcore.run("retrieval-token", s"""{"key":"${b64e(key)}","senderId":"a","receiverId":"b","counter":$c}""")
-        .toOption.get("token").str
+      Pcore
+        .run(
+          "retrieval-token",
+          s"""{"key":"${b64e(key)}","senderId":"a","receiverId":"b","counter":$c}"""
+        )
+        .toOption
+        .get("token")
+        .str
     // string "5" and number 5 agree
     assert(tokFor("\"5\"") == tokFor("5"))
     // a counter beyond 2^53 is accepted exactly via the string path (a JSON number would round)
-    val big    = 9007199254740993L // 2^53 + 1
+    val big = 9007199254740993L // 2^53 + 1
     val viaCli = b64d(tokFor(s""""$big""""))
     assert(viaCli.sameElements(RetrievalToken.derive(key, "a", "b", big)))
 
   test("pcore frame/deframe round-trips"):
-    val payload  = "hi".getBytes(UTF_8)
-    val frameB64 = Pcore.run("frame", s"""{"payload":"${b64e(payload)}"}""").toOption.get("frame").str
+    val payload = "hi".getBytes(UTF_8)
+    val frameB64 =
+      Pcore.run("frame", s"""{"payload":"${b64e(payload)}"}""").toOption.get("frame").str
     assert(b64d(frameB64).length == Frame.Size)
     val back = Pcore.run("deframe", s"""{"frame":"$frameB64"}""").toOption.get("payload").str
     assert(b64d(back).sameElements(payload))

@@ -26,7 +26,7 @@ final class StoreServiceImpl(store: ObliviousStore)(using ec: ExecutionContext)
       // so the result length is uniform (hit/miss not observable from length).
       val sealedBytes = store.read(e.retrievalToken.toByteArray).toOption.flatten match
         case Some(f) => f ++ Array[Byte](1)
-        case None    => Frame.carrier() ++ Array[Byte](0)
+        case None => Frame.carrier() ++ Array[Byte](0)
       spb.ReadResult(sealedResult = ByteString.copyFrom(sealedBytes))
     }
     spb.ReadBatchResponse(roundId = req.roundId, results = results)

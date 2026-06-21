@@ -14,7 +14,7 @@ class JsRoundTransportSpec extends AnyFunSuite:
 
   private def hexU8(u: Uint8Array): String =
     val sb = new StringBuilder
-    var i  = 0
+    var i = 0
     while i < u.length do
       sb.append(f"${u(i).toInt & 0xff}%02x")
       i += 1
@@ -30,6 +30,7 @@ class JsRoundTransportSpec extends AnyFunSuite:
   private final class FakeJsTransport(store: mutable.Map[String, Uint8Array]) extends js.Object:
     var acceptSubmit: Boolean = true // false ⇒ simulate a transient backend failure on send
     private val digest = new Uint8Array(64)
+
     /** Signal the (single) buddy has mail this round. */
     def signalMail(): Unit =
       digest(sharedBit >> 3) = (digest(sharedBit >> 3).toInt | (1 << (sharedBit & 7))).toShort
@@ -44,24 +45,33 @@ class JsRoundTransportSpec extends AnyFunSuite:
     def retrieve(token: Uint8Array): Uint8Array = store.remove(hexU8(token)).orNull
 
   private def addBuddy(e: EngineJs, role: String): String =
-    val resp = ujson.read(e.handle(
-      s"""{"apiVersion":"1","command":"addBuddy","args":{"sharedSecret":"shared","role":"$role"}}"""
-    ))
+    val resp = ujson.read(
+      e.handle(
+        s"""{"apiVersion":"1","command":"addBuddy","args":{"sharedSecret":"shared","role":"$role"}}"""
+      )
+    )
     resp("result")("pairId").str
 
   private def confirm(e: EngineJs, pairId: String): Unit =
-    e.handle(s"""{"apiVersion":"1","command":"confirmBuddy","args":{"pairId":"$pairId","matched":true}}""")
+    e.handle(
+      s"""{"apiVersion":"1","command":"confirmBuddy","args":{"pairId":"$pairId","matched":true}}"""
+    )
 
   private def tickEvents(e: EngineJs, round: Int): Seq[String] =
-    ujson.read(e.handle(s"""{"apiVersion":"1","command":"tick","args":{"roundId":$round}}"""))(
-      "events").arr.toSeq.map(_("event").str)
+    ujson
+      .read(e.handle(s"""{"apiVersion":"1","command":"tick","args":{"roundId":$round}}"""))(
+        "events"
+      )
+      .arr
+      .toSeq
+      .map(_("event").str)
 
   test("a JS-transport-backed engine surfaces notified + messageReceived through the bundle"):
     val store = mutable.Map.empty[String, Uint8Array]
     val fakeA = new FakeJsTransport(store)
     val fakeB = new FakeJsTransport(store)
     val alice = new EngineJs(fakeA.asInstanceOf[JsTransport], u8("alice"))
-    val bob   = new EngineJs(fakeB.asInstanceOf[JsTransport], u8("bob"))
+    val bob = new EngineJs(fakeB.asInstanceOf[JsTransport], u8("bob"))
 
     val pairId = addBuddy(alice, "initiator")
     confirm(alice, pairId)
@@ -69,17 +79,23 @@ class JsRoundTransportSpec extends AnyFunSuite:
     confirm(bob, pairId)
 
     // Alice sends + ticks → submits the frame into the shared store.
-    alice.handle(s"""{"apiVersion":"1","command":"sendMessage","args":{"pairId":"$pairId","plaintext":"on my way"}}""")
+    alice.handle(
+      s"""{"apiVersion":"1","command":"sendMessage","args":{"pairId":"$pairId","plaintext":"on my way"}}"""
+    )
     assert(!tickEvents(alice, 1).contains("messageReceived"))
 
     // Bob has mail this round; his tick emits notified BEFORE the retrieved message.
     fakeB.signalMail()
-    val bobResp = ujson.read(bob.handle("""{"apiVersion":"1","command":"tick","args":{"roundId":2}}"""))
-    val events  = bobResp("events").arr.toSeq
-    val names   = events.map(_("event").str)
+    val bobResp =
+      ujson.read(bob.handle("""{"apiVersion":"1","command":"tick","args":{"roundId":2}}"""))
+    val events = bobResp("events").arr.toSeq
+    val names = events.map(_("event").str)
     assert(names.contains("notified"))
     assert(names.contains("messageReceived"))
-    assert(names.indexOf("notified") < names.indexOf("messageReceived"), "notify-before-retrieval order")
+    assert(
+      names.indexOf("notified") < names.indexOf("messageReceived"),
+      "notify-before-retrieval order"
+    )
     val msg = events.find(_("event").str == "messageReceived").get
     assert(msg("pairId").str == pairId)
     assert(msg("plaintext").str == "on my way")
@@ -89,23 +105,25 @@ class JsRoundTransportSpec extends AnyFunSuite:
     val fakeA = new FakeJsTransport(store)
     val fakeB = new FakeJsTransport(store)
     val alice = new EngineJs(fakeA.asInstanceOf[JsTransport], u8("alice"))
-    val bob   = new EngineJs(fakeB.asInstanceOf[JsTransport], u8("bob"))
+    val bob = new EngineJs(fakeB.asInstanceOf[JsTransport], u8("bob"))
     val pairId = addBuddy(alice, "initiator"); confirm(alice, pairId)
     addBuddy(bob, "responder"); confirm(bob, pairId)
 
-    alice.handle(s"""{"apiVersion":"1","command":"sendMessage","args":{"pairId":"$pairId","plaintext":"important"}}""")
+    alice.handle(
+      s"""{"apiVersion":"1","command":"sendMessage","args":{"pairId":"$pairId","plaintext":"important"}}"""
+    )
     fakeA.acceptSubmit = false
-    tickEvents(alice, 1)             // submit fails → nothing stored
+    tickEvents(alice, 1) // submit fails → nothing stored
     assert(store.isEmpty)
     assert(!tickEvents(bob, 2).contains("messageReceived"))
     fakeA.acceptSubmit = true
-    tickEvents(alice, 3)             // retry succeeds
-    fakeB.signalMail()                // Bob is now notified
+    tickEvents(alice, 3) // retry succeeds
+    fakeB.signalMail() // Bob is now notified
     assert(tickEvents(bob, 4).contains("messageReceived"))
 
   test("retrieve returning JS null yields no messageReceived (and no exception)"):
     val store = mutable.Map.empty[String, Uint8Array]
-    val bob   = new EngineJs(new FakeJsTransport(store).asInstanceOf[JsTransport], u8("bob"))
+    val bob = new EngineJs(new FakeJsTransport(store).asInstanceOf[JsTransport], u8("bob"))
     val pairId = addBuddy(bob, "responder"); confirm(bob, pairId)
     // Nothing staged in the store ⇒ retrieve returns null ⇒ Option(null) = None.
     assert(!tickEvents(bob, 1).contains("messageReceived"))
@@ -115,14 +133,17 @@ class JsRoundTransportSpec extends AnyFunSuite:
     val fakeA = new FakeJsTransport(store)
     val fakeB = new FakeJsTransport(store)
     val alice = new EngineJs(fakeA.asInstanceOf[JsTransport], u8("alice"))
-    val bob   = new EngineJs(fakeB.asInstanceOf[JsTransport], u8("bob"))
+    val bob = new EngineJs(fakeB.asInstanceOf[JsTransport], u8("bob"))
     val pairId = addBuddy(alice, "initiator"); confirm(alice, pairId)
     addBuddy(bob, "responder"); confirm(bob, pairId)
 
-    alice.handle(s"""{"apiVersion":"1","command":"sendMessage","args":{"pairId":"$pairId","plaintext":"queued"}}""")
+    alice.handle(
+      s"""{"apiVersion":"1","command":"sendMessage","args":{"pairId":"$pairId","plaintext":"queued"}}"""
+    )
     // roundId 2^53+1 (sent as a string so it parses exactly) exceeds the JS-safe range.
-    val resp = ujson.read(alice.handle(
-      """{"apiVersion":"1","command":"tick","args":{"roundId":"9007199254740993"}}"""))
+    val resp = ujson.read(
+      alice.handle("""{"apiVersion":"1","command":"tick","args":{"roundId":"9007199254740993"}}""")
+    )
     assert(resp("error")("code").str == "bad_request")
     assert(store.isEmpty, "the frame must NOT have been submitted on the rejected round")
     // The message survives: a valid round delivers it (the send side effect was not half-applied).
@@ -134,5 +155,7 @@ class JsRoundTransportSpec extends AnyFunSuite:
     val e = new EngineJs() // no transport
     val pairId = addBuddy(e, "initiator")
     confirm(e, pairId)
-    e.handle(s"""{"apiVersion":"1","command":"sendMessage","args":{"pairId":"$pairId","plaintext":"x"}}""")
+    e.handle(
+      s"""{"apiVersion":"1","command":"sendMessage","args":{"pairId":"$pairId","plaintext":"x"}}"""
+    )
     assert(tickEvents(e, 1).isEmpty)

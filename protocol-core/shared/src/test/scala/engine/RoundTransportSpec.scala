@@ -10,7 +10,7 @@ import scala.collection.mutable
   * (FR-014) — for any buddy count. */
 class RoundTransportSpec extends AnyFunSuite:
 
-  private def hex(b: Array[Byte]): String   = b.map(x => f"${x & 0xff}%02x").mkString
+  private def hex(b: Array[Byte]): String = b.map(x => f"${x & 0xff}%02x").mkString
   private def secret(s: String): Array[Byte] = s.getBytes("UTF-8")
   private def pairKeyOf(s: String): Array[Byte] = handshake.Handshake.init(secret(s)).pairKey
   private def bitOf(pairKey: Array[Byte]): Int = NotifyDigest.bit(pairKey) // single source of truth
@@ -21,9 +21,10 @@ class RoundTransportSpec extends AnyFunSuite:
   private final class FakeTransport(val store: mutable.Map[String, Array[Byte]] = mutable.Map.empty)
       extends RoundTransport:
     var acceptSubmit: Boolean = true
-    private val digest        = new Array[Byte](64)
-    val submits   = mutable.ArrayBuffer.empty[(Array[Byte], Array[Byte])]
+    private val digest = new Array[Byte](64)
+    val submits = mutable.ArrayBuffer.empty[(Array[Byte], Array[Byte])]
     val retrieves = mutable.ArrayBuffer.empty[Array[Byte]]
+
     /** Signal that the buddy with `pairKey` has mail this round (sets its one-hot bit). */
     def signalMail(pairKey: Array[Byte]): Unit =
       val bit = bitOf(pairKey); digest(bit >> 3) = (digest(bit >> 3) | (1 << (bit & 7))).toByte
@@ -54,7 +55,8 @@ class RoundTransportSpec extends AnyFunSuite:
     val pairId = alice.addBuddy(secret("shared"), BuddyRole.Initiator).toOption.get.pairId
     alice.confirmBuddy(pairId, matched = true); alice.drainEvents()
     val bob = Engine(Some(tb), clientLabel = "bob".getBytes)
-    bob.addBuddy(secret("shared"), BuddyRole.Responder); bob.confirmBuddy(pairId, matched = true); bob.drainEvents()
+    bob.addBuddy(secret("shared"), BuddyRole.Responder); bob.confirmBuddy(pairId, matched = true);
+    bob.drainEvents()
     (alice, bob, pairId, ta, tb)
 
   private def msgs(e: Engine): Seq[String] =
@@ -94,8 +96,8 @@ class RoundTransportSpec extends AnyFunSuite:
     tb.signalMail(pairKeyOf("shared"))
     bob.tick(2)
     val evs = bob.drainEvents()
-    val ni  = evs.indexWhere(_.isInstanceOf[EngineEvent.Notified])
-    val mi  = evs.indexWhere(_.isInstanceOf[EngineEvent.MessageReceived])
+    val ni = evs.indexWhere(_.isInstanceOf[EngineEvent.Notified])
+    val mi = evs.indexWhere(_.isInstanceOf[EngineEvent.MessageReceived])
     assert(ni >= 0 && mi >= 0 && ni < mi, s"expected notified before messageReceived, got $evs")
 
   test("single-use: the same message is not delivered twice"):
@@ -128,7 +130,9 @@ class RoundTransportSpec extends AnyFunSuite:
     assert(t.submits.size == 5)
     assert(e.internalAnomalyCount == 0)
 
-  test("one store write per round holds under a transient submit failure (actual store, not attempts)"):
+  test(
+    "one store write per round holds under a transient submit failure (actual store, not attempts)"
+  ):
     val t = FakeTransport()
     val (e, pairId) = confirmedEngine(t, BuddyRole.Initiator)
     e.tick(1)
@@ -145,14 +149,16 @@ class RoundTransportSpec extends AnyFunSuite:
     val rounds = 20
     val active = FakeTransport(); val idle = FakeTransport()
     val (ea, pid) = confirmedEngine(active, BuddyRole.Initiator)
-    val (ei, _)   = confirmedEngine(idle, BuddyRole.Initiator)
+    val (ei, _) = confirmedEngine(idle, BuddyRole.Initiator)
     for r <- 1 to rounds do
       ea.sendMessage(pid, s"hello$r"); ea.tick(r); ei.tick(r)
     assert(active.submits.size == rounds && idle.submits.size == rounds)
     assert((active.submits ++ idle.submits).forall(_._2.length == frame.Frame.Size))
     assert((active.submits ++ idle.submits).forall(_._1.length == token.RetrievalToken.Length))
 
-  test("the carrier flag reflects whether a real frame was actually submitted (fail+retry uniform)"):
+  test(
+    "the carrier flag reflects whether a real frame was actually submitted (fail+retry uniform)"
+  ):
     val t = FakeTransport()
     val (alice, pairId) = confirmedEngine(t, BuddyRole.Initiator)
     alice.sendMessage(pairId, "x")
@@ -169,18 +175,26 @@ class RoundTransportSpec extends AnyFunSuite:
     tb.signalMail(pairKeyOf("shared")); bob.tick(3); assert(msgs(bob) == Seq("m1"))
     tb.signalMail(pairKeyOf("shared")); bob.tick(4); assert(msgs(bob) == Seq("m2"))
 
-  test("frame content is encrypted: real and carrier wire frames are 256B, random, no plaintext (T042)"):
+  test(
+    "frame content is encrypted: real and carrier wire frames are 256B, random, no plaintext (T042)"
+  ):
     val t = FakeTransport()
     val (e, pairId) = confirmedEngine(t, BuddyRole.Initiator)
     val plaintext = "the secret meeting time is noon"
     e.sendMessage(pairId, plaintext)
     e.tick(1) // real send (encrypted)
     e.tick(2) // idle ⇒ carrier (encrypted)
-    val realWire    = t.submits(0)._2
+    val realWire = t.submits(0)._2
     val carrierWire = t.submits(1)._2
-    assert(realWire.length == frame.Frame.Size && carrierWire.length == frame.Frame.Size, "both wire frames are 256B")
+    assert(
+      realWire.length == frame.Frame.Size && carrierWire.length == frame.Frame.Size,
+      "both wire frames are 256B"
+    )
     // The real frame does NOT contain the plaintext bytes — it's encrypted, not padded plaintext.
-    assert(!new String(realWire, "ISO-8859-1").contains(plaintext), "plaintext must not appear on the wire")
+    assert(
+      !new String(realWire, "ISO-8859-1").contains(plaintext),
+      "plaintext must not appear on the wire"
+    )
     // The carrier is NOT all-zero (it's an encryption of zeros under a random key) — so it is
     // byte-indistinguishable from a real frame (both high-entropy 256B blobs), not a zero block.
     assert(carrierWire.exists(_ != 0), "carrier frame must be encrypted (not all-zero)")
@@ -201,7 +215,8 @@ class RoundTransportSpec extends AnyFunSuite:
     bob.addBuddy(secret("buddy-B"), BuddyRole.Responder); bob.confirmBuddy(pidB, matched = true)
     bob.drainEvents()
     val senderB = Engine(Some(tsB), clientLabel = "B".getBytes)
-    senderB.addBuddy(secret("buddy-B"), BuddyRole.Initiator); senderB.confirmBuddy(pidB, matched = true); senderB.drainEvents()
+    senderB.addBuddy(secret("buddy-B"), BuddyRole.Initiator);
+    senderB.confirmBuddy(pidB, matched = true); senderB.drainEvents()
     for r <- 1 to 5 do { senderB.sendMessage(pidB, s"b$r"); senderB.tick(r) }
     tb.retrieves.clear()
 
@@ -215,7 +230,9 @@ class RoundTransportSpec extends AnyFunSuite:
     assert(tb.retrieves.map(hex).toSet.size == rounds, "NO read token recurs, even multi-buddy")
     assert(delivered == 5, s"all of B's messages delivered, got $delivered")
 
-  test("two buddies signaling the SAME round are both served over time (no starvation, T041c edge)"):
+  test(
+    "two buddies signaling the SAME round are both served over time (no starvation, T041c edge)"
+  ):
     // A and B each have several messages and BOTH signal every round. With one read/round, the
     // fairness cursor must rotate so NEITHER (regardless of pairId order) is starved.
     val store = mutable.Map.empty[String, Array[Byte]]
@@ -228,10 +245,14 @@ class RoundTransportSpec extends AnyFunSuite:
     bob.addBuddy(secret("buddy-B"), BuddyRole.Responder); bob.confirmBuddy(pidB, matched = true)
     bob.drainEvents()
     val sa = Engine(Some(tsA), clientLabel = "A".getBytes)
-    sa.addBuddy(secret("buddy-A"), BuddyRole.Initiator); sa.confirmBuddy(pidA, matched = true); sa.drainEvents()
+    sa.addBuddy(secret("buddy-A"), BuddyRole.Initiator); sa.confirmBuddy(pidA, matched = true);
+    sa.drainEvents()
     val sb = Engine(Some(tsB), clientLabel = "B".getBytes)
-    sb.addBuddy(secret("buddy-B"), BuddyRole.Initiator); sb.confirmBuddy(pidB, matched = true); sb.drainEvents()
-    for r <- 1 to 3 do { sa.sendMessage(pidA, s"a$r"); sa.tick(r); sb.sendMessage(pidB, s"b$r"); sb.tick(r) }
+    sb.addBuddy(secret("buddy-B"), BuddyRole.Initiator); sb.confirmBuddy(pidB, matched = true);
+    sb.drainEvents()
+    for r <- 1 to 3 do {
+      sa.sendMessage(pidA, s"a$r"); sa.tick(r); sb.sendMessage(pidB, s"b$r"); sb.tick(r)
+    }
 
     val received = mutable.ArrayBuffer.empty[String]
     for r <- 1 to 12 do

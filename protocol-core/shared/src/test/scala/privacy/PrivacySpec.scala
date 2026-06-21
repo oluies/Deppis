@@ -15,8 +15,9 @@ class PrivacySpec extends AnyFunSuite with ScalaCheckDrivenPropertyChecks:
     }
 
   test("real backends are private iff attestation passed"):
-    forAll(Gen.oneOf(Backend.EnclaveTarget, Backend.GrooveTarget), Gen.oneOf(true, false)) { (b, att) =>
-      val s = BuildPrivacyStatus(b, att)
-      assert(s.metadataPrivate == att)
-      assert(s.label == (if att then PrivateLabel else DevLabel))
+    forAll(Gen.oneOf(Backend.EnclaveTarget, Backend.GrooveTarget), Gen.oneOf(true, false)) {
+      (b, att) =>
+        val s = BuildPrivacyStatus(b, att)
+        assert(s.metadataPrivate == att)
+        assert(s.label == (if att then PrivateLabel else DevLabel))
     }

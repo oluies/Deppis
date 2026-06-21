@@ -7,7 +7,7 @@ import org.scalatest.funsuite.AnyFunSuite
   * engine encrypts frames identically on both platforms (T042). */
 class AeadJsSpec extends AnyFunSuite:
 
-  private val key   = Array.tabulate(32)(_.toByte)
+  private val key = Array.tabulate(32)(_.toByte)
   private val nonce = Array.tabulate(12)(_.toByte)
 
   test("seal/open round-trips on JS"):
@@ -15,11 +15,11 @@ class AeadJsSpec extends AnyFunSuite:
     assert(Aead.open(key, nonce, ct).map(new String(_, "UTF-8")).contains("hello aead"))
 
   test("a tampered ciphertext fails authentication (None)"):
-    val ct  = Aead.seal(key, nonce, "secret".getBytes("UTF-8"))
+    val ct = Aead.seal(key, nonce, "secret".getBytes("UTF-8"))
     val bad = ct.updated(ct.length - 1, (ct.last ^ 0x01).toByte)
     assert(Aead.open(key, nonce, bad).isEmpty)
 
   test("cross-platform KAT: noble ≡ JVM JCA, byte for byte"):
-    val ct  = Aead.seal(key, nonce, "the quick brown fox".getBytes("UTF-8"))
+    val ct = Aead.seal(key, nonce, "the quick brown fox".getBytes("UTF-8"))
     val hex = ct.map(b => f"${b & 0xff}%02x").mkString
     assert(hex == "fd936d205862cc23dca35d81f76a6043af1fca4de50f9de09114e57e9d5995a04f2dc0")

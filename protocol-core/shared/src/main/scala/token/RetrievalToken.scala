@@ -17,7 +17,9 @@ object RetrievalToken:
   def derive(key: Array[Byte], senderId: String, receiverId: String, counter: Long): Array[Byte] =
     Kdf.hmacSha256(
       key,
-      lengthPrefixed(senderId.getBytes(UTF_8)) ++ lengthPrefixed(receiverId.getBytes(UTF_8)) ++ longBytes(counter)
+      lengthPrefixed(senderId.getBytes(UTF_8)) ++ lengthPrefixed(
+        receiverId.getBytes(UTF_8)
+      ) ++ longBytes(counter)
     )
 
   /** Constant-time comparison — no secret-dependent early exit (Constitution II). Length is public,
@@ -27,7 +29,7 @@ object RetrievalToken:
     if a.length != b.length then false
     else
       var diff = 0
-      var i    = 0
+      var i = 0
       while i < a.length do
         diff |= (a(i) ^ b(i))
         i += 1
@@ -37,8 +39,8 @@ object RetrievalToken:
 
   private def longBytes(v: Long): Array[Byte] =
     val out = new Array[Byte](8)
-    var x   = v
-    var i   = 7
+    var x = v
+    var i = 7
     while i >= 0 do
       out(i) = (x & 0xff).toByte
       x >>= 8

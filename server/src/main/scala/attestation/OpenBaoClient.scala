@@ -59,7 +59,7 @@ final class OpenBaoClient(
       val resp = http.send(req, HttpResponse.BodyHandlers.ofString())
       resp.statusCode() match
         case 200 => Right(resp.body())
-        case 403 => Left("openbao: permission denied")     // fixed, non-secret (Constitution II)
+        case 403 => Left("openbao: permission denied") // fixed, non-secret (Constitution II)
         case 404 => Left("openbao: secret not found")
-        case _   => Left("openbao: request failed")
+        case _ => Left("openbao: request failed")
     catch case NonFatal(_) => Left("openbao: request failed")

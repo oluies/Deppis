@@ -11,7 +11,7 @@ import org.scalatest.funsuite.AnyFunSuite
 
 class EnclaveNotificationClientSpec extends AnyFunSuite:
 
-  private val key   = Array.tabulate(Crypto.KeyBytes)(_.toByte)
+  private val key = Array.tabulate(Crypto.KeyBytes)(_.toByte)
   private val label = "alice".getBytes
 
   private def bit(digest: Array[Byte], b: Int): Boolean = (digest(b >> 3) & (1 << (b & 7))) != 0
@@ -19,21 +19,34 @@ class EnclaveNotificationClientSpec extends AnyFunSuite:
   /** Run `body` with an enclave-target notification front speaking in-process to a
     * NotificationService backed by a fresh DevNotificationServer (also handed to the body so a
     * receiver can issue sealed tokens). */
-  private def withClient(attested: Boolean)(body: (EnclaveNotificationClient, DevNotificationServer) => Unit): Unit =
-    val ns   = DevNotificationServer(key)
+  private def withClient(attested: Boolean)(
+      body: (EnclaveNotificationClient, DevNotificationServer) => Unit
+  ): Unit =
+    val ns = DevNotificationServer(key)
     val name = InProcessServerBuilder.generateName()
     val server: Server =
-      InProcessServerBuilder.forName(name).directExecutor()
-        .addService(npb.NotificationServiceGrpc.bindService(new NotificationServiceImpl(ns), global))
-        .build().start()
+      InProcessServerBuilder
+        .forName(name)
+        .directExecutor()
+        .addService(
+          npb.NotificationServiceGrpc.bindService(new NotificationServiceImpl(ns), global)
+        )
+        .build()
+        .start()
     val channel: ManagedChannel = InProcessChannelBuilder.forName(name).directExecutor().build()
-    try body(new EnclaveNotificationClient(npb.NotificationServiceGrpc.blockingStub(channel), attested), ns)
+    try
+      body(
+        new EnclaveNotificationClient(npb.NotificationServiceGrpc.blockingStub(channel), attested),
+        ns
+      )
     finally
       channel.shutdownNow()
       server.shutdownNow()
 
   test("front is private only when attested (Constitution IV/IX)"):
-    withClient(attested = false)((c, _) => assert(!c.metadataPrivate && c.label == Privacy.DevLabel))
+    withClient(attested = false)((c, _) =>
+      assert(!c.metadataPrivate && c.label == Privacy.DevLabel)
+    )
     withClient(attested = true)((c, _) => assert(c.metadataPrivate))
 
   test("signal then fetchDigest reports the buddy's bit over gRPC; fetch consumes it"):
@@ -51,14 +64,22 @@ class EnclaveNotificationClientSpec extends AnyFunSuite:
     }
 
   test("a transport failure maps to Left (error channel)"):
-    val ns   = DevNotificationServer(key)
+    val ns = DevNotificationServer(key)
     val name = InProcessServerBuilder.generateName()
     val server: Server =
-      InProcessServerBuilder.forName(name).directExecutor()
-        .addService(npb.NotificationServiceGrpc.bindService(new NotificationServiceImpl(ns), global))
-        .build().start()
+      InProcessServerBuilder
+        .forName(name)
+        .directExecutor()
+        .addService(
+          npb.NotificationServiceGrpc.bindService(new NotificationServiceImpl(ns), global)
+        )
+        .build()
+        .start()
     val channel: ManagedChannel = InProcessChannelBuilder.forName(name).directExecutor().build()
-    val c = new EnclaveNotificationClient(npb.NotificationServiceGrpc.blockingStub(channel), attested = true)
+    val c = new EnclaveNotificationClient(
+      npb.NotificationServiceGrpc.blockingStub(channel),
+      attested = true
+    )
     channel.shutdownNow()
     server.shutdownNow()
     assert(c.signal(1L, "x".getBytes).isLeft)

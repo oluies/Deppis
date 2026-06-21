@@ -21,8 +21,12 @@ class EnclaveObliviousStoreSpec extends AnyFunSuite:
   ): Unit =
     val name = InProcessServerBuilder.generateName()
     val server: Server =
-      InProcessServerBuilder.forName(name).directExecutor()
-        .addService(spb.ObliviousStoreGrpc.bindService(service, global)).build().start()
+      InProcessServerBuilder
+        .forName(name)
+        .directExecutor()
+        .addService(spb.ObliviousStoreGrpc.bindService(service, global))
+        .build()
+        .start()
     val channel: ManagedChannel = InProcessChannelBuilder.forName(name).directExecutor().build()
     try body(new EnclaveObliviousStore(spb.ObliviousStoreGrpc.blockingStub(channel), attested))
     finally
@@ -34,7 +38,9 @@ class EnclaveObliviousStoreSpec extends AnyFunSuite:
     withService(new StoreServiceImpl(new DevObliviousStore()), attested)(body)
 
   /** A custom read response (write is a no-op) for exercising malformed-response guards. */
-  private def serviceReturning(read: spb.ReadBatchResponse => spb.ReadBatchResponse): spb.ObliviousStoreGrpc.ObliviousStore =
+  private def serviceReturning(
+      read: spb.ReadBatchResponse => spb.ReadBatchResponse
+  ): spb.ObliviousStoreGrpc.ObliviousStore =
     new spb.ObliviousStoreGrpc.ObliviousStore:
       def writeBatch(req: spb.WriteBatchRequest): Future[spb.WriteBatchResponse] =
         Future.successful(spb.WriteBatchResponse(req.roundId))
@@ -51,10 +57,10 @@ class EnclaveObliviousStoreSpec extends AnyFunSuite:
   test("write then read over gRPC returns the frame; token is single-use"):
     withEnclave(attested = true) { e =>
       val tok = "tok-1".getBytes
-      val fr  = frame(7)
+      val fr = frame(7)
       assert(e.write(tok, fr).isRight)
       assert(e.read(tok).toOption.flatten.exists(_.sameElements(fr))) // hit
-      assert(e.read(tok).toOption.flatten.isEmpty)                    // single-use -> miss
+      assert(e.read(tok).toOption.flatten.isEmpty) // single-use -> miss
     }
 
   test("a miss returns None (carrier)"):
@@ -62,7 +68,7 @@ class EnclaveObliviousStoreSpec extends AnyFunSuite:
 
   test("an empty-payload frame round-trips as a hit (found tag, not content)"):
     withEnclave(attested = true) { e =>
-      val tok   = "empty".getBytes
+      val tok = "empty".getBytes
       val empty = Frame.carrier() // valid empty-payload frame — byte-identical to a carrier
       assert(e.write(tok, empty).isRight)
       // must be Some(empty), NOT None: the found tag distinguishes a stored empty frame from a miss
@@ -80,9 +86,14 @@ class EnclaveObliviousStoreSpec extends AnyFunSuite:
   test("a transport failure maps to Left (error channel)"):
     val name = InProcessServerBuilder.generateName()
     val server: Server =
-      InProcessServerBuilder.forName(name).directExecutor()
-        .addService(spb.ObliviousStoreGrpc.bindService(new StoreServiceImpl(new DevObliviousStore()), global))
-        .build().start()
+      InProcessServerBuilder
+        .forName(name)
+        .directExecutor()
+        .addService(
+          spb.ObliviousStoreGrpc.bindService(new StoreServiceImpl(new DevObliviousStore()), global)
+        )
+        .build()
+        .start()
     val channel: ManagedChannel = InProcessChannelBuilder.forName(name).directExecutor().build()
     val e = new EnclaveObliviousStore(spb.ObliviousStoreGrpc.blockingStub(channel), attested = true)
     channel.shutdownNow() // kill the transport before the RPC
@@ -98,6 +109,8 @@ class EnclaveObliviousStoreSpec extends AnyFunSuite:
   test("a wrong-length sealed_result maps to Left (malformed-response guard)"):
     val bad = serviceReturning(r =>
       // 256 bytes — missing the 1-byte found tag (should be Frame.Size + 1)
-      r.copy(results = Seq(spb.ReadResult(sealedResult = ByteString.copyFrom(new Array[Byte](Frame.Size)))))
+      r.copy(results =
+        Seq(spb.ReadResult(sealedResult = ByteString.copyFrom(new Array[Byte](Frame.Size))))
+      )
     )
     withService(bad)(e => assert(e.read("x".getBytes) == Left("malformed sealed_result")))

@@ -17,9 +17,9 @@ import scala.scalajs.js.typedarray.Uint8Array
   * Bytes cross as `Uint8Array`; `roundId` crosses as a JS number (round ids are small). */
 @js.native
 trait JsTransport extends js.Object:
-  def submit(token: Uint8Array, frame: Uint8Array): Boolean         = js.native
+  def submit(token: Uint8Array, frame: Uint8Array): Boolean = js.native
   def fetchDigest(roundId: Double, clientLabel: Uint8Array): Uint8Array = js.native
-  def retrieve(token: Uint8Array): Uint8Array                       = js.native // null when none staged
+  def retrieve(token: Uint8Array): Uint8Array = js.native // null when none staged
 
 /** Adapts a host-supplied [[JsTransport]] to the cross-platform [[RoundTransport]] the engine uses,
   * so the SAME `Engine.tick` notify-before-retrieval logic that runs on the JVM drives a browser

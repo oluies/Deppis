@@ -23,11 +23,11 @@ class EngineBackendE2ESpec extends AnyFunSuite with ObsdHarness:
   test("engine.tick over obsd: notify-before-retrieval emits notified then messageReceived"):
     val notifyKey = Array.tabulate(Crypto.KeyBytes)(i => (i * 9 + 4).toByte)
     withObsd(notifyKey) { channel =>
-      val storeStub  = spb.ObliviousStoreGrpc.blockingStub(channel)
+      val storeStub = spb.ObliviousStoreGrpc.blockingStub(channel)
       val notifyStub = npb.NotificationServiceGrpc.blockingStub(channel)
 
       // Bob's engine, wired to the real backend with his notify aggregation label.
-      val bobLabel  = "bob-client".getBytes
+      val bobLabel = "bob-client".getBytes
       val transport = new GrpcRoundTransport(
         new EnclaveObliviousStore(storeStub, attested = false),
         new EnclaveNotificationClient(notifyStub, attested = false)
@@ -35,7 +35,7 @@ class EngineBackendE2ESpec extends AnyFunSuite with ObsdHarness:
       val bob = Engine(Some(transport), clientLabel = bobLabel)
 
       val secret = "out-of-band-secret".getBytes
-      val pair   = bob.addBuddy(secret, BuddyRole.Responder).toOption.get
+      val pair = bob.addBuddy(secret, BuddyRole.Responder).toOption.get
       bob.confirmBuddy(pair.pairId, matched = true)
       bob.drainEvents() // discard buddyConfirmed
 
@@ -44,17 +44,17 @@ class EngineBackendE2ESpec extends AnyFunSuite with ObsdHarness:
       // Alice (Initiator) stores her first message under her outgoing token — ENCRYPTED exactly as
       // the engine's send path does (T042): inner 228-byte frame, ChaCha20-Poly1305, nonce ‖ ct.
       val aliceToken = RetrievalToken.derive(pairKey, "Initiator", "Responder", 0L)
-      val innerSize  = Frame.Size - aead.Aead.NonceBytes - aead.Aead.TagBytes
-      val inner      = Frame.pad("see you at the bridge".getBytes, innerSize).toOption.get
-      val aeadKey    = kdf.Kdf.hmacSha256(pairKey, "aead/Initiator/Responder/0".getBytes)
-      val nonce      = Array.tabulate(aead.Aead.NonceBytes)(i => (i * 11 + 1).toByte)
-      val wire       = nonce ++ aead.Aead.seal(aeadKey, nonce, inner)
+      val innerSize = Frame.Size - aead.Aead.NonceBytes - aead.Aead.TagBytes
+      val inner = Frame.pad("see you at the bridge".getBytes, innerSize).toOption.get
+      val aeadKey = kdf.Kdf.hmacSha256(pairKey, "aead/Initiator/Responder/0".getBytes)
+      val nonce = Array.tabulate(aead.Aead.NonceBytes)(i => (i * 11 + 1).toByte)
+      val wire = nonce ++ aead.Aead.seal(aeadKey, nonce, inner)
       val aliceStore = new EnclaveObliviousStore(storeStub, attested = false)
       assert(aliceStore.write(aliceToken, wire).isRight)
       // Alice signals Bob's notification under the PER-BUDDY bit Bob's engine checks.
-      val buddyBit     = engine.NotifyDigest.bit(pairKey)
-      val sealer       = DevNotificationServer(notifyKey)
-      val aliceNotify  = new EnclaveNotificationClient(notifyStub, attested = false)
+      val buddyBit = engine.NotifyDigest.bit(pairKey)
+      val sealer = DevNotificationServer(notifyKey)
+      val aliceNotify = new EnclaveNotificationClient(notifyStub, attested = false)
       assert(aliceNotify.signal(1L, sealer.issueToken(1L, buddyBit, bobLabel)).isRight)
 
       // --- Bob ticks: notify-before-retrieval ---

@@ -9,12 +9,12 @@ import org.scalatest.funsuite.AnyFunSuite
 class RatchetSpec extends AnyFunSuite:
 
   private def utf8(s: String): Array[Byte] = s.getBytes("UTF-8")
-  private def str(b: Array[Byte]): String  = new String(b, "UTF-8")
+  private def str(b: Array[Byte]): String = new String(b, "UTF-8")
 
   /** Alice opens a session from Bob's published bundle and sends the first (PREKEY) message. */
   private def paired(): (RatchetParty, RatchetParty) =
     val alice = new RatchetParty("alice")
-    val bob   = new RatchetParty("bob")
+    val bob = new RatchetParty("bob")
     alice.startSession(bob.address, bob.publishBundle())
     (alice, bob)
 
@@ -25,7 +25,7 @@ class RatchetSpec extends AnyFunSuite:
 
   test("conversation flows both ways after the session is established"):
     val (alice, bob) = paired()
-    bob.decrypt(alice.address, alice.encrypt(bob.address, utf8("hi")))    // establish on Bob's side
+    bob.decrypt(alice.address, alice.encrypt(bob.address, utf8("hi"))) // establish on Bob's side
     val reply = bob.encrypt(alice.address, utf8("hi back"))
     assert(str(alice.decrypt(bob.address, reply)) == "hi back")
     val again = alice.encrypt(bob.address, utf8("how are you"))
@@ -66,7 +66,8 @@ class RatchetSpec extends AnyFunSuite:
     val (alice, bob) = paired()
     val ct = alice.encrypt(bob.address, utf8("secret"))
     // Flip a byte in the body; the library MUST reject it (MAC/parse failure), never return garbage.
-    val corrupted = ct.copy(body = ct.body.updated(ct.body.length - 1, (ct.body.last ^ 0x01).toByte))
+    val corrupted =
+      ct.copy(body = ct.body.updated(ct.body.length - 1, (ct.body.last ^ 0x01).toByte))
     assertThrows[Exception](bob.decrypt(alice.address, corrupted))
 
   test("an unknown message type is rejected, not silently mishandled"):

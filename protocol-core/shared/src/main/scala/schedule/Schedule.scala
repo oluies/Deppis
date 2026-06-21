@@ -18,4 +18,4 @@ object Schedule:
   def planRound(roundId: Long, realPayload: Option[Array[Byte]]): Either[String, RoundPlan] =
     realPayload match
       case Some(p) => Frame.pad(p).map(f => RoundPlan(roundId, FrameKind.Real, f, retrieve = true))
-      case None    => Right(RoundPlan(roundId, FrameKind.Carrier, Frame.carrier(), retrieve = true))
+      case None => Right(RoundPlan(roundId, FrameKind.Carrier, Frame.carrier(), retrieve = true))

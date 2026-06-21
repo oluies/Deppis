@@ -34,7 +34,7 @@ trait ObsdHarness extends Assertions:
 
   protected def awaitReady(port: Int, deadlineMs: Long): Boolean =
     val end = System.nanoTime() + deadlineMs * 1000000L
-    var ok  = false
+    var ok = false
     while !ok && System.nanoTime() < end do
       try
         val sock = new Socket()
@@ -47,10 +47,12 @@ trait ObsdHarness extends Assertions:
   /** Start obsd on a free port with a known notify key + capacity; run `body` with a channel to it.
     * Inherits the child's stdout/stderr (avoids a pipe-buffer deadlock and surfaces obsd logs), and
     * tears down with a bounded wait + forcible kill. */
-  protected def withObsd(notifyKey: Array[Byte], capacity: Int = 64)(body: ManagedChannel => Unit): Unit =
-    val bin  = findObsd().getOrElse(cancel("obsd binary not found; run `cargo build --bin obsd`"))
+  protected def withObsd(notifyKey: Array[Byte], capacity: Int = 64)(
+      body: ManagedChannel => Unit
+  ): Unit =
+    val bin = findObsd().getOrElse(cancel("obsd binary not found; run `cargo build --bin obsd`"))
     val port = freePort()
-    val pb   = new ProcessBuilder(bin.getAbsolutePath)
+    val pb = new ProcessBuilder(bin.getAbsolutePath)
     pb.environment().put("OBSD_ADDR", s"127.0.0.1:$port")
     pb.environment().put("OBSD_NOTIFY_KEY", hex(notifyKey))
     pb.environment().put("OBSD_CAPACITY", capacity.toString)

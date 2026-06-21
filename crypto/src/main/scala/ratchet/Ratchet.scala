@@ -1,6 +1,11 @@
 package ratchet
 
-import org.signal.libsignal.protocol.{IdentityKeyPair, SessionBuilder, SessionCipher, SignalProtocolAddress}
+import org.signal.libsignal.protocol.{
+  IdentityKeyPair,
+  SessionBuilder,
+  SessionCipher,
+  SignalProtocolAddress
+}
 import org.signal.libsignal.protocol.ecc.Curve
 import org.signal.libsignal.protocol.message.{CiphertextMessage, PreKeySignalMessage, SignalMessage}
 import org.signal.libsignal.protocol.state.{PreKeyBundle, PreKeyRecord, SignedPreKeyRecord}
@@ -29,8 +34,8 @@ final class RatchetParty(val name: String, deviceId: Int = 1):
   val address: SignalProtocolAddress = new SignalProtocolAddress(name, deviceId)
 
   private val registrationId = KeyHelper.generateRegistrationId(false)
-  private val identity       = IdentityKeyPair.generate()
-  private val store          = new InMemorySignalProtocolStore(identity, registrationId)
+  private val identity = IdentityKeyPair.generate()
+  private val store = new InMemorySignalProtocolStore(identity, registrationId)
 
   // One-time prekey + signed prekey this party publishes for others to start a session with.
   // libsignal-client exposes the primitives directly (the old KeyHelper.generatePreKeys/
@@ -39,8 +44,9 @@ final class RatchetParty(val name: String, deviceId: Int = 1):
   // serialized public key (exactly what SessionBuilder.process verifies during X3DH).
   private val preKey: PreKeyRecord = new PreKeyRecord(1, Curve.generateKeyPair())
   private val signedPreKey: SignedPreKeyRecord =
-    val spkPair    = Curve.generateKeyPair()
-    val signature  = Curve.calculateSignature(identity.getPrivateKey, spkPair.getPublicKey.serialize())
+    val spkPair = Curve.generateKeyPair()
+    val signature =
+      Curve.calculateSignature(identity.getPrivateKey, spkPair.getPublicKey.serialize())
     new SignedPreKeyRecord(1, System.currentTimeMillis(), spkPair, signature)
   store.storePreKey(preKey.getId, preKey)
   store.storeSignedPreKey(signedPreKey.getId, signedPreKey)
@@ -72,6 +78,6 @@ final class RatchetParty(val name: String, deviceId: Int = 1):
   def decrypt(peer: SignalProtocolAddress, msg: RatchetMessage): Array[Byte] =
     val cipher = new SessionCipher(store, peer)
     msg.msgType match
-      case CiphertextMessage.PREKEY_TYPE  => cipher.decrypt(new PreKeySignalMessage(msg.body))
+      case CiphertextMessage.PREKEY_TYPE => cipher.decrypt(new PreKeySignalMessage(msg.body))
       case CiphertextMessage.WHISPER_TYPE => cipher.decrypt(new SignalMessage(msg.body))
       case other => throw new IllegalArgumentException(s"unknown ratchet message type $other")

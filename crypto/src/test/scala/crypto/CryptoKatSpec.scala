@@ -36,7 +36,8 @@ class CryptoKatSpec extends AnyFunSuite with ScalaCheckDrivenPropertyChecks:
     }
 
   test("keyed Blake2b (KDF core) matches Bouncy Castle keyed Blake2b"):
-    val keys: Gen[Array[Byte]] = Gen.choose(1, 64).flatMap(Gen.listOfN(_, arbitrary[Byte]).map(_.toArray))
+    val keys: Gen[Array[Byte]] =
+      Gen.choose(1, 64).flatMap(Gen.listOfN(_, arbitrary[Byte]).map(_.toArray))
     forAll(keys, bytes) { (k, in) =>
       assert(Crypto.blake2b(in, 64, k).sameElements(bcBlake2b(in, 64, k)))
     }

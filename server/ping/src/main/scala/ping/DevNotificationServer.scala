@@ -22,7 +22,7 @@ import scala.jdk.CollectionConverters.*
 final class DevNotificationServer(serverKey: Array[Byte]):
   require(serverKey.length == Crypto.KeyBytes, s"server key must be ${Crypto.KeyBytes} bytes")
 
-  private val rng    = new SecureRandom()
+  private val rng = new SecureRandom()
   // (roundId, aggregation label hex) -> digest; ConcurrentHashMap.compute makes the per-key OR
   // atomic under concurrent submissions. Keying by round honors the proto's per-round scope:
   // signals in different rounds never mix, and a fetch only clears its own round.
@@ -34,9 +34,9 @@ final class DevNotificationServer(serverKey: Array[Byte]):
     * Eviction runs only when a signal advances the newest round, so steady-state same-round
     * signaling does no scan; an out-of-order low-round signal lingers until the next advance. */
   private val RetentionRounds: Long = 16L
-  private val maxRound: AtomicLong  = new AtomicLong(0L)
+  private val maxRound: AtomicLong = new AtomicLong(0L)
 
-  val label: String            = Privacy.DevLabel
+  val label: String = Privacy.DevLabel
   def metadataPrivate: Boolean = false
 
   /** Receiver-side: seal a one-hot token BOUND to a round. sealed = nonce ‖ AEAD(serverKey,
@@ -45,8 +45,12 @@ final class DevNotificationServer(serverKey: Array[Byte]):
   def issueToken(roundId: Long, bitPosition: Int, aggLabel: Array[Byte]): Array[Byte] =
     val nonce = new Array[Byte](Crypto.NonceBytes)
     rng.nextBytes(nonce)
-    val ct = Crypto.aeadSeal(serverKey, nonce, Array.emptyByteArray,
-      Notification.serialize(roundId, NotificationToken(bitPosition, aggLabel)))
+    val ct = Crypto.aeadSeal(
+      serverKey,
+      nonce,
+      Array.emptyByteArray,
+      Notification.serialize(roundId, NotificationToken(bitPosition, aggLabel))
+    )
     nonce ++ ct
 
   /** Sender-side submit: flips exactly the token's bit under (round, label). Rejects forged/tampered
@@ -63,7 +67,10 @@ final class DevNotificationServer(serverKey: Array[Byte]):
           else
             val k = (roundId, hex(tok.label))
             // atomic OR: a concurrent signal for the same (round,label) cannot clobber another's bit.
-            rounds.compute(k, (_, cur) => (if cur == null then Digest.empty else cur).set(tok.bitPosition))
+            rounds.compute(
+              k,
+              (_, cur) => (if cur == null then Digest.empty else cur).set(tok.bitPosition)
+            )
             // Evict only when this signal advances the newest round (relative to the true max).
             val prevMax = maxRound.getAndAccumulate(roundId, (a, b) => math.max(a, b))
             if roundId > prevMax then evictBefore(roundId - RetentionRounds)

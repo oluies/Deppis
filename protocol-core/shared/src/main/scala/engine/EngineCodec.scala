@@ -30,19 +30,23 @@ final class EngineCodec(engine: Engine):
     out match
       case Right(result) =>
         // Attach any events the command emitted (e.g. buddyConfirmed).
-        ujson.Obj(
-          "apiVersion" -> EngineApi.Version,
-          "result"     -> result,
-          "events"     -> ujson.Arr(engine.drainEvents().map(eventJson)*)
-        ).render()
+        ujson
+          .Obj(
+            "apiVersion" -> EngineApi.Version,
+            "result" -> result,
+            "events" -> ujson.Arr(engine.drainEvents().map(eventJson)*)
+          )
+          .render()
       case Left(EngineError(code, message)) =>
         // Discard any buffered events on the error path too, so a partially-emitted event can never
         // leak into the NEXT successful response (content-leak across calls).
         engine.drainEvents()
-        ujson.Obj(
-          "apiVersion" -> EngineApi.Version,
-          "error"      -> ujson.Obj("code" -> code, "message" -> message)
-        ).render()
+        ujson
+          .Obj(
+            "apiVersion" -> EngineApi.Version,
+            "error" -> ujson.Obj("code" -> code, "message" -> message)
+          )
+          .render()
 
   private def dispatch(env: ujson.Value): Either[EngineError, ujson.Value] =
     val args = env.obj.getOrElse("args", ujson.Obj())
@@ -50,7 +54,7 @@ final class EngineCodec(engine: Engine):
       case "addBuddy" =>
         for
           role <- BuddyRole.parse(str(args, "role"))
-          res  <- engine.addBuddy(str(args, "sharedSecret").getBytes(UTF_8), role)
+          res <- engine.addBuddy(str(args, "sharedSecret").getBytes(UTF_8), role)
         yield ujson.Obj("pairId" -> res.pairId, "safetyNumber" -> res.safetyNumber)
 
       case "confirmBuddy" =>
@@ -60,14 +64,19 @@ final class EngineCodec(engine: Engine):
         engine.removeBuddy(str(args, "pairId")).map(_ => ujson.Null)
 
       case "sendMessage" =>
-        engine.sendMessage(str(args, "pairId"), str(args, "plaintext"))
+        engine
+          .sendMessage(str(args, "pairId"), str(args, "plaintext"))
           .map(n => ujson.Obj("queued" -> n))
 
       case "tick" =>
         engine.tick(long(args, "roundId")).map { d =>
           // Emit as a JSON number explicitly (a bare Long would render as a string). The echo shares
           // the JSON-double 2^53 ceiling; exact large round ids are carried on the string INPUT path.
-          ujson.Obj("roundId" -> ujson.Num(d.roundId.toDouble), "carrier" -> d.carrier, "retrieve" -> d.retrieve)
+          ujson.Obj(
+            "roundId" -> ujson.Num(d.roundId.toDouble),
+            "carrier" -> d.carrier,
+            "retrieve" -> d.retrieve
+          )
         }
 
       case "privacyStatus" =>
@@ -80,13 +89,23 @@ final class EngineCodec(engine: Engine):
     case EngineEvent.BuddyConfirmed(pairId, safetyNumber) =>
       ujson.Obj("event" -> "buddyConfirmed", "pairId" -> pairId, "safetyNumber" -> safetyNumber)
     case EngineEvent.MessageReceived(pairId, plaintext, at) =>
-      ujson.Obj("event" -> "messageReceived", "pairId" -> pairId, "plaintext" -> plaintext, "receivedAt" -> at)
+      ujson.Obj(
+        "event" -> "messageReceived",
+        "pairId" -> pairId,
+        "plaintext" -> plaintext,
+        "receivedAt" -> at
+      )
     case EngineEvent.Notified(roundId) =>
       ujson.Obj("event" -> "notified", "roundId" -> roundId)
     case EngineEvent.PrivacyStatus(backend, metadataPrivate, label) =>
-      ujson.Obj("event" -> "privacyStatus", "backend" -> backend, "metadataPrivate" -> metadataPrivate, "label" -> label)
+      ujson.Obj(
+        "event" -> "privacyStatus",
+        "backend" -> backend,
+        "metadataPrivate" -> metadataPrivate,
+        "label" -> label
+      )
 
-  private def str(o: ujson.Value, k: String): String  = o.obj.get(k).map(_.str).getOrElse("")
+  private def str(o: ujson.Value, k: String): String = o.obj.get(k).map(_.str).getOrElse("")
   private def bool(o: ujson.Value, k: String): Boolean = o.obj.get(k).exists(_.bool)
 
   /** `roundId` may arrive as a JSON number or string. JSON numbers are IEEE doubles, so a numeric
@@ -95,6 +114,9 @@ final class EngineCodec(engine: Engine):
     * OTHER type (boolean/null/non-numeric string) throws and is mapped to `bad_request` by the guard
     * in `handle` — never silently coerced to 0. */
   private def long(o: ujson.Value, k: String): Long = o.obj.get(k) match
-    case None    => 0L
-    case Some(v) => v.strOpt.map(_.toLong).orElse(v.numOpt.map(_.toLong))
+    case None => 0L
+    case Some(v) =>
+      v.strOpt
+        .map(_.toLong)
+        .orElse(v.numOpt.map(_.toLong))
         .getOrElse(throw IllegalArgumentException("roundId must be a number or numeric string"))
