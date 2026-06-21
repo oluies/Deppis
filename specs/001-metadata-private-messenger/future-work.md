@@ -48,7 +48,7 @@ rounds of writes, and an observer counting a client's non-idle rounds could dist
 photo" from "sent one line." Bounding this requires a padding/rate policy (e.g. a fixed media budget
 per epoch, or constant-rate draining of a send queue) that trades latency for indistinguishability —
 unsolved here. Storage-side, the enclave oblivious store's cost grows with object count, so large
-media stresses the deamortized-build throughput that the sidecar (`oblivious-sidecar/src/store/`)
+media stresses the deamortized-build throughput that the sidecar (`oblivious-sidecar/src/store.rs`)
 has deferred.
 
 ---
