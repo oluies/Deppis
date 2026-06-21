@@ -25,11 +25,7 @@ jobs:
           distribution: temurin
           java-version: "24" # Foreign Function & Memory API is final since 22
       - uses: sbt/setup-sbt@v1
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22" # the aggregated `sbt test` also runs protocolCoreJS tests under Node
-      - name: Install the vetted JS crypto dep (@noble/hashes) for the Scala.js tests
-        run: npm ci
+      # No Node here: the JS engine tests run in the `scalajs` job, so this job stays JVM-only.
       - uses: actions/cache@v5
         with:
           path: |
@@ -38,19 +34,35 @@ jobs:
             ~/.ivy2/cache
           key: sbt-${{ runner.os }}-${{ hashFiles('build.sbt', 'project/build.properties', 'project/plugins.sbt', 'project/V.scala') }}
           restore-keys: sbt-${{ runner.os }}-
-      - name: Test (all modules)
-        run: sbt -batch -no-colors test
-      - name: Labeling gate (T008) — a build without the real backend MUST report no privacy
+      - name: Test the JVM modules + labeling gate (T008) in one sbt session
         run: |
-          # sbt 2.0's `export fullClasspath` returns a List(${OUT}/…) of virtual paths (for build
-          # caching), not a usable -cp string, so let sbt run the CLI itself and capture its output.
-          # Grep both assertions against the WHOLE output (not a pre-filtered line) so the gate holds
-          # even if the status JSON is ever pretty-printed across lines. Fail-closed.
-          out="$(sbt -batch -no-colors -error 'protocolCore/runMain cli.Pstatus show')"
-          echo "pstatus -> $(echo "$out" | grep metadataPrivate || true)"
-          echo "$out" | grep -q '"metadataPrivate":false' \
-            && echo "$out" | grep -q 'DEV, NO METADATA PRIVACY' \
+          set -o pipefail
+          # One sbt session (`;`-chained) avoids a second cold JVM/project-load. `;` aborts on the
+          # first failing command, so a test failure fails the step before the gate runs. The JS
+          # module is covered by the scalajs job, so it is intentionally not run here.
+          sbt -batch -no-colors \
+            ';protocolCore/test ;crypto/test ;anonymity/test ;server/test ;transport/test ;protocolCore/runMain cli.Pstatus show' \
+            2>&1 | tee /tmp/sbt.out
+          # Labeling gate: a build without the real backend MUST report no metadata privacy. sbt 2.0's
+          # `export fullClasspath` yields virtual ${OUT} paths (not a usable -cp), so we read the
+          # CLI's JSON from the combined output. Grep both assertions against the whole log; fail-closed.
+          grep -q '"metadataPrivate":false' /tmp/sbt.out \
+            && grep -q 'DEV, NO METADATA PRIVACY' /tmp/sbt.out \
             || { echo "::error::labeling gate failed — a dev build must report no metadata privacy (Constitution IV)"; exit 1; }
+
+  lint:
+    name: Lint — scalafmt (Scala formatting)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # Standalone scalafmt via Coursier — no sbt cold start, so this gate is fast and parallel.
+      # Pinned to the .scalafmt.conf version; generated code is excluded there (project.excludePaths).
+      - uses: coursier/setup-action@v1
+        with:
+          jvm: temurin:24
+          apps: scalafmt:3.8.3
+      - name: Check Scala formatting (scalafmt --test)
+        run: scalafmt --test
 
   rust:
     name: Rust — fmt + clippy + test
@@ -124,10 +136,9 @@ jobs:
             ~/.ivy2/cache
           key: sbt-${{ runner.os }}-${{ hashFiles('build.sbt', 'project/build.properties', 'project/plugins.sbt', 'project/V.scala') }}
           restore-keys: sbt-${{ runner.os }}-
-      - name: Test the JS engine under Node (cross-platform KAT vs the JVM build)
-        run: sbt -batch -no-colors "protocolCoreJS/test"
-      - name: Link the production bundle (proves the @JSExportTopLevel facade emits)
-        run: sbt -batch -no-colors "protocolCoreJS/fullLinkJS"
+      - name: Test the JS engine under Node + link the production bundle (one sbt session)
+        # `;`-chained so the cross-platform KAT test and the @JSExportTopLevel link share one cold start.
+        run: sbt -batch -no-colors ';protocolCoreJS/test ;protocolCoreJS/fullLinkJS'
       - name: E2E — drive the linked bundle through the engine-api contract (as a consumer loads it)
         # sbt 2.0 centralizes build outputs under target/out/<platform>/… (was protocol-core-js/target/…).
         run: node protocol-core/js/e2e/engine-contract.cjs target/out/sjs1/scala-3.3.4/protocol-core-js/protocol-core-js-opt/main.js
