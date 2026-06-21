@@ -1,4 +1,4 @@
-import scalapb.compiler.Version.{scalapbVersion, grpcJavaVersion}
+import protocbridge.{Artifact, SandboxedJvmGenerator, Target}
 
 // Metadata-Private Messenger — JVM build (Phase 1/2 foundational slice).
 // protocol-core is the single source of truth (Constitution VII). This build currently
@@ -9,13 +9,11 @@ ThisBuild / scalaVersion := "3.3.4" // LTS
 ThisBuild / organization := "io.deppis.messenger"
 ThisBuild / version      := "0.1.0-SNAPSHOT"
 
-// Dependency versions pinned (Constitution XI).
-lazy val V = new {
-  val scalatest      = "3.2.19"
-  val scalatestPlus  = "3.2.19.0"
-  val upickle        = "4.0.2"
-}
+// sbt 2.0 no longer auto-detects the ScalaTest framework from the test classpath, so register it
+// explicitly for every module (without this, `test` reports "No tests to run" / Total 0).
+ThisBuild / Test / testFrameworks := Seq(TestFramework("org.scalatest.tools.Framework"))
 
+// Pinned dependency versions live in `project/V.scala` (reliably in metabuild scope under sbt 2.0).
 lazy val testDeps = Seq(
   "org.scalatest"     %% "scalatest"       % V.scalatest     % Test,
   "org.scalatestplus" %% "scalacheck-1-18" % V.scalatestPlus % Test
@@ -64,8 +62,10 @@ lazy val protocolCoreJS = (project in file("protocol-core-js"))
     ),
     Test / unmanagedSourceDirectories := Seq(protocolCore.base / "js" / "src" / "test" / "scala"),
     libraryDependencies ++= Seq(
-      "com.lihaoyi"   %%% "upickle"   % V.upickle,
-      "org.scalatest" %%% "scalatest" % V.scalatest % Test
+      // sbt-scalajs 1.22.0 (sbt 2.0) no longer provides the `%%%` operator for plain JS projects,
+      // so we name the Scala.js artifacts explicitly (Scala.js 1.x + Scala 3 ⇒ `_sjs1_3`).
+      "com.lihaoyi"   % "upickle_sjs1_3"   % V.upickle,
+      "org.scalatest" % "scalatest_sjs1_3" % V.scalatest % Test
     )
   )
 
@@ -133,12 +133,27 @@ lazy val transport = (project in file("transport"))
     run / fork := true,
     run / javaOptions += "--enable-native-access=ALL-UNNAMED",
     run / connectInput := true,
-    Compile / PB.targets := Seq(scalapb.gen(grpc = true) -> (Compile / sourceManaged).value / "scalapb"),
+    // Run the ScalaPB generator SANDBOXED: protoc-bridge loads compilerplugin_2.13 (+ its own
+    // protoc-bridge_2.13) in an isolated classloader, so it never clashes with sbt-protoc's
+    // protoc-bridge_3 (see project/plugins.sbt). `scalapb.gen(grpc = true)` is unavailable here
+    // (compilerplugin isn't on the metabuild classpath), so we build the Target directly.
+    Compile / PB.targets := Seq(
+      Target(
+        SandboxedJvmGenerator.forModule(
+          "scala",
+          Artifact("com.thesamet.scalapb", "compilerplugin_2.13", V.scalapb),
+          "scalapb.ScalaPbCodeGenerator$",
+          Nil
+        ),
+        (Compile / sourceManaged).value / "scalapb",
+        Seq("grpc")
+      )
+    ),
     libraryDependencies ++= Seq(
-      "com.thesamet.scalapb" %% "scalapb-runtime"      % scalapbVersion % "protobuf",
-      "com.thesamet.scalapb" %% "scalapb-runtime-grpc" % scalapbVersion,
-      "io.grpc"               % "grpc-netty-shaded"     % grpcJavaVersion,
-      "io.grpc"               % "grpc-inprocess"        % grpcJavaVersion % Test
+      "com.thesamet.scalapb" %% "scalapb-runtime"      % V.scalapb  % "protobuf",
+      "com.thesamet.scalapb" %% "scalapb-runtime-grpc" % V.scalapb,
+      "io.grpc"               % "grpc-netty-shaded"     % V.grpcJava,
+      "io.grpc"               % "grpc-inprocess"        % V.grpcJava % Test
     ) ++ testDeps
   )
 
