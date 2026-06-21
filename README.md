@@ -76,6 +76,10 @@ sbt -batch "protocolCore/runMain cli.Pstatus show"             # shows the dev p
 
 ## Architecture & spec
 
+See [`ARCHITECTURE.md`](ARCHITECTURE.md) for the components, the messaging scenarios (pairing,
+send, notify-before-retrieval, cover traffic), the encryption layers, and the attestation flow —
+with diagrams.
+
 The full specification, plan, and task breakdown live under
 [`specs/001-metadata-private-messenger/`](specs/001-metadata-private-messenger/) — start with
 [`quickstart.md`](specs/001-metadata-private-messenger/quickstart.md) and `plan.md`. Non-negotiable
