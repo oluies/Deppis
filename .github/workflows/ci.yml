@@ -36,14 +36,15 @@ jobs:
             ~/.cache/coursier
             ~/.sbt
             ~/.ivy2/cache
-          key: sbt-${{ runner.os }}-${{ hashFiles('build.sbt', 'project/build.properties', 'project/plugins.sbt') }}
+          key: sbt-${{ runner.os }}-${{ hashFiles('build.sbt', 'project/build.properties', 'project/plugins.sbt', 'project/V.scala') }}
           restore-keys: sbt-${{ runner.os }}-
       - name: Test (all modules)
         run: sbt -batch -no-colors test
       - name: Labeling gate (T008) — a build without the real backend MUST report no privacy
         run: |
-          CP="$(sbt -batch -no-colors -error 'export protocolCore/Runtime/fullClasspath' | tail -1)"
-          out="$(printf '{}' | java -cp "$CP" cli.Pstatus show)"
+          # sbt 2.0's `export fullClasspath` returns a List(${OUT}/…) of virtual paths (for build
+          # caching), not a usable -cp string, so let sbt run the CLI itself and capture its JSON.
+          out="$(sbt -batch -no-colors -error 'protocolCore/runMain cli.Pstatus show' | grep metadataPrivate)"
           echo "pstatus -> $out"
           echo "$out" | grep -q '"metadataPrivate":false' \
             && echo "$out" | grep -q 'DEV, NO METADATA PRIVACY' \
@@ -91,7 +92,7 @@ jobs:
             ~/.cache/coursier
             ~/.sbt
             ~/.ivy2/cache
-          key: sbt-${{ runner.os }}-${{ hashFiles('build.sbt', 'project/build.properties', 'project/plugins.sbt') }}
+          key: sbt-${{ runner.os }}-${{ hashFiles('build.sbt', 'project/build.properties', 'project/plugins.sbt', 'project/V.scala') }}
           restore-keys: sbt-${{ runner.os }}-
       - name: Build obsd (the Rust sidecar binary)
         run: cargo build --bin obsd --manifest-path oblivious-sidecar/Cargo.toml
@@ -119,14 +120,15 @@ jobs:
             ~/.cache/coursier
             ~/.sbt
             ~/.ivy2/cache
-          key: sbt-${{ runner.os }}-${{ hashFiles('build.sbt', 'project/build.properties', 'project/plugins.sbt') }}
+          key: sbt-${{ runner.os }}-${{ hashFiles('build.sbt', 'project/build.properties', 'project/plugins.sbt', 'project/V.scala') }}
           restore-keys: sbt-${{ runner.os }}-
       - name: Test the JS engine under Node (cross-platform KAT vs the JVM build)
         run: sbt -batch -no-colors "protocolCoreJS/test"
       - name: Link the production bundle (proves the @JSExportTopLevel facade emits)
         run: sbt -batch -no-colors "protocolCoreJS/fullLinkJS"
       - name: E2E — drive the linked bundle through the engine-api contract (as a consumer loads it)
-        run: node protocol-core/js/e2e/engine-contract.cjs protocol-core-js/target/scala-3.3.4/protocol-core-js-opt/main.js
+        # sbt 2.0 centralizes build outputs under target/out/<platform>/… (was protocol-core-js/target/…).
+        run: node protocol-core/js/e2e/engine-contract.cjs target/out/sjs1/scala-3.3.4/protocol-core-js/protocol-core-js-opt/main.js
 
   flutter:
     name: Flutter — analyze + widget tests (T005)
