@@ -142,13 +142,13 @@ An adversary who **fully compromises a user's device** and captures its current 
 
 | | Phase C (attested) | Dev build today |
 |---|---|---|
-| **Past message contents** | CANNOT decrypt messages from before the compromise: **forward secrecy** via the double ratchet (libsignal); epoch keys are erased and never rolled forward (FR-013, SC-007, Constitution §Security) | Forward secrecy is a protocol/crypto property and holds independent of the privacy backend — but note the ratchet's integration into the frame path is a tracked roadmap item (ARCHITECTURE §7); until then the engine frames plaintext directly, so verify the active build before relying on PCS |
+| **Past message contents** | CANNOT decrypt messages from before the compromise: **forward secrecy** via the double ratchet (libsignal); epoch keys are erased and never rolled forward (FR-013, SC-007, Constitution §Security) | Forward secrecy is a protocol/crypto property and holds independent of the privacy backend — but note the ratchet's integration into the frame path is a tracked roadmap item (ARCHITECTURE §7); until then the engine frames plaintext directly, so verify the active build before relying on forward secrecy |
 | **Past contact list** | CANNOT reconstruct contacts the user had before the compromise window (SC-007) | Same caveat as above |
 | **Present and future** | **CAN** read everything the live device can: current conversations, the current buddy list, and can impersonate the user going forward. No design hides a conversation from the endpoint participating in it | CAN, same |
 | **Other users** | CANNOT, from one compromised endpoint, recover *other* users' graphs — those derive from key material that endpoint never held | CANNOT (no cross-user key material on the device) |
 
 A compromised endpoint is the limit of what any messenger can defend: the device is, by
-definition, a legitimate party to its own conversations. Forward secrecy bounds the **retro­active**
+definition, a legitimate party to its own conversations. Forward secrecy bounds the **retroactive**
 damage; it does not make the present private to the attacker holding the device.
 
 ## 4. How the design achieves the goal (Phase C)
