@@ -162,3 +162,11 @@ lazy val transport = (project in file("transport"))
 lazy val root = (project in file("."))
   .aggregate(protocolCore, protocolCoreJS, crypto, anonymity, server, transport)
   .settings(name := "metadata-messenger", publish / skip := true)
+
+// CI's JVM job runs `testJvm` (the Scala.js job covers protocolCoreJS under Node, so it is excluded
+// here to avoid a duplicate Node run). KEEP THIS LIST IN SYNC with the `root` aggregate above when a
+// JVM module is added — co-located here, next to the aggregate, so it is hard to miss.
+addCommandAlias(
+  "testJvm",
+  ";protocolCore/test ;crypto/test ;anonymity/test ;server/test ;transport/test"
+)

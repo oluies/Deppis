@@ -38,16 +38,19 @@ jobs:
         run: |
           set -o pipefail
           # One sbt session (`;`-chained) avoids a second cold JVM/project-load. `;` aborts on the
-          # first failing command, so a test failure fails the step before the gate runs. The JS
-          # module is covered by the scalajs job, so it is intentionally not run here.
-          sbt -batch -no-colors \
-            ';protocolCore/test ;crypto/test ;anonymity/test ;server/test ;transport/test ;protocolCore/runMain cli.Pstatus show' \
-            2>&1 | tee /tmp/sbt.out
+          # first failing command, so a test failure fails the step before the gate runs. `testJvm`
+          # (defined in build.sbt next to the aggregate) runs the JVM modules; the JS module is
+          # covered by the scalajs job, so it is intentionally not run here.
+          sbt -batch -no-colors ';testJvm ;protocolCore/runMain cli.Pstatus show' 2>&1 | tee /tmp/sbt.out
           # Labeling gate: a build without the real backend MUST report no metadata privacy. sbt 2.0's
-          # `export fullClasspath` yields virtual ${OUT} paths (not a usable -cp), so we read the
-          # CLI's JSON from the combined output. Grep both assertions against the whole log; fail-closed.
-          grep -q '"metadataPrivate":false' /tmp/sbt.out \
-            && grep -q 'DEV, NO METADATA PRIVACY' /tmp/sbt.out \
+          # `export fullClasspath` yields virtual ${OUT} paths (not a usable -cp), so we read the CLI's
+          # JSON from the session log — but isolate the one line that is `cli.Pstatus`'s actual output
+          # (it carries BOTH "backend" and "metadataPrivate") so incidental test stdout can't satisfy
+          # the gate. Fail-closed: a missing/regressed line fails the step.
+          gate="$(grep '"metadataPrivate"' /tmp/sbt.out | grep '"backend"' | tail -1)"
+          echo "pstatus -> $gate"
+          echo "$gate" | grep -q '"metadataPrivate":false' \
+            && echo "$gate" | grep -q 'DEV, NO METADATA PRIVACY' \
             || { echo "::error::labeling gate failed — a dev build must report no metadata privacy (Constitution IV)"; exit 1; }
 
   lint:
