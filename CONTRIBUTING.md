@@ -57,11 +57,13 @@ to Scala.js.
 
 ### Run all the JVM modules at once
 
-There is **no `testJvm` sbt alias** in this build (yet); CI runs the JVM modules as a single
-`;`-chained sbt session so they share one cold start. You can do the same locally:
+`build.sbt` defines a **`testJvm`** command alias (next to the `root` aggregate) that runs the JVM
+modules in one `;`-chained sbt session — CI uses it so the modules share a single cold start. The
+Scala.js module is excluded (its tests run in the `scalajs` CI job under Node):
 
 ```bash
-sbt -batch ';protocolCore/test ;crypto/test ;anonymity/test ;server/test ;transport/test'
+sbt -batch testJvm
+# equivalent to: sbt -batch ';protocolCore/test ;crypto/test ;anonymity/test ;server/test ;transport/test'
 ```
 
 `crypto`, `server`, and `transport` tests **fork** the JVM with
