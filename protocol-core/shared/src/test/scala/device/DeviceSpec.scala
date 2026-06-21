@@ -99,3 +99,12 @@ class DeviceSpec extends AnyFunSuite:
     val (d2, c2) = d1.goOffline(3L).flatMap(_.goOnline(7L)).toOption.get
     assert(c2.from == 4L && c2.to == 7L)
     assert(d2.lastSeen == 7L)
+
+  test("goOffline(round) records (lastSeen, round) as SEEN — that gap is not replayed (contract)"):
+    // Pins the goOffline contract: passing a round ahead of lastSeen treats the in-between rounds
+    // as already observed, so reconnect only replays from the declared offline round onward.
+    val (_, catchup) =
+      Device.online(5L).goOffline(10L).flatMap(_.goOnline(12L)).toOption.get
+    assert(catchup.from == 11L && catchup.to == 12L) // rounds 6..9 are NOT in catch-up
+    assert(catchup.count == 2L)
+    assert(!catchup.isEmpty)
