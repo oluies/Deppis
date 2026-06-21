@@ -155,7 +155,13 @@ lazy val transport = (project in file("transport"))
       "com.thesamet.scalapb" %% "scalapb-runtime" % V.scalapb % "protobuf",
       "com.thesamet.scalapb" %% "scalapb-runtime-grpc" % V.scalapb,
       "io.grpc" % "grpc-netty-shaded" % V.grpcJava,
-      "io.grpc" % "grpc-inprocess" % V.grpcJava % Test
+      "io.grpc" % "grpc-inprocess" % V.grpcJava % Test,
+      // Pekko typed actors — the round-orchestration skeleton for the networked TLS server (T020).
+      "org.apache.pekko" %% "pekko-actor-typed" % V.pekko,
+      "org.apache.pekko" %% "pekko-actor-testkit-typed" % V.pekko % Test,
+      // Bouncy Castle — dev self-signed TLS cert generation for TlsRoundServer (T020).
+      "org.bouncycastle" % "bcprov-jdk18on" % V.bouncycastle,
+      "org.bouncycastle" % "bcpkix-jdk18on" % V.bouncycastle
     ) ++ testDeps
   )
 
