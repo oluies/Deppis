@@ -154,15 +154,24 @@ final class Engine(
       a(i) = 0.toByte
       i += 1
 
-  /** Encrypt a 228-byte inner block into a 256-byte wire frame (`nonce ‖ ciphertext‖tag`). */
+  /** Encrypt a 228-byte inner block into a 256-byte wire frame (`nonce ‖ ciphertext‖tag`). Wipes the
+    * per-message key after use — it is a fresh, non-retained buffer, so zeroing it keeps a spent
+    * message key from lingering on the heap (consistent with the chain-key wiping). */
   private def encryptFrame(key: Array[Byte], inner: Array[Byte]): Array[Byte] =
     val nonce = random.Rand.bytes(aead.Aead.NonceBytes)
-    nonce ++ aead.Aead.seal(key, nonce, inner)
+    val ct = aead.Aead.seal(key, nonce, inner)
+    wipe(key)
+    nonce ++ ct
 
-  /** Decrypt a 256-byte wire frame back to the 228-byte inner block; `None` on auth failure. */
+  /** Decrypt a 256-byte wire frame back to the 228-byte inner block; `None` on auth failure. Wipes
+    * the per-message key after use (see `encryptFrame`). */
   private def decryptFrame(key: Array[Byte], wire: Array[Byte]): Option[Array[Byte]] =
     if wire.length != WireSize then None
-    else aead.Aead.open(key, wire.take(aead.Aead.NonceBytes), wire.drop(aead.Aead.NonceBytes))
+    else
+      val out =
+        aead.Aead.open(key, wire.take(aead.Aead.NonceBytes), wire.drop(aead.Aead.NonceBytes))
+      wipe(key)
+      out
 
   /** The current build privacy status. Dev backend ⇒ not private ⇒ the mandatory dev label. */
   def privacyStatus: EngineEvent.PrivacyStatus =
@@ -199,6 +208,7 @@ final class Engine(
           Right(AddBuddyResult(init.pairId, init.safetyNumber)) // no key material
         case Left(reason) =>
           wipe(contentRoot)
+          wipe(addrKey) // not retained in a relationship on this path either
           // reason is a fixed, non-secret string ("duplicate buddy" / "buddy cap 512 reached").
           Left(EngineError("add_failed", reason))
 
