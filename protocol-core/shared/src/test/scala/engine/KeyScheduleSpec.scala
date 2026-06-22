@@ -36,19 +36,15 @@ class KeyScheduleSpec extends AnyFunSuite:
     val ck2 = KeySchedule.nextChain(ck1)
     assert(!ck0.sameElements(ck1) && !ck1.sameElements(ck2) && !ck0.sameElements(ck2))
 
-  test("a sender's (role→peer) chain equals the receiver's (peer→role) chain; directions differ"):
+  test("opposite directions seed DIFFERENT chains (no cross-direction key reuse)"):
     val cr = KeySchedule.contentRoot(pk)
-    def peer(r: BuddyRole): BuddyRole = r match
-      case BuddyRole.Initiator => BuddyRole.Responder
-      case BuddyRole.Responder => BuddyRole.Initiator
-    // Exercise the SAME role→string logic the engine uses on each side: Alice (Initiator) seeds her
-    // SEND chain as (role → peer); Bob (Responder) seeds his RECV chain as (peer → role). These must
-    // be the identical bytes for the Alice→Bob direction (that is what keeps the chains in lockstep).
-    val alice = BuddyRole.Initiator
-    val bob = BuddyRole.Responder
-    val aliceSend = KeySchedule.chain0(cr, alice.toString, peer(alice).toString)
-    val bobRecv = KeySchedule.chain0(cr, peer(bob).toString, bob.toString)
-    assert(aliceSend.sameElements(bobRecv))
-    // The opposite direction (Bob→Alice) is a DIFFERENT chain — no cross-direction key reuse.
-    val bobSend = KeySchedule.chain0(cr, bob.toString, peer(bob).toString)
-    assert(!aliceSend.sameElements(bobSend))
+    // Initiator→Responder and Responder→Initiator are independent chains, so the two directions never
+    // share a message key. (The cross-party lockstep — Alice's send chain == Bob's recv chain for a
+    // direction — is inherent to the direction naming, so it can't be falsified by comparing two
+    // derivations from the same strings; it is exercised behaviorally by the two-engine round-trip in
+    // RoundTransportSpec, which only works if the chains stay in lockstep across several messages.)
+    assert(
+      !KeySchedule
+        .chain0(cr, "Initiator", "Responder")
+        .sameElements(KeySchedule.chain0(cr, "Responder", "Initiator"))
+    )

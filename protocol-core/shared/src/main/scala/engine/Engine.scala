@@ -166,12 +166,11 @@ final class Engine(
   /** Decrypt a 256-byte wire frame back to the 228-byte inner block; `None` on auth failure. Wipes
     * the per-message key after use (see `encryptFrame`). */
   private def decryptFrame(key: Array[Byte], wire: Array[Byte]): Option[Array[Byte]] =
-    if wire.length != WireSize then None
-    else
-      val out =
-        aead.Aead.open(key, wire.take(aead.Aead.NonceBytes), wire.drop(aead.Aead.NonceBytes))
-      wipe(key)
-      out
+    try
+      if wire.length != WireSize then None
+      else aead.Aead.open(key, wire.take(aead.Aead.NonceBytes), wire.drop(aead.Aead.NonceBytes))
+    finally
+      wipe(key) // wipe on BOTH branches — a wrong-size frame must not leave a spent key behind
 
   /** The current build privacy status. Dev backend ⇒ not private ⇒ the mandatory dev label. */
   def privacyStatus: EngineEvent.PrivacyStatus =
