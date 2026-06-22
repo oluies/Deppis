@@ -13,7 +13,9 @@ class RoundTransportSpec extends AnyFunSuite:
   private def hex(b: Array[Byte]): String = b.map(x => f"${x & 0xff}%02x").mkString
   private def secret(s: String): Array[Byte] = s.getBytes("UTF-8")
   private def pairKeyOf(s: String): Array[Byte] = handshake.Handshake.init(secret(s)).pairKey
-  private def bitOf(pairKey: Array[Byte]): Int = NotifyDigest.bit(pairKey) // single source of truth
+  // The engine derives the notify bit from the addressing root (the forward-secrecy root split), so a
+  // test signaller must too — single source of truth via KeySchedule.addrKey.
+  private def bitOf(pairKey: Array[Byte]): Int = NotifyDigest.bit(KeySchedule.addrKey(pairKey))
 
   /** In-memory store + a 512-bit PING digest, recording the observable submit + fetch traces.
     * `fetchDigest` is per-round: it returns the current digest and RESETS it (obsd semantics), so a

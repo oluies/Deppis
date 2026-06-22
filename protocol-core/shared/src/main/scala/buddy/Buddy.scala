@@ -19,7 +19,10 @@ object Buddy:
       pairId: String,
       safetyNumber: String,
       state: BuddyState,
-      pairKey: Array[Byte]
+      // The retained ADDRESSING root (`KeySchedule.addrKey`) — retrieval tokens + notify bit derive
+      // from this, NOT the raw pair key (which is wiped after the forward-secrecy root split). Never
+      // crosses the engine boundary.
+      addrKey: Array[Byte]
   )
 
   final class BuddyBook private (private val rels: Map[String, BuddyRelationship]):
