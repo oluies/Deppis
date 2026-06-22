@@ -6,7 +6,7 @@ import java.net.{InetSocketAddress, ServerSocket, Socket}
 import java.util.concurrent.TimeUnit
 import metadatamessenger.store.v1.{store as spb}
 import metadatamessenger.notify.v1.{notify as npb}
-import engine.{BuddyRole, Engine, EngineEvent, NotifyDigest}
+import engine.{BuddyRole, Engine, EngineEvent, KeySchedule, NotifyDigest}
 import handshake.Handshake
 import ping.DevNotificationServer
 import crypto.Crypto
@@ -108,7 +108,8 @@ object DeppisDemo:
     val sealer = DevNotificationServer(notifyKey)
     val pingSignal = new EnclaveNotificationClient(notifyStub, attested = false)
     val pairKey = Handshake.init(secret).pairKey
-    val bobBit = NotifyDigest.bit(pairKey)
+    // Bob's engine derives the notify bit from the addressing root (the forward-secrecy root split).
+    val bobBit = NotifyDigest.bit(KeySchedule.addrKey(pairKey))
 
     // 2) Alice queues a message.
     val message = "see you at dusk"

@@ -41,18 +41,25 @@ class EngineBackendE2ESpec extends AnyFunSuite with ObsdHarness:
 
       // --- Alice's side (played by the test) ---
       val pairKey = Handshake.init(secret).pairKey // same key Bob derived
+      // Forward-secrecy root split: tokens + notify bit derive from the addressing root; the content
+      // key is the FIRST message key of the Initiator→Responder ratchet chain (msg 0).
+      val addrKey = engine.KeySchedule.addrKey(pairKey)
+      val contentRoot = engine.KeySchedule.contentRoot(pairKey)
       // Alice (Initiator) stores her first message under her outgoing token — ENCRYPTED exactly as
-      // the engine's send path does (T042): inner 228-byte frame, ChaCha20-Poly1305, nonce ‖ ct.
-      val aliceToken = RetrievalToken.derive(pairKey, "Initiator", "Responder", 0L)
+      // the engine's send path does: inner 228-byte frame, ChaCha20-Poly1305, nonce ‖ ct.
+      val aliceToken = RetrievalToken.derive(addrKey, "Initiator", "Responder", 0L)
       val innerSize = Frame.Size - aead.Aead.NonceBytes - aead.Aead.TagBytes
       val inner = Frame.pad("see you at the bridge".getBytes, innerSize).toOption.get
-      val aeadKey = kdf.Kdf.hmacSha256(pairKey, "aead/Initiator/Responder/0".getBytes)
+      val msgKey0 =
+        engine.KeySchedule.messageKey(
+          engine.KeySchedule.chain0(contentRoot, "Initiator", "Responder")
+        )
       val nonce = Array.tabulate(aead.Aead.NonceBytes)(i => (i * 11 + 1).toByte)
-      val wire = nonce ++ aead.Aead.seal(aeadKey, nonce, inner)
+      val wire = nonce ++ aead.Aead.seal(msgKey0, nonce, inner)
       val aliceStore = new EnclaveObliviousStore(storeStub, attested = false)
       assert(aliceStore.write(aliceToken, wire).isRight)
       // Alice signals Bob's notification under the PER-BUDDY bit Bob's engine checks.
-      val buddyBit = engine.NotifyDigest.bit(pairKey)
+      val buddyBit = engine.NotifyDigest.bit(addrKey)
       val sealer = DevNotificationServer(notifyKey)
       val aliceNotify = new EnclaveNotificationClient(notifyStub, attested = false)
       assert(aliceNotify.signal(1L, sealer.issueToken(1L, buddyBit, bobLabel)).isRight)

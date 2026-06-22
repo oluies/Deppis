@@ -129,7 +129,7 @@ sequenceDiagram
     participant NT as PING notify (obsd)
 
     Note over AE: sendMessage(pairId, "see you at dusk") → queued
-    AE->>AE: tick(r): pad to 228B inner, then<br/>wire = nonce(12) ‖ AEAD(key, inner) = 256B<br/>key = HMAC(pairKey,"aead/Initiator/Responder/0")
+    AE->>AE: tick(r): pad to 228B inner, then<br/>wire = nonce(12) ‖ AEAD(key, inner) = 256B<br/>key = forward-secret ratchet message key (KeySchedule)
     AE->>AE: token = PRF(pairKey, Initiator, Responder, counter=0)
     AE->>ST: write(token, wire)
     Note over AE,ST: the store learns neither sender nor receiver
@@ -215,16 +215,20 @@ round, and cannot tell an active conversation from an idle client.
 Everything for a conversation descends from the out-of-band `pairKey`. Domain-separated HMAC keeps
 the **public** retrieval token cryptographically independent from the **secret** AEAD key.
 
+The content key now comes from a **forward-secret symmetric ratchet** (`KeySchedule`): `pairKey` is
+split into a retained `addrKey` (addressing) and a `contentRoot` (wiped after seeding), so a
+device-state compromise cannot recover past message keys.
+
 ```mermaid
 flowchart TB
-    secret["shared secret — out of band"] -->|"Handshake.init / HMAC"| pk["pairKey — per buddy pair"]
-    pk -->|"HMAC(pairKey, aead/from/to/counter)"| ak["AEAD frame key<br/>ChaCha20-Poly1305, 32B"]
-    pk -->|"PRF(pairKey, sender, receiver, counter)"| tok["retrieval token<br/>public, non-recurrent"]
-    pk -->|"PRF(pairKey, notify-bit) mod 512"| bit["notify bit — one-hot, 0..511"]
+    secret["shared secret — out of band"] -->|"Handshake.init / HMAC"| pk["pairKey — wiped after the split"]
+    pk -->|"HMAC(pairKey, addr-root)"| addr["addrKey — retained (addressing root)"]
+    pk -->|"HMAC(pairKey, content-root)"| croot["contentRoot — wiped after seeding"]
+    addr -->|"PRF(addrKey, sender, receiver, counter)"| tok["retrieval token<br/>public, non-recurrent"]
+    addr -->|"PRF(addrKey, notify-bit) mod 512"| bit["notify bit — one-hot, 0..511"]
+    croot -->|"chain0 then ratchet: HMAC(CK, msg-key)"| ak["AEAD message key<br/>ChaCha20-Poly1305, 32B<br/>forward-secret chain, old CK wiped"]
 
-    content["plaintext message"] -->|"double ratchet (libsignal)"| ct["ratchet ciphertext<br/>forward secrecy / PCS"]
-    ct -.->|"roadmap: ratchet output is the inner payload"| inner["inner = pad(payload, 228B)"]
-    content -.->|"current: plaintext framed directly"| inner
+    content["plaintext message"] -->|"pad(payload, 228B)"| inner["inner = 228B block"]
     inner -->|"AEAD.seal(ak, nonce, inner)"| wire["wire frame — 256B"]
 
     nkey["server notify key<br/>real: enclave attested pubkey"] -->|"AEAD-seal(roundId, bit, label)"| ntok["sealed notify token"]
@@ -235,9 +239,9 @@ flowchart TB
 | Layer | Primitive | Key | Purpose |
 |---|---|---|---|
 | Pairing / X3DH | keyed HMAC (Blake2b/HMAC-SHA256) | shared secret | derive `pairId`, `safetyNumber`, `pairKey` |
-| Content E2E | libsignal **double ratchet** | per-session ratchet | forward secrecy & post-compromise security *(vetted component; integration into the frame path is a tracked roadmap item — the engine currently frames plaintext directly)* |
-| Frame encryption | **ChaCha20-Poly1305** (IETF) | `HMAC(pairKey,"aead/{from}/{to}/{counter}")` | confidential, authenticated, per-message frame |
-| Addressing | keyed-HMAC **PRF** | `pairKey` (separate domain) | unlinkable, **non-recurrent** retrieval token |
+| Content forward secrecy | **symmetric KDF ratchet** (`KeySchedule`, HMAC-SHA256; cross-platform JVM+JS) | per-direction content chain, seeded from a wiped `contentRoot` | per-message key with **forward secrecy** — a device compromise can't decrypt prior messages. Post-compromise security (DH ratchet) is a follow-up needing cross-platform X25519; the vetted libsignal `RatchetParty` in `crypto` is the JVM reference. |
+| Frame encryption | **ChaCha20-Poly1305** (IETF) | the ratchet message key (32 B) | confidential, authenticated, per-message frame |
+| Addressing | keyed-HMAC **PRF** | retained `addrKey` (separate root from content) | unlinkable, **non-recurrent** retrieval token (metadata; not forward-secret by design) |
 | Notification | AEAD-sealed one-hot token | server notify key | "mail this round" with no sender identity |
 | Cover traffic | random per-session `coverKey` | ephemeral | carrier frames indistinguishable from real |
 

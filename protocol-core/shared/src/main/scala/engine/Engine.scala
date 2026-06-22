@@ -87,9 +87,32 @@ final class Engine(
   // runtime/book). Stays 0 in correct operation; a non-zero value means an internal invariant broke.
   private var orphanedDrops = 0L
 
-  private final class BuddyRuntime(val role: BuddyRole):
+  private final class BuddyRuntime(val role: BuddyRole, contentRoot: Array[Byte]):
     var sendCounter: Long = 0L
     var recvCounter: Long = 0L
+    // Forward-secret content chains (the symmetric ratchet), direction-separated so the two parties'
+    // chains line up: Alice's send chain == Bob's recv chain for the same direction.
+    private var sendCK: Array[Byte] =
+      KeySchedule.chain0(contentRoot, role.toString, peerRole(role).toString)
+    private var recvCK: Array[Byte] =
+      KeySchedule.chain0(contentRoot, peerRole(role).toString, role.toString)
+
+    /** Message key for the next send WITHOUT advancing — a retry reuses the same chain position. */
+    def sendKey(): Array[Byte] = KeySchedule.messageKey(sendCK)
+
+    /** Ratchet the send chain forward and wipe the old chain key — call after a confirmed submit. */
+    def advanceSend(): Unit =
+      val old = sendCK
+      sendCK = KeySchedule.nextChain(old)
+      wipe(old)
+
+    /** Message key for a received frame, ratcheting + wiping (each frame is consumed exactly once). */
+    def nextRecvKey(): Array[Byte] =
+      val mk = KeySchedule.messageKey(recvCK)
+      val old = recvCK
+      recvCK = KeySchedule.nextChain(old)
+      wipe(old)
+      mk
 
   private def peerRole(r: BuddyRole): BuddyRole = r match
     case BuddyRole.Initiator => BuddyRole.Responder
@@ -118,28 +141,36 @@ final class Engine(
   private val WireSize = frame.Frame.Size // 256, the store's fixed size
   private val InnerSize = WireSize - aead.Aead.NonceBytes - aead.Aead.TagBytes // 228
 
-  // The per-message AEAD key is directional + non-recurrent, derived from the SAME pair key as the
-  // retrieval token — but under a SEPARATE "aead/" HMAC domain. This domain separation is
-  // load-bearing: the retrieval token is PUBLIC (the store observer sees it), so if the secret AEAD
-  // key shared the token's `info` it would equal an observable value and leak. Keep the two domains
-  // distinct — never unify them.
-  private def aeadKey(
-      pairKey: Array[Byte],
-      from: BuddyRole,
-      to: BuddyRole,
-      counter: Long
-  ): Array[Byte] =
-    kdf.Kdf.hmacSha256(pairKey, s"aead/${from.toString}/${to.toString}/$counter".getBytes(UTF_8))
+  // The per-message AEAD key now comes from the forward-secret content ratchet (`BuddyRuntime`
+  // sendKey/nextRecvKey, via `KeySchedule`), NOT a static derivation from the pair key. The retrieval
+  // token + notify bit derive from the retained `addrKey` (a separate root); the content chain root is
+  // wiped, so a device-state compromise cannot recover past message keys (forward secrecy).
 
-  /** Encrypt a 228-byte inner block into a 256-byte wire frame (`nonce ‖ ciphertext‖tag`). */
+  /** Zero a key buffer in place (cross-platform; the forward-secrecy boundary depends on wiping old
+    * chain keys so they cannot be recovered from memory). */
+  private def wipe(a: Array[Byte]): Unit =
+    var i = 0
+    while i < a.length do
+      a(i) = 0.toByte
+      i += 1
+
+  /** Encrypt a 228-byte inner block into a 256-byte wire frame (`nonce ‖ ciphertext‖tag`). Wipes the
+    * per-message key after use — it is a fresh, non-retained buffer, so zeroing it keeps a spent
+    * message key from lingering on the heap (consistent with the chain-key wiping). */
   private def encryptFrame(key: Array[Byte], inner: Array[Byte]): Array[Byte] =
     val nonce = random.Rand.bytes(aead.Aead.NonceBytes)
-    nonce ++ aead.Aead.seal(key, nonce, inner)
+    val ct = aead.Aead.seal(key, nonce, inner)
+    wipe(key)
+    nonce ++ ct
 
-  /** Decrypt a 256-byte wire frame back to the 228-byte inner block; `None` on auth failure. */
+  /** Decrypt a 256-byte wire frame back to the 228-byte inner block; `None` on auth failure. Wipes
+    * the per-message key after use (see `encryptFrame`). */
   private def decryptFrame(key: Array[Byte], wire: Array[Byte]): Option[Array[Byte]] =
-    if wire.length != WireSize then None
-    else aead.Aead.open(key, wire.take(aead.Aead.NonceBytes), wire.drop(aead.Aead.NonceBytes))
+    try
+      if wire.length != WireSize then None
+      else aead.Aead.open(key, wire.take(aead.Aead.NonceBytes), wire.drop(aead.Aead.NonceBytes))
+    finally
+      wipe(key) // wipe on BOTH branches — a wrong-size frame must not leave a spent key behind
 
   /** The current build privacy status. Dev backend ⇒ not private ⇒ the mandatory dev label. */
   def privacyStatus: EngineEvent.PrivacyStatus =
@@ -161,13 +192,22 @@ final class Engine(
     if sharedSecret.isEmpty then Left(EngineError("invalid_arg", "shared secret required"))
     else
       val init = Handshake.init(sharedSecret)
-      val rel = BuddyRelationship(init.pairId, init.safetyNumber, BuddyState.Pending, init.pairKey)
+      // Forward-secrecy root split: derive the retained addressing root (tokens + notify bit) and the
+      // content-chain root, then WIPE the raw pair key so the content root is not recomputable from
+      // anything we keep. `addrKey` cannot derive `contentRoot` (different HMAC branch).
+      val addrKey = KeySchedule.addrKey(init.pairKey)
+      val contentRoot = KeySchedule.contentRoot(init.pairKey)
+      wipe(init.pairKey)
+      val rel = BuddyRelationship(init.pairId, init.safetyNumber, BuddyState.Pending, addrKey)
       book.add(rel) match
         case Right(nb) =>
           book = nb
-          runtime(init.pairId) = BuddyRuntime(role) // fixes this buddy's token direction
-          Right(AddBuddyResult(init.pairId, init.safetyNumber)) // no pairKey
+          runtime(init.pairId) = BuddyRuntime(role, contentRoot) // seeds the per-direction chains
+          wipe(contentRoot) // chains are seeded; the content root must not linger
+          Right(AddBuddyResult(init.pairId, init.safetyNumber)) // no key material
         case Left(reason) =>
+          wipe(contentRoot)
+          wipe(addrKey) // not retained in a relationship on this path either
           // reason is a fixed, non-secret string ("duplicate buddy" / "buddy cap 512 reached").
           Left(EngineError("add_failed", reason))
 
@@ -247,16 +287,15 @@ final class Engine(
               case Some((pid, q)) =>
                 (runtime.get(pid), book.get(pid)) match
                   case (Some(rt), Some(rel)) =>
-                    // Encrypt the inner frame to a 256-byte wire frame (real ⇒ per-message AEAD key).
-                    val wire = encryptFrame(
-                      aeadKey(rel.pairKey, rt.role, peerRole(rt.role), rt.sendCounter),
-                      q.head
-                    )
+                    // Encrypt the inner frame under the current forward-secret content-chain key
+                    // (peek, no advance — a failed submit must retry at the same chain position).
+                    val wire = encryptFrame(rt.sendKey(), q.head)
                     if t.submit(
-                        dirToken(rel.pairKey, rt.role, peerRole(rt.role), rt.sendCounter),
+                        dirToken(rel.addrKey, rt.role, peerRole(rt.role), rt.sendCounter),
                         wire
                       )
                     then
+                      rt.advanceSend() // ratchet forward + wipe the old chain key only on a real send
                       rt.sendCounter += 1
                       dropHead(pid, q)
                       realSubmitted = true
@@ -286,7 +325,7 @@ final class Engine(
                 book.get(pid).filter(_.state == BuddyState.Confirmed).map(rel => (pid, rt, rel))
               }
               .filter { case (_, _, rel) =>
-                NotifyDigest.isSet(digest, NotifyDigest.bit(rel.pairKey))
+                NotifyDigest.isSet(digest, NotifyDigest.bit(rel.addrKey))
               }
               .sortBy(_._1) // stable order; the cursor below rotates fairly within it
             if signaled.nonEmpty then
@@ -301,10 +340,10 @@ final class Engine(
               // birthday-rate bit COLLISION (a wrong buddy signaled) — so non-recurrence is
               // conditional on collision-freedom, which the T041c bit-lease makes unconditional.
               val c = rt.recvCounter
-              t.retrieve(dirToken(rel.pairKey, peerRole(rt.role), rt.role, c)).foreach { wire =>
+              t.retrieve(dirToken(rel.addrKey, peerRole(rt.role), rt.role, c)).foreach { wire =>
                 rt.recvCounter += 1 // consumed (single-use) ⇒ advance regardless of decode outcome
-                // Decrypt the wire frame with the matching per-message key, then unpad the inner block.
-                decryptFrame(aeadKey(rel.pairKey, peerRole(rt.role), rt.role, c), wire)
+                // Decrypt under the next forward-secret recv-chain key (ratchets + wipes), then unpad.
+                decryptFrame(rt.nextRecvKey(), wire)
                   .flatMap(inner => Frame.unpad(inner, InnerSize).toOption)
                   .foreach(p =>
                     emit(EngineEvent.MessageReceived(pid, new String(p, UTF_8), roundId))
