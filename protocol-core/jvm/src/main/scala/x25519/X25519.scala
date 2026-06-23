@@ -43,7 +43,15 @@ object X25519:
     ka.init(privateFromRaw(privateKey))
     ka.doPhase(publicFromRaw(peerPublic), true)
     val secret = ka.generateSecret()
-    if secret.forall(_ == 0.toByte) then
+    // OR-accumulate every byte before the test (no short-circuit) so the all-zero scan is independent
+    // of byte positions — Constitution II's constant-time discipline, even though the outcome here is
+    // governed by the public, attacker-supplied peer key rather than our private scalar.
+    var acc = 0
+    var i = 0
+    while i < secret.length do
+      acc |= secret(i) & 0xff
+      i += 1
+    if acc == 0 then
       throw new java.security.InvalidKeyException("X25519: degenerate (all-zero) shared secret")
     secret
 

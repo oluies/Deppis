@@ -34,9 +34,21 @@ class X25519JsSpec extends AnyFunSuite:
     assert(aPub.length == X25519.KeyBytes && aPriv.length == X25519.KeyBytes)
     assert(X25519.sharedSecret(aPriv, bPub).sameElements(X25519.sharedSecret(bPriv, aPub)))
 
-  test("a degenerate (all-zero / low-order) peer key is rejected on JS too"):
-    // Mirror of the JVM parity assertion: @noble/curves must throw on the all-zero (small-order) peer
-    // key just as JCA does, so the cross-platform "reject degenerate keys" contract holds under Node.
+  test("every canonical small-order peer key is rejected on JS too"):
+    // Mirror of the JVM parity assertion over the full small-order set: @noble/curves must throw on
+    // each just as JCA does, so the cross-platform "reject low-order keys" contract holds under Node.
     val priv = hex("77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a")
-    val degenerate = new Array[Byte](X25519.KeyBytes) // 32 zero bytes
-    assertThrows[Throwable](X25519.sharedSecret(priv, degenerate))
+    smallOrderPoints.foreach: u =>
+      assertThrows[Throwable](X25519.sharedSecret(priv, hex(u)))
+
+  // Same canonical small-order u-coordinates as the JVM `X25519Spec` (kept local — shared test sources
+  // do not compile into the JS project; see this file's header).
+  private val smallOrderPoints: Seq[String] = Seq(
+    "0000000000000000000000000000000000000000000000000000000000000000",
+    "0100000000000000000000000000000000000000000000000000000000000000",
+    "e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b800",
+    "5f9c95bca3508c24b1d0b1559c83ef5b04445cc4581c8e86d8224eddd09f1157",
+    "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"
+  )
