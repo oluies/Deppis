@@ -33,3 +33,14 @@ class X25519Spec extends AnyFunSuite:
     assert(X25519.sharedSecret(aPriv, bPub).sameElements(X25519.sharedSecret(bPriv, aPub)))
     // distinct pairs ⇒ distinct public keys (sanity)
     assert(!aPub.sameElements(bPub))
+
+  test("a degenerate (all-zero / low-order) peer key is rejected on BOTH platforms"):
+    // Peer public keys arrive in headers and are attacker-controllable. The all-zero u-coordinate is
+    // a small-order point whose contributory check yields the all-zero secret; JCA and @noble/curves
+    // must AGREE to reject it (throw) so the Stage-2 ratchet can treat a bad DH as a carrier frame
+    // uniformly — a divergence here (one throws, one returns zero) would be a cross-platform contract
+    // break the RFC-7748 KAT does not catch. `Throwable` covers JCA's InvalidKeyException and the JS
+    // JavaScriptException alike.
+    val priv = hex("77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a")
+    val degenerate = new Array[Byte](X25519.KeyBytes) // 32 zero bytes
+    assertThrows[Throwable](X25519.sharedSecret(priv, degenerate))

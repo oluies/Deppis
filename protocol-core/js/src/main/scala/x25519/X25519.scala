@@ -27,6 +27,11 @@ object X25519:
   def publicKey(privateKey: Array[Byte]): Array[Byte] =
     Uint8.toBytes(nobleX25519.getPublicKey(Uint8.toJs(privateKey)))
 
-  /** The 32-byte X25519 shared secret between our raw private key and a raw peer public key. */
+  /** The 32-byte X25519 shared secret between our raw private key and a raw peer public key.
+    *
+    * Contract (pinned cross-platform by `X25519Spec`'s parity test): a degenerate / low-order peer
+    * key is REJECTED by throwing, matching the JVM JCA build — `@noble/curves` throws on the all-zero
+    * result. Peer keys are attacker-controllable (they arrive in headers), so both builds must agree;
+    * the Stage-2 ratchet treats a throw as an undecryptable / carrier frame, uniformly. */
   def sharedSecret(privateKey: Array[Byte], peerPublic: Array[Byte]): Array[Byte] =
     Uint8.toBytes(nobleX25519.getSharedSecret(Uint8.toJs(privateKey), Uint8.toJs(peerPublic)))

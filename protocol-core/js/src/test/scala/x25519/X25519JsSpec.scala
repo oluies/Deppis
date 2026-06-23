@@ -4,7 +4,9 @@ import org.scalatest.funsuite.AnyFunSuite
 
 /** X25519 ECDH (Scala.js, @noble/curves) under Node — the SAME RFC 7748 §6.1 vectors the JVM JCA build
   * (`X25519Spec`) produces, proving @noble ≡ JCA byte-for-byte so the double ratchet derives identical
-  * DH shared secrets on both platforms. */
+  * DH shared secrets on both platforms. The JS project's test sources are wired to `js/src/test` only
+  * (`build.sbt`), so shared specs do NOT run under Node — this explicit mirror is how the contract is
+  * pinned on JS, exactly like `AeadJsSpec` / `RandJsSpec`. */
 class X25519JsSpec extends AnyFunSuite:
 
   private def hex(s: String): Array[Byte] =
@@ -31,3 +33,10 @@ class X25519JsSpec extends AnyFunSuite:
     val (bPriv, bPub) = X25519.generateKeyPair()
     assert(aPub.length == X25519.KeyBytes && aPriv.length == X25519.KeyBytes)
     assert(X25519.sharedSecret(aPriv, bPub).sameElements(X25519.sharedSecret(bPriv, aPub)))
+
+  test("a degenerate (all-zero / low-order) peer key is rejected on JS too"):
+    // Mirror of the JVM parity assertion: @noble/curves must throw on the all-zero (small-order) peer
+    // key just as JCA does, so the cross-platform "reject degenerate keys" contract holds under Node.
+    val priv = hex("77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a")
+    val degenerate = new Array[Byte](X25519.KeyBytes) // 32 zero bytes
+    assertThrows[Throwable](X25519.sharedSecret(priv, degenerate))

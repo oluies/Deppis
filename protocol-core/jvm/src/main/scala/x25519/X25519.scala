@@ -29,12 +29,23 @@ object X25519:
   /** The raw public key for a raw private key (deterministic): `X25519(priv, base)`. */
   def publicKey(privateKey: Array[Byte]): Array[Byte] = sharedSecret(privateKey, BasePoint)
 
-  /** The 32-byte X25519 shared secret between our raw private key and a raw peer public key. */
+  /** The 32-byte X25519 shared secret between our raw private key and a raw peer public key.
+    *
+    * Contract (pinned cross-platform by `X25519Spec`'s parity test): a degenerate / low-order peer
+    * key — one whose contributory check fails, i.e. would yield the all-zero secret — is REJECTED by
+    * throwing, on BOTH platforms (JCA raises `InvalidKeyException`; `@noble/curves` throws its own
+    * error). Peer keys arrive in headers and are attacker-controllable, so the two builds must agree:
+    * a caller (the Stage-2 ratchet) treats a throw as an undecryptable / carrier frame, uniformly.
+    * The explicit all-zero check below is a backstop for any JCA provider that returns the zero
+    * secret instead of rejecting it — so the "reject degenerate keys" contract holds regardless. */
   def sharedSecret(privateKey: Array[Byte], peerPublic: Array[Byte]): Array[Byte] =
     val ka = KeyAgreement.getInstance("X25519")
     ka.init(privateFromRaw(privateKey))
     ka.doPhase(publicFromRaw(peerPublic), true)
-    ka.generateSecret()
+    val secret = ka.generateSecret()
+    if secret.forall(_ == 0.toByte) then
+      throw new java.security.InvalidKeyException("X25519: degenerate (all-zero) shared secret")
+    secret
 
   private def privateFromRaw(raw: Array[Byte]): PrivateKey =
     KeyFactory
