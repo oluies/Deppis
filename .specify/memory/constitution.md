@@ -54,6 +54,17 @@ recognized library and never from local code. Rationale: the most expensive and 
 bugs in a privacy system are in primitives; we adopt corecrypto's discipline of trusting
 verified, audited implementations rather than re-deriving them.
 
+**Construction amendment (v1.1.0).** A higher-level protocol *construction* (e.g. a double
+ratchet) MAY be assembled from these vetted primitives when no audited cross-platform
+implementation exists to wrap — provided the construction (a) follows a published
+specification, (b) carries known-answer tests for every primitive it uses, (c) carries
+property tests for its security invariants, and (d) is documented with a threat-model note in
+`specs/.../design/`. This does NOT relax the rule for primitives themselves (key agreement,
+hashing, AEAD, ML-KEM/ML-DSA, OPRF) — those MUST still come from vetted libraries. Rationale:
+the engine is cross-compiled to Scala.js, where no audited double-ratchet library exists; the
+forward-secret symmetric ratchet and the X25519 DH ratchet are therefore assembled from JCA /
+@noble primitives under these safeguards (see `design/dh-ratchet.md`).
+
 ### II. Constant-Time Discipline
 
 All secret-dependent code MUST be constant-time, following corecrypto's rules: no
@@ -143,8 +154,10 @@ above; a floating dependency or a leaked key voids them.
 ## Security & Cryptography Constraints
 
 - **Content cryptography**: a vetted AEAD + KDF stack (ChaCha20-Poly1305, Blake2b) and a
-  Signal-style double ratchet for forward secrecy on content. Wrap an audited ratchet; do
-  not write one from scratch. The keyed PRF for retrieval tokens uses Blake2b or HMAC.
+  Signal-style double ratchet for forward secrecy on content. Wrap an audited ratchet where
+  one exists; where no audited cross-platform ratchet exists (Scala.js), assemble it from
+  vetted primitives under Principle I's construction amendment (KATs + property tests +
+  threat-model doc). The keyed PRF for retrieval tokens uses Blake2b or HMAC.
 - **Post-quantum**: ML-KEM (FIPS 203) for key establishment and ML-DSA (FIPS 204) for
   signatures and key-transparency records, via liboqs / BoringSSL / corecrypto bindings.
   Key agreement runs as a hybrid of X25519 and ML-KEM, so a break in either alone is not
@@ -200,4 +213,12 @@ amendment, propagate changes to `.specify/templates/plan-template.md`,
 `.specify/templates/spec-template.md`, and `.specify/templates/tasks-template.md`, and
 record a Sync Impact Report at the top of this file.
 
-**Version**: 1.0.0 | **Ratified**: 2026-06-18 | **Last Amended**: 2026-06-18
+**Version**: 1.1.0 | **Ratified**: 2026-06-18 | **Last Amended**: 2026-06-23
+
+> **Amendment v1.1.0 (2026-06-23)** — Principle I gains a *construction amendment*: a protocol
+> construction (e.g. a double ratchet) may be assembled from vetted primitives when no audited
+> cross-platform implementation exists to wrap, under KATs + property tests + a threat-model doc.
+> Primitives themselves are still wrap-only. MINOR bump (materially expanded guidance, no principle
+> removed). Motivation: the engine is cross-compiled to Scala.js, where no audited double ratchet
+> exists; this enables the forward-secret symmetric ratchet (shipped) and the X25519 DH ratchet
+> (`design/dh-ratchet.md`). The X25519 primitive itself remains wrap-only (JVM JCA / @noble/curves).

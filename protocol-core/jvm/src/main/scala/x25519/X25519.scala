@@ -1,0 +1,51 @@
+package x25519
+
+import java.math.BigInteger
+import java.security.interfaces.XECPrivateKey
+import java.security.spec.{NamedParameterSpec, XECPrivateKeySpec, XECPublicKeySpec}
+import java.security.{KeyFactory, KeyPairGenerator, PrivateKey, PublicKey, SecureRandom}
+import javax.crypto.KeyAgreement
+
+/** X25519 ECDH (JVM) over JCA (`KeyAgreement "X25519"`, JDK 11+, RFC 7748). The DH primitive for the
+  * double ratchet's post-compromise security. Raw 32-byte little-endian keys throughout, byte-for-byte
+  * identical to the Scala.js `@noble/curves` build — pinned by a cross-platform RFC 7748 KAT
+  * (`X25519Spec`). A vetted primitive (Constitution I): the curve arithmetic is JCA's, never local. */
+object X25519:
+  val KeyBytes: Int = 32
+
+  /** u = 9, the X25519 base point; `publicKey(priv) = X25519(priv, base)`. */
+  private val BasePoint: Array[Byte] =
+    val b = new Array[Byte](KeyBytes); b(0) = 9.toByte; b
+
+  /** A fresh `(privateKey, publicKey)` pair, raw 32-byte each (the scalar is clamped by X25519). */
+  def generateKeyPair(): (Array[Byte], Array[Byte]) =
+    // Reuse JCA's keygen for a well-formed scalar, then take the raw scalar; the public key is derived
+    // by the agreement against the base point (so the encoding path is identical on both platforms).
+    val kpg = KeyPairGenerator.getInstance("X25519")
+    kpg.initialize(NamedParameterSpec.X25519, new SecureRandom())
+    val priv = kpg.generateKeyPair().getPrivate.asInstanceOf[XECPrivateKey].getScalar.get
+    (priv, publicKey(priv))
+
+  /** The raw public key for a raw private key (deterministic): `X25519(priv, base)`. */
+  def publicKey(privateKey: Array[Byte]): Array[Byte] = sharedSecret(privateKey, BasePoint)
+
+  /** The 32-byte X25519 shared secret between our raw private key and a raw peer public key. */
+  def sharedSecret(privateKey: Array[Byte], peerPublic: Array[Byte]): Array[Byte] =
+    val ka = KeyAgreement.getInstance("X25519")
+    ka.init(privateFromRaw(privateKey))
+    ka.doPhase(publicFromRaw(peerPublic), true)
+    ka.generateSecret()
+
+  private def privateFromRaw(raw: Array[Byte]): PrivateKey =
+    KeyFactory
+      .getInstance("X25519")
+      .generatePrivate(new XECPrivateKeySpec(NamedParameterSpec.X25519, raw.clone()))
+
+  private def publicFromRaw(raw: Array[Byte]): PublicKey =
+    // raw is the little-endian u-coordinate; clear the high (sign) bit per RFC 7748, then big-endian.
+    val u = raw.clone()
+    u(KeyBytes - 1) = (u(KeyBytes - 1) & 0x7f).toByte
+    val uInt = new BigInteger(1, u.reverse)
+    KeyFactory
+      .getInstance("X25519")
+      .generatePublic(new XECPublicKeySpec(NamedParameterSpec.X25519, uInt))
