@@ -1,0 +1,115 @@
+theory DeppisDoubleRatchet
+/*
+  Symbolic (Dolev-Yao) model of the Deppis DH double ratchet with header encryption.
+  Design under analysis: ../dh-ratchet.md   Implementation: engine.DoubleRatchet (Scala).
+
+  ============================================================================================
+  VERIFICATION STATUS: AUTHORED — NOT YET MACHINE-CHECKED.
+  Tamarin is not installed in this repo's CI; this file has been written against Tamarin's
+  syntax but has NOT been run through `tamarin-prover`. Treat it as a reviewed DRAFT / starting
+  artifact for the formal security analysis, expected to need refinement (oracles / reuse
+  lemmas) before the lemmas close automatically. See README.md for scope, run recipe, and the
+  honest list of limitations. Do not cite it as a completed proof.
+  ============================================================================================
+
+  Scope (trace properties; bounded to make the analysis tractable):
+    * Bootstrap from a shared content root (the handshake secret), then ONE DH ratchet step
+      each direction: A->B (Alice's first send chain) and B->A (Bob's reply chain). This is the
+      minimal trace that exhibits post-compromise healing (a fresh DH step after a reveal).
+    * Header UNLINKABILITY is an indistinguishability property — it needs Tamarin's
+      observational-equivalence (diff) mode, NOT the trace lemmas below. It is OUT OF SCOPE here
+      and tracked separately in README.md.
+
+  Idealized primitives (the assumption we are allowed to make — Constitution I delegates the
+  primitives to vetted libraries, so the symbolic model treats them as perfect):
+    * X25519           -> the built-in Diffie-Hellman theory ('g'^x, (g^x)^y = (g^y)^x).
+    * HMAC-SHA256 KDFs -> free functions kdfRK/2, kdfCK/1, msgK/1, hdrK/1 (one-way, collision-free).
+    * ChaCha20-Poly1305 -> the symmetric-encryption built-in (senc/sdec): perfect AEAD.
+*/
+
+begin
+
+builtins: diffie-hellman, symmetric-encryption
+
+functions: kdfRK/2, kdfCK/1, msgK/1, hdrK/1
+
+/* ---------------------------------------------------------------------------------------------
+   Bootstrap. A shared content root ~cr is established out of band (modeled as fresh and secret;
+   the handshake that produces it is analysed elsewhere). Both parties derive the same root key
+   and the responder's deterministic bootstrap ratchet key  bpriv = kdfCK(~cr)  (public Bpub).
+   --------------------------------------------------------------------------------------------- */
+rule Bootstrap:
+    [ Fr(~cr) ]
+  --[ Root(~cr) ]->
+    [ !CR(~cr)                              // shared content root (persistent, both sides)
+    , A_init(~cr)                           // Alice ready to start
+    , B_init(~cr) ]                         // Bob ready to receive
+
+/* ---------------------------------------------------------------------------------------------
+   Step 1 — Alice (initiator) sends m1. She picks a FRESH ratchet key ~a, runs the first DH step
+   against the responder's bootstrap public key, derives the send chain, and AEAD-seals the header
+   (under a header key) and the message (under the message key). RK0 = kdfRK(cr,'root0').
+   --------------------------------------------------------------------------------------------- */
+rule A_send1:
+    [ A_init(~cr), Fr(~a), Fr(~m1) ]
+  --[ Send(~m1), SecretMsg(~m1), UseCK(kdfRK(kdfRK(~cr,'root0'), ('g'^kdfCK(~cr))^~a)) ]->
+    [ Out( senc{ '1', 'g'^~a }( hdrK(kdfRK(kdfRK(~cr,'root0'), ('g'^kdfCK(~cr))^~a)) ) )   // sealed header
+    , Out( senc{ ~m1 }( msgK(kdfRK(kdfRK(~cr,'root0'), ('g'^kdfCK(~cr))^~a)) ) )           // sealed body
+    , A_sent1(~cr, ~a, ~m1) ]
+
+/* Bob receives m1: he reconstructs the same DH (bpriv = kdfCK(cr); shared = Apub^bpriv), derives
+   the same chain, and (the DH step) generates his OWN fresh reply key ~b for the next chain. */
+rule B_recv1:
+    [ B_init(~cr)
+    , In( senc{ '1', Apub }( hdrK(kdfRK(kdfRK(~cr,'root0'), Apub^kdfCK(~cr))) ) )
+    , In( senc{ m1 }( msgK(kdfRK(kdfRK(~cr,'root0'), Apub^kdfCK(~cr))) ) )
+    , Fr(~b) ]
+  --[ Recv(m1), UseCK(kdfRK(kdfRK(~cr,'root0'), Apub^kdfCK(~cr))) ]->
+    [ B_replyready(~cr, Apub, ~b) ]
+
+/* ---------------------------------------------------------------------------------------------
+   Step 2 — Bob replies m2 on his fresh chain (RK advanced by the SECOND DH: shared2 = Apub^b).
+   This is the healing step: ~b is fresh randomness an attacker who saw only step-1 state cannot
+   know.  RK1 = kdfRK(RK0, shared1); RK2 = kdfRK(RK1, shared2).
+   --------------------------------------------------------------------------------------------- */
+rule B_send2:
+    let rk1 = kdfRK(kdfRK(~cr,'root0'), Apub^kdfCK(~cr))
+        rk2 = kdfRK(rk1, Apub^~b)
+    in
+    [ B_replyready(~cr, Apub, ~b), Fr(~m2) ]
+  --[ Send(~m2), SecretMsg(~m2), Heal(~b), UseCK(rk2) ]->
+    [ Out( senc{ '1', 'g'^~b }( hdrK(rk2) ) )
+    , Out( senc{ ~m2 }( msgK(rk2) ) )
+    , B_sent2(~cr, ~b, ~m2) ]
+
+/* ---------------------------------------------------------------------------------------------
+   Adversary reveal rules. The Dolev-Yao adversary already controls the network (In/Out). These
+   add STATE compromise so we can phrase forward secrecy and post-compromise security: revealing a
+   chain key used at one position must not break secrecy at other positions.
+   --------------------------------------------------------------------------------------------- */
+rule Reveal_CK:
+    [ A_sent1(~cr, ~a, ~m1) ]
+  --[ RevealCK(kdfRK(kdfRK(~cr,'root0'), ('g'^kdfCK(~cr))^~a)) ]->
+    [ Out( kdfRK(kdfRK(~cr,'root0'), ('g'^kdfCK(~cr))^~a) ) ]   // leak the step-1 chain root
+
+/* =============================================================================================
+   LEMMAS — what the model must establish (map 1:1 to dh-ratchet.md §9 "threat model delta").
+   ============================================================================================= */
+
+// Sanity: the protocol can run to completion (a message is both sent and received).
+lemma executable:
+  exists-trace
+  "Ex m #i #j. Send(m)@i & Recv(m)@j & i < j"
+
+// SECRECY: a message marked secret is never learned by the adversary, ABSENT a reveal of the
+// very chain key that protected it.
+lemma message_secrecy:
+  "All m #i. SecretMsg(m)@i ==> ( not (Ex #k. K(m)@k) ) | (Ex ck #r. RevealCK(ck)@r)"
+
+// FORWARD SECRECY: revealing the step-1 chain key does NOT reveal the step-2 message — the
+// healing DH (~b, fresh) re-keys the root, so a past-state compromise cannot read future content.
+lemma forward_secrecy_and_pcs:
+  "All m2 #s. (Send(m2)@s & (Ex b #h. Heal(b)@h & h < s))
+              ==> not (Ex #k. K(m2)@k)"
+
+end
