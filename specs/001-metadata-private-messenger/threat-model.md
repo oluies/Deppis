@@ -105,6 +105,15 @@ The operator of the message store — the box that holds frames addressed by ret
 | **Single-use** | A presented token serves at most once; a replayed/wrong token retrieves nothing and leaves no residue (FR-014) | Same protocol guarantee; access-pattern leakage is the gap |
 
 The store **never learns sender or receiver** in Phase C — that is the core of the PONG design.
+
+> **Which-buddy anonymity (SC-002), machine-checked.** `engine.AnonymitySpec` pins the engine-level
+> property the store host's view rests on: with `N` confirmed buddies and one communicating, the host's
+> read-token trace is **indistinguishable** across all `N` "which buddy is active" worlds — identical
+> shape (one read/round, fixed token length), non-recurrent across every buddy and round (no
+> clustering), and key-dependent (two buddies' tokens at the same position differ unpredictably), over a
+> channel proven still to deliver. Identical observable ⇒ the host's best guess is the `1/N` prior. The
+> store adding no distinguisher is obsd's oblivious selftest (T050/T052); the notify host's anonymity is
+> obsd's oblivious aggregation (T053).
 The dev store learns access patterns and is therefore labeled non-private.
 
 ### 3.3 PING notify operator (notification service)
