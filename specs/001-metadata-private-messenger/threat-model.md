@@ -142,7 +142,7 @@ An adversary who **fully compromises a user's device** and captures its current 
 
 | | Phase C (attested) | Dev build today |
 |---|---|---|
-| **Past message contents** | CANNOT decrypt messages from before the compromise: **forward secrecy** via the in-path symmetric ratchet (`KeySchedule` — per-message content keys from a one-way chain seeded by a wiped `contentRoot`; old chain keys are wiped) (FR-013, SC-007, Constitution §Security) | Forward secrecy is a protocol/crypto property and holds independent of the privacy backend, and is now live in the frame path. The DH-ratchet half (post-compromise security) is still a roadmap item — it needs a cross-platform X25519 primitive (ARCHITECTURE §7). The addressing layer (retrieval tokens / notify bits, derived from the retained `addrKey`) is metadata the store already sees and is not forward-secret by design. |
+| **Past message contents** | CANNOT decrypt messages from before the compromise: **forward secrecy** via the in-path content ratchet (per-message keys from a one-way chain; old keys wiped) (FR-013, SC-007, Constitution §Security) | Forward secrecy is live in the frame path and holds independent of the privacy backend. The **DH-ratchet half (post-compromise security) is now also in-path** — `engine.DoubleRatchet`, a Signal-style double ratchet with header encryption assembled from vetted primitives (X25519/HMAC/ChaCha20-Poly1305) under the Constitution I construction amendment; each DH step mixes fresh randomness, so after a compromise the first uncompromised step re-secures the session (design `dh-ratchet.md`). It is hand-assembled crypto pending human security review, so like everything it ships behind the `DEV, NO METADATA PRIVACY` label. The addressing layer (retrieval tokens / notify bits, from the retained `addrKey`) is metadata the store already sees and is not forward-secret/PCS by design. |
 | **Past contact list** | CANNOT reconstruct contacts the user had before the compromise window (SC-007) | Same caveat as above |
 | **Present and future** | **CAN** read everything the live device can: current conversations, the current buddy list, and can impersonate the user going forward. No design hides a conversation from the endpoint participating in it | CAN, same |
 | **Other users** | CANNOT, from one compromised endpoint, recover *other* users' graphs — those derive from key material that endpoint never held | CANNOT (no cross-user key material on the device) |
@@ -193,7 +193,7 @@ flowchart TB
   operators (and anyone who compromises them) **can** observe access patterns. The protocol-level
   properties that live in `protocol-core` — uniform frame shape (FR-012/FR-015a), single-use
   tokens (FR-014), domain-separated keys, receiver-issued one-hot notify (FR-003/FR-004/FR-015),
-  and content forward secrecy (FR-013, modulo the tracked ratchet-into-frame-path roadmap item) —
+  and content forward secrecy + post-compromise security (FR-013, the in-path DH double ratchet) —
   are present regardless of backend, but they **do not, by themselves, hide access patterns** from
   a server that records them.
 - No metadata-privacy property may be advertised until the real Phase C backend and its

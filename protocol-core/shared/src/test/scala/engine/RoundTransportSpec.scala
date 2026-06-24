@@ -202,6 +202,32 @@ class RoundTransportSpec extends AnyFunSuite:
     assert(carrierWire.exists(_ != 0), "carrier frame must be encrypted (not all-zero)")
     assert(!realWire.sameElements(carrierWire))
 
+  test("bidirectional delivery: the responder replies after receiving (DH-ratchet ping-pong E2E)"):
+    val (alice, bob, pairId, ta, tb) = sharedPair()
+    // Initiator sends first; the responder cannot send until it has received (initiator-sends-first).
+    assert(bob.sendMessage(pairId, "too early") == Right(1)) // queues, but bob can't send it yet
+    // Bob can't send before receiving ⇒ a CARRIER round (its one store write is a cover frame, so the
+    // trace is uniform); the message is held, not lost.
+    assert(
+      bob.tick(0).toOption.exists(_.carrier),
+      "responder's held message yields a carrier round"
+    )
+    // Alice → Bob.
+    alice.sendMessage(pairId, "hi bob"); alice.tick(1)
+    tb.signalMail(pairKeyOf("shared")); bob.tick(2)
+    assert(msgs(bob) == Seq("hi bob"))
+    // Now bob's receiving DH step has opened a sending chain — its held reply now flows back.
+    bob.tick(3)
+    ta.signalMail(pairKeyOf("shared")); alice.tick(4)
+    assert(msgs(alice) == Seq("too early"))
+    // A fresh reply both ways keeps the ping-pong (and the DH ratchet healing) going.
+    bob.sendMessage(pairId, "hi alice"); bob.tick(5)
+    ta.signalMail(pairKeyOf("shared")); alice.tick(6)
+    assert(msgs(alice) == Seq("hi alice"))
+    alice.sendMessage(pairId, "see you"); alice.tick(7)
+    tb.signalMail(pairKeyOf("shared")); bob.tick(8)
+    assert(msgs(bob) == Seq("see you"))
+
   test("MULTI-BUDDY fetch is non-recurrent: read exactly the signaled buddy (T041b, FR-014)"):
     // Bob has two confirmed buddies A and B. Only B is sending. Each round, the digest signals B's
     // bit (B has mail) and never A's. Bob reads B's (advancing, fresh) real token on signaled rounds
