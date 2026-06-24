@@ -1,8 +1,10 @@
 # Design: X25519 DH ratchet — post-compromise security for the content path
 
-**Status:** design (Stage 2 spec). Stage 1 — the X25519 primitive seam (`x25519.X25519`, RFC 7748
-KATs, `@noble/curves` dep) and the Constitution amendment that authorizes this construction — has
-shipped. This document is the contract Stage 2 (the state machine) is built and reviewed against.
+**Status:** IMPLEMENTED. Stage 1 (the `x25519.X25519` primitive seam, RFC 7748 KATs, `@noble/curves`
+dep, and the Constitution amendment) shipped in #45. Stage 2 — the `engine.DoubleRatchet` state
+machine, wired into the engine's message path, property-tested on JVM + Node — is this PR. This
+document is both the original design and the as-built contract; where the implementation refined the
+design (the header-nonce handling in §6) the text below has been corrected to match the code.
 
 **Constitution basis:** Principle I, *construction amendment v1.1.0* (2026-06-23). No audited
 cross-platform double ratchet exists to wrap (libsignal-client is JVM-only native; nothing exists for
@@ -117,16 +119,26 @@ X3DH prekey round, we **bootstrap deterministically** from it:
    `DHseed = HMAC(contentRoot, "dr/bootstrap-ratchet")`, then `DHs(responder) = X25519` keypair from
    `DHseed` (clamped). The initiator learns `DHr = X25519.publicKey(DHseed)` the same way — so it can
    send immediately, no round trip.
-2. `RK₀ = HMAC(contentRoot, "dr/root0")`; initial header keys
-   `HKs/HKr/NHKs/NHKr = HMAC(contentRoot, "dr/hdr/<role>/<dir>")`. Both sides compute the same four.
+2. `RK₀ = HMAC(contentRoot, "dr/root0")`; two shared header keys
+   `HKa = HMAC(contentRoot, "dr/hdr/a")` (initiator's first send / responder's first recv) and
+   `NHKb = HMAC(contentRoot, "dr/hdr/b")` (responder's next header key). These seed the four header-key
+   slots exactly as the published header-encryption init does: initiator `HKs=HKa, NHKr=NHKb`;
+   responder `NHKr=HKa, NHKs=NHKb` (others `None` until the first DH step).
 3. The initiator performs the **first DH ratchet step immediately** with a *fresh random* `DHs`,
    sealing its real public key in the (encrypted) header. From that first step on, every ratchet
    secret is fresh randomness — that is where PCS healing comes from. The deterministic bootstrap key
-   is only ever used to seal/open the very first header and is then ratcheted away.
+   is only ever used to open the initiator's very first header and is then ratcheted away.
 
 This keeps the security property that matters — **healing depends on fresh randomness, not on the
 bootstrap secret** — while avoiding an interactive prekey protocol the symmetric pairing model does
 not have.
+
+> **Initiator sends first.** A consequence of the standard double ratchet (and this bootstrap): the
+> responder has no sending chain until it has *received* the initiator's first frame (which runs its DH
+> step and opens a sending chain). The engine therefore HOLDS a responder's queued messages — each such
+> round is an ordinary carrier (one cover store write, message retained) — until its first receive, then
+> they flow. In a pairing the initiator is whoever started the add-friend flow. (`RoundTransportSpec`
+> exercises exactly this: a responder queues, waits, receives, then its held reply is delivered.)
 
 > Security note: because the bootstrap ratchet key is derived from `contentRoot`, the *first* chain is
 > only as forward-secret as the handshake (same as today). PCS and full FS kick in at the first random
@@ -145,18 +157,22 @@ two AEADs — safe because `HK` and `MK` are independent keys (ChaCha20-Poly1305
 requirement is per-key):
 
 ```
-256-byte wire frame:
-  nonce(12) ‖ AEAD(HK, header)(52) ‖ AEAD(MK, inner)(192)
-  where header   = DHs.pub(32) ‖ PN(2) ‖ Ns(2)        = 36 plaintext  → +16 tag = 52
-        inner    = len(2) ‖ payload ‖ zero-pad         = 176 plaintext → +16 tag = 192
-  ⇒ maxPayload = 174 bytes   (was 226)
+256-byte wire frame (as built — engine.DoubleRatchet):
+  nonce(12) ‖ AEAD(HK, header)(56) ‖ AEAD(MK, inner)(188)
+  where header   = DHs.pub(32) ‖ PN(4) ‖ Ns(4)        = 40 plaintext  → +16 tag = 56
+        inner    = len(2) ‖ payload ‖ zero-pad         = 172 plaintext → +16 tag = 188
+  ⇒ maxPayload = 170 bytes   (was 226)
 ```
 
-The header nonce is **derived from `Ns`** (`nonce_hdr = LE(Ns) ‖ 0…`), not random: `HK` is constant
-across a whole sending chain, so a random 96-bit nonce would risk a birthday collision over a long
-chain; `Ns` is unique per message within the chain, guaranteeing no `HK`-nonce reuse. The message
-nonce is the random frame `nonce` (MK is already unique per message, so reuse is impossible). Both are
-recoverable by the receiver from the same frame bytes / decrypted header.
+**Nonce (corrected from the original draft).** The single 12-byte frame `nonce` is stored in the clear
+and reused across BOTH AEADs — safe because `HK` and `MK` are independent keys (nonce-uniqueness is
+per-key). The original draft proposed deriving the *header* nonce from `Ns`; that is **circular** — the
+receiver needs the nonce to open the header, but `Ns` lives *inside* the encrypted header, so it cannot
+be known before decryption. A stored random nonce is therefore used. Over a sending chain `HK` sees
+random 96-bit nonces, whose birthday-collision probability is negligible for any realistic chain length
+(`n²/2⁹⁶`); and `MK` is unique per message regardless, so the message AEAD is safe unconditionally.
+Counters are 4 bytes (not 2) so a chain can never silently overflow them — costing 4 payload bytes
+(174 → 170), a deliberate robustness trade.
 
 **Receiver flow per frame** (constant-time on the secret-dependent branches — Constitution II):
 1. Trial-open `AEAD(HKr, …)`. Success ⇒ same DH epoch: read `PN`, `N`; if `N > Nr` skip+stash the
@@ -168,7 +184,14 @@ recoverable by the receiver from the same frame bytes / decrypted header.
 4. Else the frame is not for us / undecryptable ⇒ treated exactly like a carrier (no error that varies
    on content; matches the current `decryptFrame ⇒ None` path).
 
-The ≈226→174 payload shrink is acceptable for chat text. If a future payload needs more room, the
+**Atomic receive.** The sealed header and sealed message are authenticated under INDEPENDENT keys
+(`HK` vs `MK`, no AAD cross-binding), so a valid header with a tampered body must not advance the
+ratchet — otherwise an active attacker could flip one body bit to consume a ratchet position. The
+implementation therefore derives the frame's `MK` on a SCRATCH copy of the state, opens the body
+FIRST, and only replays the real mutations (DH step, skips, counter/key wipes) once the body AEAD
+verifies; a failure leaves the ratchet untouched (the no-mutation-on-undecryptable invariant).
+
+The 226→170 payload shrink is acceptable for chat text. If a future payload needs more room, the
 documented relaxation is to lift the per-frame plaintext cap by spanning multiple store frames at the
 transport layer (out of scope here); the ratchet format does not change.
 
@@ -177,8 +200,11 @@ transport layer (out of scope here); the ratchet format does not change.
 ## 7. Skipped / out-of-order keys — bounded
 
 Out-of-order and dropped frames are normal (the store is a mailbox; carrier rounds interleave). On a
-gap of `N - Nr` messages the receiver derives and **stashes** the intermediate `MK`s in `MKSKIPPED`,
-keyed by `(receiving-header-epoch, N)`. Bounds (DoS-resistant, like libsignal):
+gap of `N - Nr` messages the receiver derives and **stashes** the intermediate `MK`s, grouped by
+receiving-chain **epoch** — each epoch holds its header key in a **wipeable byte array** (not a hex
+`String`, which the JVM cannot zero) and an `N → MK` map; a drained or evicted epoch has its header key
+wiped, so no retired header key lingers un-erasably (a metadata-unlinkability concern). Bounds
+(DoS-resistant, like libsignal):
 - **`MAX_SKIP = 1000`** keys per chain step — a header claiming a larger jump is rejected as a carrier
   (no memory blow-up, no distinguishable error).
 - **`MAX_SKIP_CHAINS`** retained receiving epochs — oldest evicted FIFO; its stashed keys are wiped.
@@ -234,38 +260,46 @@ counters — header ciphertext is uniform random bytes under a key it never hold
 
 ---
 
-## 10. Stage-2 test plan
+## 10. Test plan — as built
 
-Primitive KATs (X25519 RFC 7748) already pass cross-platform (Stage 1). Stage 2 adds, in
-`protocol-core/shared/src/test` (so they run on JVM **and** Node):
+X25519 RFC 7748 KATs pass cross-platform (Stage 1). The ratchet tests live in
+`engine.DoubleRatchetSpec` (JVM, 12 cases) with a Node mirror `engine.DoubleRatchetJsSpec` (5 cases),
+plus the engine-level E2E in `engine.RoundTransportSpec`:
 
-1. **PCS healing (property):** capture `CKs/CKr/HKs/HKr` at message *k*; after one fresh DH step the
-   captured state cannot derive message *k+Δ*'s key. The core PCS assertion.
-2. **Forward secrecy (property):** retained state at message *k* cannot derive any message *< k*
-   (extends the existing symmetric-ratchet FS test across DH steps).
-3. **Out-of-order & skipped:** deliver a chain permuted / with gaps ≤ `MAX_SKIP`; all decrypt. A gap
-   `> MAX_SKIP` is dropped as a carrier (no throw, no distinguishable error).
-4. **Header unlinkability:** the 12-byte+ header-ciphertext region differs across two frames of the
-   *same* sending chain (same `DHs.pub` underneath) — i.e. encryption removes the linking tag. Plus:
-   a third party without `HKr` cannot distinguish a real header region from random.
-5. **Cross-platform parity:** a chain driven on the JVM decrypts on Node and vice-versa (the X25519 ≡
-   contract, now end-to-end through the ratchet).
-6. **Two-engine + `obsd` E2E:** extend `scripts/run-demo.sh` / the round-transport spec so two engines
-   exchange messages across several DH steps through the real oblivious sidecar, asserting healing
-   after a simulated state capture.
-7. **Constant-time trial-decrypt:** assert the non-matching-header path is the same code path as a
-   carrier (structural/property check; Constitution II).
+1. **PCS healing** — ✔ `bidirectional ping-pong heals`: each receive injects a FRESH random ratchet
+   key (observed via `sendingPublicKey` changing every DH step) — the healing mechanism — and every
+   message still decrypts. (Direct state-capture-can't-decrypt is not exposed through the API; the
+   fresh-key observation + FS below is the testable PCS argument.)
+2. **Forward secrecy** — ✔ `replaying a consumed frame returns None` (the spent message key is wiped,
+   so a retained/replayed frame yields nothing), across DH steps via the ping-pong tests.
+3. **Out-of-order & skipped** — ✔ `out-of-order delivery … via skipped keys`, `a missed message across
+   a DH step is recovered`, the `MaxSkip` boundary accept, and the over-`MaxSkip` reject-as-carrier.
+4. **Header unlinkability** — ✔ `header encryption removes the linking tag`: the 56-byte sealed-header
+   region differs across every frame of one sending chain (same `DHs.pub` underneath), and a frame for
+   a different pairing / a garbage frame yields `None`.
+5. **Cross-platform parity** — ✔ the Node mirror re-asserts bootstrap, ping-pong healing, out-of-order,
+   unlinkability, and the carrier path — identical wire format and key schedule on JVM and Node.
+6. **Two-engine E2E** — ✔ `RoundTransportSpec` "bidirectional delivery: the responder replies after
+   receiving" drives two engines over the shared store through several DH steps incl. the
+   initiator-sends-first hold. (The `obsd`-backed variant is `scripts/run-demo.sh`, unchanged in shape.)
+7. **Carrier indistinguishability** — ✔ `a carrier / garbage frame returns None and leaves the ratchet
+   intact`: a non-matching header takes the same `None`/drop path as a carrier, no mutation, no
+   distinguishable error (Constitution II).
 
 ---
 
-## 11. Stage-2 implementation surface (forecast, not yet built)
+## 11. Implementation surface — as built
 
-- `engine/DoubleRatchet.scala` (shared) — the state machine: `DHRatchet`, `ratchetEncrypt`,
-  `ratchetDecrypt`, `skipMessageKeys`, header seal/open. Pure over `x25519.X25519`, `kdf.Kdf`,
-  `aead.Aead`; wipes on every retired key (`RK`, `CK`, `MK`, `HK`, stashed keys, DH privs).
-- `engine/Engine.scala` — `BuddyRuntime` holds a `DoubleRatchet` instead of bare `sendCK/recvCK`;
-  `encryptFrame`/`decryptFrame` gain the header section; payload cap 226 → 174.
-- `KeySchedule` — keep (`addrKey` branch unchanged); the content-chain seeding is superseded by the
-  ratchet bootstrap (§5), so `chain0/messageKey/nextChain` either move under `DoubleRatchet` or stay
-  as the labelled-HMAC helpers it calls.
-- No new dependency — `@noble/curves` (Stage 1) is the only addition the ratchet needs.
+- `engine/DoubleRatchet.scala` (shared) — the state machine: `initInitiator`/`initResponder` (bootstrap),
+  `encryptPending`/`commitSend` (peek/commit send), `encrypt` (test-only one-shot), `decrypt`,
+  `dhRatchet`, `skipMessageKeys`, header seal/trial-open. Pure over `x25519.X25519`, `kdf.Kdf`,
+  `aead.Aead`; wipes every retired key (`RK`, `CK`, `MK`, header keys incl. retired ones, stashed
+  keys, DH privates).
+- `engine/Engine.scala` — `BuddyRuntime` holds a `DoubleRatchet` (chosen by role) instead of the bare
+  `sendCK/recvCK`; the send path uses `encryptPending`/`commitSend` with a `canSend` gate (responder
+  holds until it has received), the receive path uses `decrypt`; carrier frames are 256 random bytes;
+  payload cap 226 → 170.
+- `KeySchedule` — unchanged; its `addrKey` branch still roots the public addressing layer. Its
+  `chain0/messageKey/nextChain` symmetric-chain helpers are no longer called by the engine (the ratchet
+  supersedes them) but remain as tested utilities.
+- No new dependency — `@noble/curves` (Stage 1) is all the ratchet needs.

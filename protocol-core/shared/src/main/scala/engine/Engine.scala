@@ -88,31 +88,18 @@ final class Engine(
   private var orphanedDrops = 0L
 
   private final class BuddyRuntime(val role: BuddyRole, contentRoot: Array[Byte]):
+    // ADDRESSING counters (which store slot) — separate from the content ratchet's internal Ns/Nr.
+    // The role fixes the token direction; both stay non-recurrent.
     var sendCounter: Long = 0L
     var recvCounter: Long = 0L
-    // Forward-secret content chains (the symmetric ratchet), direction-separated so the two parties'
-    // chains line up: Alice's send chain == Bob's recv chain for the same direction.
-    private var sendCK: Array[Byte] =
-      KeySchedule.chain0(contentRoot, role.toString, peerRole(role).toString)
-    private var recvCK: Array[Byte] =
-      KeySchedule.chain0(contentRoot, peerRole(role).toString, role.toString)
-
-    /** Message key for the next send WITHOUT advancing — a retry reuses the same chain position. */
-    def sendKey(): Array[Byte] = KeySchedule.messageKey(sendCK)
-
-    /** Ratchet the send chain forward and wipe the old chain key — call after a confirmed submit. */
-    def advanceSend(): Unit =
-      val old = sendCK
-      sendCK = KeySchedule.nextChain(old)
-      wipe(old)
-
-    /** Message key for a received frame, ratcheting + wiping (each frame is consumed exactly once). */
-    def nextRecvKey(): Array[Byte] =
-      val mk = KeySchedule.messageKey(recvCK)
-      val old = recvCK
-      recvCK = KeySchedule.nextChain(old)
-      wipe(old)
-      mk
+    // The CONTENT ratchet: the full DH double ratchet with header encryption (post-compromise
+    // security). The initiator can send immediately; the responder's sending chain opens only once it
+    // has received the initiator's first frame (initiator-sends-first; see DoubleRatchet/dh-ratchet.md
+    // §5). It OWNS the 256-byte wire framing (header + message), replacing the old per-direction
+    // symmetric chains. `contentRoot` is consumed synchronously here, then wiped by the caller.
+    val ratchet: DoubleRatchet = role match
+      case BuddyRole.Initiator => DoubleRatchet.initInitiator(contentRoot)
+      case BuddyRole.Responder => DoubleRatchet.initResponder(contentRoot)
 
   private def peerRole(r: BuddyRole): BuddyRole = r match
     case BuddyRole.Initiator => BuddyRole.Responder
@@ -134,43 +121,26 @@ final class Engine(
   ): Array[Byte] =
     RetrievalToken.derive(pairKey, from.toString, to.toString, counter)
 
-  // Frame-content encryption (T042). A wire frame is exactly the store's 256 bytes:
-  // nonce(12) ‖ ChaCha20-Poly1305(inner). The inner plaintext block is therefore 228 bytes. Every
-  // wire frame — real or carrier — is encrypted, so real and carrier are uniform random-looking
-  // bytes (the last active-vs-idle distinguisher).
-  private val WireSize = frame.Frame.Size // 256, the store's fixed size
-  private val InnerSize = WireSize - aead.Aead.NonceBytes - aead.Aead.TagBytes // 228
-
-  // The per-message AEAD key now comes from the forward-secret content ratchet (`BuddyRuntime`
-  // sendKey/nextRecvKey, via `KeySchedule`), NOT a static derivation from the pair key. The retrieval
-  // token + notify bit derive from the retained `addrKey` (a separate root); the content chain root is
-  // wiped, so a device-state compromise cannot recover past message keys (forward secrecy).
+  // Frame-content encryption (T042 + the DH double ratchet). A wire frame is exactly the store's 256
+  // bytes; the per-buddy `DoubleRatchet` owns the layout — nonce(12) ‖ AEAD(HK, header) ‖ AEAD(MK,
+  // inner) — sealing both the encrypted DH header (so the store cannot link a chain's frames) and the
+  // message. The plaintext block it seals per message is `DoubleRatchet.InnerSize` (so `sendMessage`
+  // pads to that). The retrieval token + notify bit still derive from the retained `addrKey` (a
+  // separate root); the content root is wiped, and each DH step mixes a fresh secret (PCS).
+  private val InnerSize = DoubleRatchet.InnerSize // the plaintext the ratchet seals per message
 
   /** Zero a key buffer in place (cross-platform; the forward-secrecy boundary depends on wiping old
-    * chain keys so they cannot be recovered from memory). */
+    * key material so it cannot be recovered from memory). */
   private def wipe(a: Array[Byte]): Unit =
     var i = 0
     while i < a.length do
       a(i) = 0.toByte
       i += 1
 
-  /** Encrypt a 228-byte inner block into a 256-byte wire frame (`nonce ‖ ciphertext‖tag`). Wipes the
-    * per-message key after use — it is a fresh, non-retained buffer, so zeroing it keeps a spent
-    * message key from lingering on the heap (consistent with the chain-key wiping). */
-  private def encryptFrame(key: Array[Byte], inner: Array[Byte]): Array[Byte] =
-    val nonce = random.Rand.bytes(aead.Aead.NonceBytes)
-    val ct = aead.Aead.seal(key, nonce, inner)
-    wipe(key)
-    nonce ++ ct
-
-  /** Decrypt a 256-byte wire frame back to the 228-byte inner block; `None` on auth failure. Wipes
-    * the per-message key after use (see `encryptFrame`). */
-  private def decryptFrame(key: Array[Byte], wire: Array[Byte]): Option[Array[Byte]] =
-    try
-      if wire.length != WireSize then None
-      else aead.Aead.open(key, wire.take(aead.Aead.NonceBytes), wire.drop(aead.Aead.NonceBytes))
-    finally
-      wipe(key) // wipe on BOTH branches — a wrong-size frame must not leave a spent key behind
+  /** A cover (carrier) wire frame: 256 uniformly-random bytes. A real ratchet frame is a random nonce
+    * followed by AEAD ciphertext+tag, which is computationally indistinguishable from random — so a
+    * random block is a perfect cover (FR-012), byte-indistinguishable in size and entropy. */
+  private def coverFrame(): Array[Byte] = random.Rand.bytes(DoubleRatchet.WireSize)
 
   /** The current build privacy status. Dev backend ⇒ not private ⇒ the mandatory dev label. */
   def privacyStatus: EngineEvent.PrivacyStatus =
@@ -236,7 +206,7 @@ final class Engine(
         Frame.pad(
           plaintext.getBytes(UTF_8),
           InnerSize
-        ) match // 228-byte inner block (encrypted to 256)
+        ) match // ratchet inner block (172B; sealed with the encrypted header into a 256B wire frame)
           case Right(fr) =>
             val q = outbox.getOrElse(pairId, Vector.empty) :+ fr
             outbox(pairId) = q
@@ -284,18 +254,20 @@ final class Engine(
             // this round's one write — no extra write, no silent loss).
             var realSubmitted = false
             nextReal match
-              case Some((pid, q)) =>
+              case Some((pid, q)) if runtime.get(pid).exists(_.ratchet.canSend) =>
                 (runtime.get(pid), book.get(pid)) match
                   case (Some(rt), Some(rel)) =>
-                    // Encrypt the inner frame under the current forward-secret content-chain key
-                    // (peek, no advance — a failed submit must retry at the same chain position).
-                    val wire = encryptFrame(rt.sendKey(), q.head)
+                    // Seal the inner frame at the current ratchet position (peek, no advance — a failed
+                    // submit must retry at the same position). The 256-byte wire carries the encrypted
+                    // DH header + message.
+                    val wire = rt.ratchet.encryptPending(q.head)
                     if t.submit(
                         dirToken(rel.addrKey, rt.role, peerRole(rt.role), rt.sendCounter),
                         wire
                       )
                     then
-                      rt.advanceSend() // ratchet forward + wipe the old chain key only on a real send
+                      rt.ratchet
+                        .commitSend() // advance + wipe the old chain key only on a real send
                       rt.sendCounter += 1
                       dropHead(pid, q)
                       realSubmitted = true
@@ -307,13 +279,13 @@ final class Engine(
                     // missing write. We do NOT emit a masking cover write that would hide the loss.
                     dropHead(pid, q)
                     orphanedDrops += 1
-              case None =>
+              case _ =>
+                // Either nothing is queued, OR the only queued message is for a responder that cannot
+                // send yet (no sending chain until it has received) — in both cases this round is a
+                // carrier and any queued message simply waits. A 256-byte random-looking wire frame is
+                // byte-indistinguishable from a real one, so holding a message looks like any idle round.
                 coverCounter += 1
-                // Carrier: encrypt an all-zero inner block under a fresh RANDOM key (never decrypted)
-                // ⇒ a 256-byte random-looking wire frame, byte-indistinguishable from a real one.
-                val coverWire =
-                  encryptFrame(random.Rand.bytes(aead.Aead.KeyBytes), Frame.carrier(InnerSize))
-                t.submit(RetrievalToken.derive(coverKey, "cover", "", coverCounter), coverWire)
+                t.submit(RetrievalToken.derive(coverKey, "cover", "", coverCounter), coverFrame())
             // Exactly ONE retrieve per round (the schedule's one-retrieve invariant, FR-012 fetch
             // path), NOTIFY-GUIDED per-buddy (FR-004): read EXACTLY the buddy whose digest bit is set
             // this round. Because that buddy's message is actually present, the read is a hit and its
@@ -342,8 +314,11 @@ final class Engine(
               val c = rt.recvCounter
               t.retrieve(dirToken(rel.addrKey, peerRole(rt.role), rt.role, c)).foreach { wire =>
                 rt.recvCounter += 1 // consumed (single-use) ⇒ advance regardless of decode outcome
-                // Decrypt under the next forward-secret recv-chain key (ratchets + wipes), then unpad.
-                decryptFrame(rt.nextRecvKey(), wire)
+                // Run the frame through the DH double ratchet: it trial-decrypts the encrypted header,
+                // performs a DH step + skipped-key handling as needed (PCS), and returns the inner block
+                // — or None for a carrier / non-matching frame, WITHOUT advancing the ratchet.
+                rt.ratchet
+                  .decrypt(wire)
                   .flatMap(inner => Frame.unpad(inner, InnerSize).toOption)
                   .foreach(p =>
                     emit(EngineEvent.MessageReceived(pid, new String(p, UTF_8), roundId))

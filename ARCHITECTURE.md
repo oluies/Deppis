@@ -239,7 +239,7 @@ flowchart TB
 | Layer | Primitive | Key | Purpose |
 |---|---|---|---|
 | Pairing / X3DH | keyed HMAC (Blake2b/HMAC-SHA256) | shared secret | derive `pairId`, `safetyNumber`, `pairKey` |
-| Content forward secrecy | **symmetric KDF ratchet** (`KeySchedule`, HMAC-SHA256; cross-platform JVM+JS) | per-direction content chain, seeded from a wiped `contentRoot` | per-message key with **forward secrecy** — a device compromise can't decrypt prior messages. Post-compromise security (DH ratchet) is a follow-up needing cross-platform X25519; the vetted libsignal `RatchetParty` in `crypto` is the JVM reference. |
+| Content forward secrecy + PCS | **DH double ratchet with header encryption** (`engine.DoubleRatchet`; X25519 + HMAC-SHA256 + ChaCha20-Poly1305; cross-platform JVM+JS) | per-buddy ratchet bootstrapped from `contentRoot`; the encrypted header keeps the store from linking a chain's frames | per-message key with **forward secrecy** AND **post-compromise security** — each DH step mixes a fresh X25519 secret, so the first uncompromised step after a device compromise re-secures the session (design `dh-ratchet.md`). Hand-assembled from vetted primitives under the Constitution I construction amendment; the libsignal `RatchetParty` in `crypto` remains the JVM cross-check reference. |
 | Frame encryption | **ChaCha20-Poly1305** (IETF) | the ratchet message key (32 B) | confidential, authenticated, per-message frame |
 | Addressing | keyed-HMAC **PRF** | retained `addrKey` (separate root from content) | unlinkable, **non-recurrent** retrieval token (metadata; not forward-secret by design) |
 | Notification | AEAD-sealed one-hot token | server notify key | "mail this round" with no sender identity |
