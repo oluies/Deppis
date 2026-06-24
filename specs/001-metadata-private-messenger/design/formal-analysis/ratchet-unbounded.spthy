@@ -4,10 +4,14 @@ theory DeppisRatchetUnbounded
 
   ratchet.spthy proves message secrecy + PCS for a BOUNDED trace (bootstrap + two DH steps) with the
   DH/CDH details explicit. THIS file proves the *structural / inductive* half: that the key schedule's
-  security holds across an ARBITRARY number of ratchet steps. The two are a deliberate modular
-  decomposition (as the published Signal/Tamarin analyses do). Message confidentiality is the standard
-  corollary: a message under `msgK(rk)` with a perfect AEAD is confidential iff its root `rk` is secret —
-  which is exactly what is proven here, for every root in an unbounded chain.
+  security holds across an ARBITRARY number of ratchet steps, GIVEN that each step's healing secret is
+  unguessable. The two are a deliberate modular decomposition (as published Signal/Tamarin analyses do)
+  — but NOTE: the models are not mechanically composed. ratchet.spthy establishes per-step secret
+  unguessability (CDH) for ONE DH step; here that unguessability is taken as a modeling assumption
+  (`heal_secret_secret`, a fresh `~s`) and we prove the chain preserves security under it. The
+  cross-model composition (CDH holds at *every* step of an unbounded chain) is argued, not machine-linked.
+  Message confidentiality is the standard corollary: a message under `msgK(rk)` with a perfect AEAD is
+  confidential iff its root `rk` is secret — exactly `root_secrecy`, for every root in the chain.
 
   Modeling choice (so the unbounded proof is tractable AND meaningful). Each root is a FRESH name; the
   one-way key-derivation `rk' = kdfRK(rk, s)` is captured by:
@@ -22,7 +26,9 @@ theory DeppisRatchetUnbounded
   VERIFICATION STATUS: MACHINE-CHECKED — all lemmas VERIFIED (tamarin-prover 1.12.0, ~0.1s, no oracle
   / no --auto-sources):
       executable               (exists-trace): verified (3 steps)
-      multi_step_reachable     (exists-trace): verified (4 steps)   -- the loop genuinely chains
+      multi_step_reachable     (exists-trace): verified (4 steps)   -- sanity: the Step loop CAN chain
+                                                                    -- (unbounded coverage comes from the
+                                                                    --  use_induction all-traces lemmas)
       heal_secret_secret       (all-traces):   verified (9 steps)
       root_secrecy             (all-traces):   verified (18 steps)
       step_input_is_root       (all-traces):   verified (9 steps)
@@ -74,8 +80,9 @@ lemma executable:
   exists-trace
   "Ex rk rk2 #i. Step(rk, rk2)@i"
 
-// Unboundedness witness: the ratchet step genuinely CHAINS (≥ 2 linked steps), so the lemmas below
-// quantify over an arbitrarily long chain, not a one-shot.
+// Sanity: the ratchet step CAN chain (≥ 2 linked steps are reachable). This is a reachability check,
+// not the unboundedness proof itself — unbounded coverage comes from the `use_induction` all-traces
+// lemmas below, which range over chains of any length.
 lemma multi_step_reachable:
   exists-trace
   "Ex a b c #i #j. Step(a, b)@i & Step(b, c)@j & i < j"
@@ -108,9 +115,10 @@ lemma post_compromise_security:
      ==> not (Ex #k. K(rk2)@k)"
 
 // FORWARD SECRECY (unbounded): revealing a LATER root rk2 does not expose the EARLIER root rk it was
-// derived from (unless rk itself is revealed). This is the one-wayness direction — there is no inverse
-// of the KDF (no `new -> old` rule) — and is NOT covered by ratchet.spthy; here it holds across the
-// unbounded chain.
+// derived from (unless rk itself is revealed). NOTE this holds *because* the KDF is MODELED as one-way
+// — one-wayness is encoded by the absence of an inverse `new -> old` Derive rule, so this lemma
+// validates that the key SCHEDULE has no other path leaking rk (across the unbounded chain) UNDER that
+// assumption; it is not a proof of the KDF's one-wayness itself (that is the primitive's property).
 lemma forward_secrecy [use_induction]:
   "All rk rk2 #h #r.
      ( Step(rk, rk2)@h

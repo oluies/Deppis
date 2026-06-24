@@ -294,7 +294,8 @@ plus the engine-level E2E in `engine.RoundTransportSpec`:
 - a **Tamarin symbolic model** (`ratchet.spthy`) — **machine-checked**: message secrecy + PCS verified
   against a Dolev-Yao attacker (Tamarin 1.12.0);
 - a **Tamarin unbounded model** (`ratchet-unbounded.spthy`) — **machine-checked**: PCS *and* forward
-  secrecy hold across an arbitrarily long ratchet chain (reuse + induction, no proof oracle); and
+  secrecy hold across an arbitrarily long ratchet chain *given* per-step secret unguessability (reuse +
+  induction, no proof oracle); the composition with the bounded model is argued, not machine-linked; and
 - a **Tamarin observational-equivalence model** (`unlinkability.spthy`, `--diff`) — **machine-checked**:
   the store cannot link two frames of one sending chain, with a cleartext-header negative control that
   correctly falsifies. See `formal-analysis/README.md` and the repo-root `CRYPTO_PROOF.md`.

@@ -20,7 +20,7 @@ Artifacts:
 |---|---|---|
 | Message secrecy | Tamarin symbolic proof (Dolev-Yao) | ✅ verified |
 | **Post-compromise security** | Tamarin symbolic proof (bounded, DH/CDH explicit) | ✅ **verified (16 steps)** |
-| **PCS + forward secrecy, *unbounded* steps** | Tamarin, repeatable ratchet loop (reuse + induction) | ✅ **verified (no oracle)** |
+| **PCS + forward secrecy, *unbounded* steps** (given per-step secret unguessability) | Tamarin, repeatable ratchet loop (reuse + induction) | ✅ **verified (no oracle)**; composition with the bounded model argued, not machine-linked |
 | **Header unlinkability** (store can't link a chain's frames) | Tamarin observational equivalence (`--diff`) + negative control | ✅ **verified (2315 steps)** |
 | Implementation invariants (correctness, atomicity, single-use, out-of-order) | ScalaCheck stateful model, every reachable interleaving | ✅ green in CI |
 | Primitive soundness (X25519, HMAC, ChaCha20-Poly1305) | **delegated** to vetted libraries (JCA / `@noble`) | inherited |
@@ -146,12 +146,15 @@ subtly wrong." All three would have shipped in an authored-but-unrun artifact.
 
 ## Scope and honest limits
 
-- **Two proofs, bounded + unbounded.** `ratchet.spthy` covers bootstrap + one full heal (two DH steps)
-  with the DH/CDH details explicit. `ratchet-unbounded.spthy` covers the complementary direction — PCS
-  **and forward secrecy** across an *arbitrarily long* ratchet chain — using reuse + induction helper
-  lemmas to close the unbounded loop automatically (no proof oracle). The literal `kdfRK(rk,~s)` term
-  does not terminate under Tamarin's heuristics; the unbounded model uses fresh-name roots + an explicit
-  forward-only `Derive` rule (no inverse ⇒ one-wayness ⇒ FS), which is faithful and tractable.
+- **Two proofs, bounded + unbounded — argued composition, not machine-linked.** `ratchet.spthy` covers
+  bootstrap + one full heal (two DH steps) with the DH/CDH details explicit. `ratchet-unbounded.spthy`
+  covers the complementary direction — PCS **and forward secrecy** across an *arbitrarily long* chain —
+  *given* that each step's healing secret is unguessable (a modeling assumption here; the per-step CDH
+  basis is what the bounded model establishes). The two models are not mechanically composed; the
+  cross-model claim is argued. The literal `kdfRK(rk,~s)` term does not terminate under Tamarin's
+  heuristics; the unbounded model uses fresh-name roots + an explicit forward-only `Derive` rule, with
+  one-wayness encoded by *omitting* an inverse rule — so the FS lemma validates the schedule's structure
+  *under* modeled one-wayness rather than proving one-wayness itself. Faithful and tractable.
 - **Header unlinkability is proven separately** (it is an *indistinguishability* property, so it lives in
   Tamarin's observational-equivalence `--diff` mode, not the trace lemmas above). `unlinkability.spthy`
   proves the store cannot tell whether two frames belong to the same sending chain — `Observational_
