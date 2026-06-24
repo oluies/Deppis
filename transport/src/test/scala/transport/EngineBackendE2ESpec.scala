@@ -41,21 +41,17 @@ class EngineBackendE2ESpec extends AnyFunSuite with ObsdHarness:
 
       // --- Alice's side (played by the test) ---
       val pairKey = Handshake.init(secret).pairKey // same key Bob derived
-      // Forward-secrecy root split: tokens + notify bit derive from the addressing root; the content
-      // key is the FIRST message key of the Initiator→Responder ratchet chain (msg 0).
+      // Addressing layer: tokens + notify bit derive from the retained addressing root.
       val addrKey = engine.KeySchedule.addrKey(pairKey)
       val contentRoot = engine.KeySchedule.contentRoot(pairKey)
-      // Alice (Initiator) stores her first message under her outgoing token — ENCRYPTED exactly as
-      // the engine's send path does: inner 228-byte frame, ChaCha20-Poly1305, nonce ‖ ct.
+      // Alice (Initiator) stores her first message under her outgoing token, sealed by the SAME DH
+      // double ratchet Bob's engine runs: bootstrap initiator vs. responder from the shared
+      // contentRoot, so `alice.encrypt` produces exactly the 256-byte wire Bob's ratchet decrypts.
       val aliceToken = RetrievalToken.derive(addrKey, "Initiator", "Responder", 0L)
-      val innerSize = Frame.Size - aead.Aead.NonceBytes - aead.Aead.TagBytes
-      val inner = Frame.pad("see you at the bridge".getBytes, innerSize).toOption.get
-      val msgKey0 =
-        engine.KeySchedule.messageKey(
-          engine.KeySchedule.chain0(contentRoot, "Initiator", "Responder")
-        )
-      val nonce = Array.tabulate(aead.Aead.NonceBytes)(i => (i * 11 + 1).toByte)
-      val wire = nonce ++ aead.Aead.seal(msgKey0, nonce, inner)
+      val aliceRatchet = engine.DoubleRatchet.initInitiator(contentRoot)
+      val inner =
+        Frame.pad("see you at the bridge".getBytes, engine.DoubleRatchet.InnerSize).toOption.get
+      val wire = aliceRatchet.encrypt(inner)
       val aliceStore = new EnclaveObliviousStore(storeStub, attested = false)
       assert(aliceStore.write(aliceToken, wire).isRight)
       // Alice signals Bob's notification under the PER-BUDDY bit Bob's engine checks.

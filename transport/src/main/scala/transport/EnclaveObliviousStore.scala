@@ -24,6 +24,13 @@ final class EnclaveObliviousStore(
   def metadataPrivate: Boolean = status.metadataPrivate
   def label: String = status.label
 
+  /** The full attestation-gated privacy status, for the transport to surface to the engine (T058).
+    * NOTE: this is a SNAPSHOT of the construction-time `attested` flag. When the live attestation
+    * handshake lands (the deferred remainder of T058), source it from the current re-appraised state
+    * (re-checked against the reference-value log) so the client label can DEMOTE on expiry/revocation
+    * mid-session, rather than reporting a value frozen at construction. */
+  def privacyStatus: Privacy.BuildPrivacyStatus = status
+
   // gRPC failures surface as exceptions from the blocking stub; map them to the trait's Left
   // channel. Error text is generic (no secret-dependent content, Constitution II).
   def write(writeToken: Array[Byte], frame: Array[Byte]): Either[String, Unit] =

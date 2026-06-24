@@ -144,7 +144,12 @@ final class Engine(
 
   /** The current build privacy status. Dev backend ⇒ not private ⇒ the mandatory dev label. */
   def privacyStatus: EngineEvent.PrivacyStatus =
-    val s = Privacy.BuildPrivacyStatus(Privacy.Backend.Dev, attestationPassed = false)
+    // The label reflects the ACTUAL backend (T058): a local-only engine (no transport) is dev; a
+    // connected engine surfaces its transport's attestation-gated status, so the UI shows
+    // `METADATA PRIVATE` only against a real, attested enclave backend (Constitution IV/IX).
+    val s = transport
+      .map(_.privacyStatus)
+      .getOrElse(Privacy.BuildPrivacyStatus(Privacy.Backend.Dev, attestationPassed = false))
     EngineEvent.PrivacyStatus(s.backend.toString, s.metadataPrivate, s.label)
 
   /** Drain events emitted since the last call (engine → Dart event stream). */
