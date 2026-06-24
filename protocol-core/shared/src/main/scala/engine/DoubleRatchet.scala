@@ -111,7 +111,9 @@ object DoubleRatchet:
     val bobPub = X25519.publicKey(dhSeed)
     wipe(dhSeed)
     val (priv, pub) = X25519.generateKeyPair()
-    val (rk, cks, nhks) = kdfRk(rk0, X25519.sharedSecret(priv, bobPub))
+    val dh = X25519.sharedSecret(priv, bobPub)
+    val (rk, cks, nhks) = kdfRk(rk0, dh)
+    wipe(dh)
     wipe(rk0)
     new DoubleRatchet(
       dhsPriv = priv,
@@ -272,7 +274,9 @@ final class DoubleRatchet private (
   private def peekMessageKey(dhPub: Array[Byte], headerN: Int, isDhStep: Boolean): Array[Byte] =
     var ck =
       if isDhStep then
-        val (rkTmp, ckrNew, nhkTmp) = kdfRk(rk, X25519.sharedSecret(dhsPriv, dhPub))
+        val dh = X25519.sharedSecret(dhsPriv, dhPub)
+        val (rkTmp, ckrNew, nhkTmp) = kdfRk(rk, dh)
+        wipe(dh) // the peeked DH output is a secret too — don't leave it on the heap
         wipe(rkTmp)
         wipe(nhkTmp)
         ckrNew // a fresh array — safe to wipe during the walk below
@@ -288,9 +292,10 @@ final class DoubleRatchet private (
     mk
 
   /** Try the stashed out-of-order keys: for each stored receiving-chain epoch, trial-open the header
-    * with that epoch's header key; on a match, look up `N` and decrypt + remove + wipe that key. The
-    * message key is independent of the live ratchet state, so a body that fails to open here also
-    * leaves state untouched (no commit happened). */
+    * with that epoch's header key; on a match, look up `N` and decrypt. Atomic, like the main receive
+    * path: open the body FIRST and only remove + wipe the stashed key on success — so a valid header
+    * with a tampered body cannot consume a stashed ratchet position (the genuine frame still decrypts
+    * later). */
   private def trySkipped(
       nonce: Array[Byte],
       sealedHeader: Array[Byte],
@@ -302,14 +307,15 @@ final class DoubleRatchet private (
       )
       .collectFirst { case (ep, n) if ep.keys.contains(n) => (ep, n) }
       .flatMap { case (ep, n) =>
-        val mk = ep.keys.remove(n).get
-        skippedCount -= 1
-        if ep.keys.isEmpty then // epoch drained: wipe its header key and drop it
-          wipe(ep.hk)
-          skippedEpochs -= ep
-        val inner = Aead.open(mk, nonce, sealedMsg)
-        wipe(mk)
-        inner
+        Aead.open(ep.keys(n), nonce, sealedMsg) match
+          case None => None // tampered body ⇒ leave the stash intact (no position consumed)
+          case Some(inner) =>
+            wipe(ep.keys.remove(n).get)
+            skippedCount -= 1
+            if ep.keys.isEmpty then // epoch drained: wipe its header key and drop it
+              wipe(ep.hk)
+              skippedEpochs -= ep
+            Some(inner)
       }
 
   /** Trial-decrypt the header: current HKr ⇒ (…, isDhStep=false); else next HKr ⇒ DH step. */
@@ -380,13 +386,17 @@ final class DoubleRatchet private (
     retiredHks.foreach(wipe)
     retiredHkr.foreach(wipe)
     dhr = Some(peerPub)
-    val (rk1, ckrNew, nhkrNew) = kdfRk(rk, X25519.sharedSecret(dhsPriv, peerPub))
+    val dhRecv = X25519.sharedSecret(dhsPriv, peerPub)
+    val (rk1, ckrNew, nhkrNew) = kdfRk(rk, dhRecv)
+    wipe(dhRecv)
     wipe(rk)
     rk = rk1
     ckr = Some(ckrNew)
     nhkr = nhkrNew
     val (newPriv, newPub) = X25519.generateKeyPair()
-    val (rk2, cksNew, nhksNew) = kdfRk(rk, X25519.sharedSecret(newPriv, peerPub))
+    val dhSend = X25519.sharedSecret(newPriv, peerPub)
+    val (rk2, cksNew, nhksNew) = kdfRk(rk, dhSend)
+    wipe(dhSend)
     wipe(rk)
     rk = rk2
     wipe(dhsPriv)

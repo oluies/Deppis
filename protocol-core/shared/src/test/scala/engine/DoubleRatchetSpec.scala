@@ -163,6 +163,20 @@ class DoubleRatchetSpec extends AnyFunSuite:
       "the genuine frame still decrypts (state intact)"
     )
 
+  test("a tampered body on a STASHED (out-of-order) frame does not consume the stashed key"):
+    val (alice, bob) = pair()
+    val w0 = alice.encrypt(inner("m0"))
+    val w1 = alice.encrypt(inner("m1"))
+    val w2 = alice.encrypt(inner("m2"))
+    assert(bob.decrypt(w0).map(text).contains("m0")) // establishes the chain
+    assert(bob.decrypt(w2).map(text).contains("m2")) // skips + stashes m1's key
+    // A tampered copy of m1: its header still authenticates and finds the stashed key, but the body
+    // fails — the stash must stay intact so the genuine m1 still decrypts.
+    val bad1 = w1.clone()
+    bad1(DoubleRatchet.WireSize - 1) = (bad1(DoubleRatchet.WireSize - 1) ^ 0x01).toByte
+    assert(bob.decrypt(bad1).isEmpty, "tampered stashed frame ⇒ None")
+    assert(bob.decrypt(w1).map(text).contains("m1"), "the genuine stashed frame still decrypts")
+
   test("replaying a consumed frame returns None (the message key is gone)"):
     val (alice, bob) = pair()
     val w = alice.encrypt(inner("once"))

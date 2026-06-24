@@ -63,3 +63,15 @@ class DoubleRatchetJsSpec extends AnyFunSuite:
     bad(DoubleRatchet.WireSize - 1) = (bad(DoubleRatchet.WireSize - 1) ^ 0x01).toByte
     assert(bob.decrypt(bad).isEmpty)
     assert(bob.decrypt(w).map(text).contains("intact?"))
+
+  test("a tampered body on a stashed (out-of-order) frame does not consume the stashed key on JS"):
+    val (alice, bob) = pair()
+    val w0 = alice.encrypt(inner("m0"))
+    val w1 = alice.encrypt(inner("m1"))
+    val w2 = alice.encrypt(inner("m2"))
+    assert(bob.decrypt(w0).map(text).contains("m0"))
+    assert(bob.decrypt(w2).map(text).contains("m2")) // stashes m1's key
+    val bad1 = w1.clone()
+    bad1(DoubleRatchet.WireSize - 1) = (bad1(DoubleRatchet.WireSize - 1) ^ 0x01).toByte
+    assert(bob.decrypt(bad1).isEmpty)
+    assert(bob.decrypt(w1).map(text).contains("m1"))
