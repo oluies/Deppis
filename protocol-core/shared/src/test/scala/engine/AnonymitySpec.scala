@@ -42,10 +42,18 @@ class AnonymitySpec extends AnyFunSuite:
   private val K = 6 // rounds per world
   private val buddySecrets = (0 until N).map(i => secret(s"buddy-$i"))
 
+  /** The store host's full observable for one world, plus a delivery count (non-vacuity). */
+  private case class Observable(
+      reads: Vector[Vector[Byte]],
+      writes: Vector[(Vector[Byte], Vector[Byte])], // (token, frame), the store-write view
+      delivered: Int
+  )
+
   /** A receiver with all `N` buddies confirmed (the anonymity set), where ONLY buddy `active` actually
     * communicates: it sends a real message each of `K` rounds and the receiver reads it. Returns the
-    * host's view of the receiver's read tokens plus how many messages were delivered (non-vacuity). */
-  private def world(active: Int): (Vector[Vector[Byte]], Int) =
+    * store host's full observable (the writes it sees + the reads the receiver issues) and the count
+    * delivered. */
+  private def world(active: Int): Observable =
     val store = mutable.Map.empty[String, Array[Byte]]
     val recvHost = HostView(store)
     val sendHost = HostView(store)
@@ -67,10 +75,20 @@ class AnonymitySpec extends AnyFunSuite:
       bob.tick(round.toLong) // receiver reads exactly that buddy — a hit ⇒ the token advances
       delivered += bob.drainEvents().count(_.isInstanceOf[EngineEvent.MessageReceived])
     }
-    (recvHost.retrieves.toVector, delivered)
+    // The store host sees every write: the active buddy's real frames AND the receiver's cover writes.
+    Observable(
+      (recvHost.retrieves).toVector,
+      (sendHost.submits ++ recvHost.submits).toVector,
+      delivered
+    )
+
+  // Precondition: the N buddies map to DISTINCT one-hot notify bits, so a signaled buddy's read is a
+  // genuine hit (not a T041c birthday collision that would target the wrong buddy and fail opaquely).
+  test("the N buddy secrets occupy distinct notify bits (anonymity-set precondition)"):
+    assert(buddySecrets.map(s => bitOf(handshake.Handshake.init(s).pairKey)).distinct.size == N)
 
   test("the host's read-token trace has the same SHAPE no matter which buddy is active"):
-    val traces = (0 until N).map(i => world(i)._1)
+    val traces = (0 until N).map(i => world(i).reads)
     // One read per round in every world, every token a full retrieval token — the host sees the same
     // shape regardless of which buddy is communicating (count/size leak nothing).
     traces.foreach(tr => assert(tr.size == K, s"expected $K reads, got ${tr.size}"))
@@ -78,12 +96,24 @@ class AnonymitySpec extends AnyFunSuite:
       assert(tr.forall(_.size == RetrievalToken.Length), "all tokens full length")
     )
 
-  test("read tokens are non-recurrent across ALL buddies and rounds (no clustering)"):
-    val all = (0 until N).flatMap(i => world(i)._1)
-    assert(all.size == N * K)
+  test("the host's WRITE trace is also shape-uniform across worlds (token len + 256B frames)"):
+    val writes = (0 until N).map(i => world(i).writes)
+    // Same number of writes per world, every frame a fixed 256-byte block, every write token full
+    // length — the active buddy's real frames are indistinguishable in shape from the cover writes.
+    writes.foreach(w => assert(w.forall(_._2.size == frame.Frame.Size), "every frame is 256 bytes"))
+    writes.foreach(w =>
+      assert(w.forall(_._1.size == RetrievalToken.Length), "every write token is full length")
+    )
+    assert(writes.map(_.size).distinct.size == 1, "the write count does not depend on which buddy")
+
+  test("read AND write tokens are non-recurrent across ALL buddies and rounds (no clustering)"):
+    val obs = (0 until N).map(world)
+    val reads = obs.flatMap(_.reads)
+    assert(reads.size == N * K && reads.distinct.size == reads.size, "read tokens all unique")
+    val writeTokens = obs.flatMap(_.writes.map(_._1))
     assert(
-      all.distinct.size == all.size,
-      "every read token is unique — the host can cluster nothing"
+      writeTokens.distinct.size == writeTokens.size,
+      "write tokens all unique — nothing to cluster"
     )
 
   test(
@@ -92,11 +122,14 @@ class AnonymitySpec extends AnyFunSuite:
     // If the read token were a function of public data (round/counter) it would leak the buddy; it is
     // a keyed PRF over the per-buddy addressing root, so two buddies' tokens at the SAME position
     // differ unpredictably — the host, lacking the keys, cannot map a token to a buddy.
-    val firstReads = (0 until N).map(i => world(i)._1.head)
+    val firstReads = (0 until N).map(i => world(i).reads.head)
     assert(firstReads.distinct.size == N, "first-round read tokens differ across buddies")
     firstReads.foreach(t => assert(t.distinct.size > 1, "a token must not be a constant byte"))
 
   test("anonymity is not of a dead channel: every world actually delivers (SC-002 in force)"):
     // Non-vacuity: the indistinguishable observable above is of a WORKING channel — in every world the
     // active buddy's messages reach the receiver.
-    (0 until N).foreach(i => assert(world(i)._2 == K, s"world $i delivered ${world(i)._2}/$K"))
+    (0 until N).foreach { i =>
+      val d = world(i).delivered
+      assert(d == K, s"world $i delivered $d/$K")
+    }
