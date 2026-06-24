@@ -25,7 +25,8 @@ theory DeppisDoubleRatchet
   model treats them as perfect):
     * X25519            -> the diffie-hellman builtin ('g'^x, with (g^x)^y = (g^y)^x and CDH:
                            the adversary cannot derive 'g'^(x*y) from 'g'^x and 'g'^y alone).
-    * HMAC-SHA256 KDFs  -> one-way free functions kdfRK/2, msgK/1, hdrK/1.
+    * HMAC-SHA256 KDFs  -> one-way free functions kdfRK/2, kdfCK/1, msgK/1, hdrK/1
+                           (kdfCK derives the responder's deterministic bootstrap key from cr).
     * ChaCha20-Poly1305 -> the symmetric-encryption builtin (senc/sdec): perfect AEAD.
 
   Key terms (let-bound in the rules):
