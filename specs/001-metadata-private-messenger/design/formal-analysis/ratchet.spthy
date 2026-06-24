@@ -1,0 +1,119 @@
+theory DeppisDoubleRatchet
+/*
+  Symbolic (Dolev-Yao) model of the Deppis DH double ratchet with header encryption.
+  Design under analysis: ../dh-ratchet.md   Implementation: engine.DoubleRatchet (Scala).
+
+  ============================================================================================
+  VERIFICATION STATUS: AUTHORED — NOT YET MACHINE-CHECKED.
+  Tamarin is not installed in this repo's CI; this file has been written against Tamarin's
+  syntax but has NOT been run through `tamarin-prover`. Treat it as a reviewed DRAFT / starting
+  artifact for the formal security analysis, expected to need refinement (oracles / reuse
+  lemmas) before the lemmas close automatically. See README.md for scope, run recipe, and the
+  honest list of limitations. Do not cite it as a completed proof.
+  ============================================================================================
+
+  Scope (trace properties; bounded to make the analysis tractable):
+    * Bootstrap from a shared content root, then: Alice's first send (step 1), Bob's receive +
+      HEAL (a fresh DH key ~b mixes into the root), and Bob's reply (step 2) on the healed chain.
+      This is the minimal trace that exhibits post-compromise security: a step-1 chain-key REVEAL
+      followed by a heal must leave the step-2 message secret.
+    * Header UNLINKABILITY is an indistinguishability property — it needs Tamarin's
+      observational-equivalence (diff) mode, NOT the trace lemmas below. OUT OF SCOPE here
+      (tracked in README.md).
+
+  Idealized primitives (Constitution I delegates primitives to vetted libraries, so the symbolic
+  model treats them as perfect):
+    * X25519            -> the diffie-hellman builtin ('g'^x, with (g^x)^y = (g^y)^x and CDH:
+                           the adversary cannot derive 'g'^(x*y) from 'g'^x and 'g'^y alone).
+    * HMAC-SHA256 KDFs  -> one-way free functions kdfRK/2, kdfCK/1, msgK/1, hdrK/1
+                           (kdfCK derives the responder's deterministic bootstrap key from cr).
+    * ChaCha20-Poly1305 -> the symmetric-encryption builtin (senc/sdec): perfect AEAD.
+
+  Key terms (let-bound in the rules):
+    rk1 = kdfRK( kdfRK(cr,'root0'),  ('g'^kdfCK(cr))^a )   -- step-1 chain root (Alice's send chain)
+    rk2 = kdfRK( rk1,                 ('g'^a)^b           )   -- step-2 chain root (healed by fresh ~b)
+  Each message m is protected by msgK(rk*) and its header by hdrK(rk*); ProtectedBy(m, rk*) records
+  WHICH chain root protects m, so a reveal can be bound to the right message.
+*/
+
+begin
+
+builtins: diffie-hellman, symmetric-encryption
+
+functions: kdfRK/2, kdfCK/1, msgK/1, hdrK/1
+
+/* Bootstrap: a shared content root established out of band (the handshake, analysed elsewhere). */
+rule Bootstrap:
+    [ Fr(~cr) ]
+  --[ Root(~cr) ]->
+    [ A_init(~cr), B_init(~cr) ]
+
+/* Step 1 — Alice (initiator) sends m1: fresh ratchet key ~a, first DH step against the responder's
+   deterministic bootstrap public key 'g'^kdfCK(cr). The step-1 chain root rk1 is published as a
+   REVEALABLE key (persistent) so the adversary can compromise exactly that key for the PCS lemma. */
+rule A_send1:
+    let rk1 = kdfRK(kdfRK(~cr, 'root0'), ('g'^kdfCK(~cr))^~a)
+    in
+    [ A_init(~cr), Fr(~a), Fr(~m1) ]
+  --[ Send(~m1), SecretMsg(~m1), ProtectedBy(~m1, rk1) ]->
+    [ Out( senc{ '1', 'g'^~a }( hdrK(rk1) ) )   // sealed header (DH pubkey + counter)
+    , Out( senc{ ~m1 }( msgK(rk1) ) )           // sealed message
+    , !RevealableCK(rk1) ]
+
+/* Step 1 receive + HEAL — Bob reconstructs rk1 (shared = Apub^kdfCK(cr)), then the DH ratchet
+   generates a FRESH ~b and advances the root: rk2 = kdfRK(rk1, Apub^~b). The fresh ~b is the healing
+   secret; Heal(~b) marks the timepoint so PCS can require a reveal to PRECEDE it. */
+rule B_recv1_heal:
+    let rk1 = kdfRK(kdfRK(~cr, 'root0'), Apub^kdfCK(~cr))
+        rk2 = kdfRK(rk1, Apub^~b)
+    in
+    [ B_init(~cr)
+    , In( senc{ '1', Apub }( hdrK(rk1) ) )
+    , In( senc{ m1 }( msgK(rk1) ) )
+    , Fr(~b) ]
+  --[ Recv(m1), Heal(~b) ]->
+    [ B_chain(~cr, Apub, ~b, rk2) ]
+
+/* Step 2 — Bob replies m2 on the HEALED chain rk2 (distinct rule ⇒ distinct timepoint, so the heal
+   strictly precedes this send). m2 is protected by msgK(rk2). */
+rule B_send2:
+    [ B_chain(~cr, Apub, ~b, rk2), Fr(~m2) ]
+  --[ Send(~m2), SecretMsg(~m2), ProtectedBy(~m2, rk2) ]->
+    [ Out( senc{ '1', 'g'^~b }( hdrK(rk2) ) )
+    , Out( senc{ ~m2 }( msgK(rk2) ) ) ]
+
+/* Adversary STATE compromise: reveal a published chain root. The Dolev-Yao adversary already owns
+   the network (In/Out); this adds key compromise so FS/PCS can be phrased. RevealCK(ck) leaks ck. */
+rule Reveal_CK:
+    [ !RevealableCK(ck) ]
+  --[ RevealCK(ck) ]->
+    [ Out(ck) ]
+
+/* =============================================================================================
+   LEMMAS — map 1:1 to dh-ratchet.md §9 "threat model delta".
+   ============================================================================================= */
+
+// Sanity: the protocol runs to completion (m1 is sent and received).
+lemma executable:
+  exists-trace
+  "Ex m #i #j. Send(m)@i & Recv(m)@j & i < j"
+
+// SECRECY, bound to each message's OWN protecting key: a secret message leaks only if the adversary
+// revealed the very chain root that protects it (not just *some* reveal anywhere in the trace).
+lemma message_secrecy:
+  "All m ck #i.
+     (SecretMsg(m)@i & ProtectedBy(m, ck)@i)
+     ==> (not (Ex #k. K(m)@k)) | (Ex #r. RevealCK(ck)@r)"
+
+// POST-COMPROMISE SECURITY: even when the step-1 chain root is REVEALED (a state compromise), a
+// message sent on a chain that was HEALED by a fresh DH AFTER the reveal stays secret. The premise
+// requires reveal(r) < heal(h) < send(s), so a green proof genuinely establishes healing — not mere
+// secrecy in the absence of compromise.
+lemma post_compromise_security:
+  "All m2 #s.
+     ( SecretMsg(m2)@s
+     & (Ex b #h. Heal(b)@h & h < s)
+     & (Ex ck #r. RevealCK(ck)@r & r < h) )
+     ==> not (Ex #k. K(m2)@k)"
+
+end
