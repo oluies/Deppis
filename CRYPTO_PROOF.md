@@ -19,7 +19,8 @@ Artifacts:
 | Property | How it's established | Status |
 |---|---|---|
 | Message secrecy | Tamarin symbolic proof (Dolev-Yao) | ✅ verified |
-| **Post-compromise security** | Tamarin symbolic proof | ✅ **verified (16 steps)** |
+| **Post-compromise security** | Tamarin symbolic proof (bounded, DH/CDH explicit) | ✅ **verified (16 steps)** |
+| **PCS + forward secrecy, *unbounded* steps** | Tamarin, repeatable ratchet loop (reuse + induction) | ✅ **verified (no oracle)** |
 | **Header unlinkability** (store can't link a chain's frames) | Tamarin observational equivalence (`--diff`) + negative control | ✅ **verified (2315 steps)** |
 | Implementation invariants (correctness, atomicity, single-use, out-of-order) | ScalaCheck stateful model, every reachable interleaving | ✅ green in CI |
 | Primitive soundness (X25519, HMAC, ChaCha20-Poly1305) | **delegated** to vetted libraries (JCA / `@noble`) | inherited |
@@ -145,9 +146,12 @@ subtly wrong." All three would have shipped in an authored-but-unrun artifact.
 
 ## Scope and honest limits
 
-- **Bounded model.** The proof covers bootstrap + one full heal (two DH steps) — enough to exhibit PCS.
-  An *unbounded* proof (arbitrarily many steps) is the known-hard Tamarin termination problem and needs
-  reusable lemmas / a proof oracle; that is future work.
+- **Two proofs, bounded + unbounded.** `ratchet.spthy` covers bootstrap + one full heal (two DH steps)
+  with the DH/CDH details explicit. `ratchet-unbounded.spthy` covers the complementary direction — PCS
+  **and forward secrecy** across an *arbitrarily long* ratchet chain — using reuse + induction helper
+  lemmas to close the unbounded loop automatically (no proof oracle). The literal `kdfRK(rk,~s)` term
+  does not terminate under Tamarin's heuristics; the unbounded model uses fresh-name roots + an explicit
+  forward-only `Derive` rule (no inverse ⇒ one-wayness ⇒ FS), which is faithful and tractable.
 - **Header unlinkability is proven separately** (it is an *indistinguishability* property, so it lives in
   Tamarin's observational-equivalence `--diff` mode, not the trace lemmas above). `unlinkability.spthy`
   proves the store cannot tell whether two frames belong to the same sending chain — `Observational_
@@ -169,7 +173,8 @@ subtly wrong." All three would have shipped in an authored-but-unrun artifact.
 # Symbolic design proofs
 brew install tamarin-prover/tap/tamarin-prover          # Tamarin + Maude + GraphViz
 cd specs/001-metadata-private-messenger/design/formal-analysis
-tamarin-prover ratchet.spthy --prove                          # secrecy + PCS: all 4 lemmas verified, <1 s
+tamarin-prover ratchet.spthy --prove                          # secrecy + PCS (bounded): all 4 lemmas verified, <1 s
+tamarin-prover ratchet-unbounded.spthy --prove                # PCS + forward secrecy across UNBOUNDED steps
 tamarin-prover --diff unlinkability.spthy --prove             # unlinkability: observational equivalence verified
 tamarin-prover --diff unlinkability-cleartext.spthy --prove   # negative control: falsifies (as intended)
 

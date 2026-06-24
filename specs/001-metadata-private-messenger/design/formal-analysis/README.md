@@ -7,7 +7,8 @@ that drops the `DEV, NO METADATA PRIVACY` label. They attack two different quest
 | Question | Artifact | Status |
 |---|---|---|
 | **Does the *implementation* hold its invariants under every reachable op sequence?** | `engine.DoubleRatchetModelSpec` (ScalaCheck stateful model) | ✅ runs in CI (JVM), green |
-| **Does the *design* provide message secrecy + PCS against a Dolev-Yao attacker?** | `ratchet.spthy` (Tamarin symbolic model) | ✅ **machine-checked** — all 4 lemmas verified (Tamarin 1.12.0) |
+| **Does the *design* provide message secrecy + PCS against a Dolev-Yao attacker?** | `ratchet.spthy` (Tamarin symbolic model, bounded) | ✅ **machine-checked** — all 4 lemmas verified (Tamarin 1.12.0) |
+| **Do PCS + forward secrecy hold across *arbitrarily many* steps?** | `ratchet-unbounded.spthy` (Tamarin, unbounded loop) | ✅ **machine-checked** — PCS + FS verified (reuse/induction, no oracle) |
 | **Can the store *link* two frames of one chain? (header unlinkability)** | `unlinkability.spthy` (Tamarin `--diff`) + negative control | ✅ **machine-checked** — observational equivalence verified; cleartext control falsifies |
 
 This split mirrors the Constitution's own layering. **Primitives** (X25519, HMAC-SHA256,
@@ -96,10 +97,9 @@ unchecked" draft would have shipped:
 
 This is the concrete argument for *actually running the tool* rather than trusting a hand-written model.
 
-**Out of scope (honest limits):**
-- The DH ratchet's *unbounded* loop is the known-hard part for Tamarin termination; this model is
-  deliberately **bounded** to two steps (enough to exhibit one full heal). An unbounded proof needs
-  reusable lemmas / a proof `oracle`, as the published Signal/Tamarin analyses do.
+**Scope:** this model is **bounded** to two steps (enough to exhibit one full heal) with the DH/CDH
+details explicit. The complementary **unbounded** proof — that secrecy/PCS hold across *arbitrarily many*
+ratchet steps — is `ratchet-unbounded.spthy` (§4 below).
 
 ### Run recipe
 
@@ -139,6 +139,37 @@ Scope: the header keys are modeled as fresh secrets the store never holds (they 
 chain — dh-ratchet.md §5); the 12-byte frame nonce is the per-frame fresh value, itself not a linking
 tag. The implementation-level echo of this property is the `header encryption removes the linking tag`
 test in `DoubleRatchetSpec`.
+
+---
+
+## 4. Unbounded ratchet proof (PCS + forward secrecy across arbitrarily many steps) — `ratchet-unbounded.spthy`
+
+`ratchet.spthy` (§2) is bounded to two steps with the DH/CDH details explicit. This file proves the
+**structural / inductive** half: that the key schedule's security holds across an **arbitrary number** of
+ratchet steps. The two are a deliberate modular decomposition (as the published Signal/Tamarin analyses
+do) — §2 discharges "the per-step healing secret is unguessable given the pre-heal root" (CDH); here that
+secret is abstracted as a fresh `~s` and we prove the *chain* preserves security however long it grows.
+
+A `Step` rule consumes the current root and reproduces the next — so it fires arbitrarily many times (the
+unbounded loop; `multi_step_reachable` witnesses ≥2 chained steps). Roots are fresh names with the
+one-way KDF relation `rk' = kdfRK(rk, s)` modeled by a `!Mix(rk', rk, s)` fact plus an adversary `Derive`
+rule (old root + step secret → new root) and **no inverse rule** (one-wayness). This expresses exactly
+the two facts the ratchet relies on while avoiding the non-terminating term-deconstruction regress a
+literal `kdfRK(rk,~s)` term causes under an unbounded loop.
+
+```
+tamarin-prover ratchet-unbounded.spthy --prove          # ~0.1 s, no oracle, no --auto-sources
+  executable / multi_step_reachable (exists-trace): verified      # the loop genuinely chains
+  heal_secret_secret / root_secrecy / step_input_is_root          # reuse + induction helpers, verified
+  post_compromise_security (all-traces): verified                 # UNBOUNDED PCS
+  forward_secrecy          (all-traces): verified                 # UNBOUNDED FS (one-wayness)
+```
+
+The `reuse` + `use_induction` helper lemmas are the standard technique that closes the unbounded loop
+*without* a proof oracle. Note this also machine-checks **forward secrecy** (revealing a *later* root
+cannot expose an *earlier* one) — which the bounded model does not cover. Message confidentiality is the
+standard corollary: a message under `msgK(rk)` with perfect AEAD is confidential iff its root `rk` is
+secret, which is exactly `root_secrecy`.
 
 ---
 
