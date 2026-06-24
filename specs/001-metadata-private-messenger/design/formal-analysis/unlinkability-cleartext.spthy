@@ -1,0 +1,29 @@
+theory DeppisHeaderUnlinkabilityNegativeControl
+/*
+  NEGATIVE CONTROL for unlinkability.spthy.
+
+  Identical setup, but the header is sent IN THE CLEAR (no encryption) — exactly the design Constitution
+  forbids. The ratchet public key 'g'^~a is now visible on the wire, so it IS a linking tag: in the LEFT
+  world both frames show the same 'g'^~a (linkable); in the RIGHT world they differ. The attacker can
+  therefore distinguish the two worlds, so Observational_equivalence must be FALSIFIED.
+
+  This is the control that gives the positive result (unlinkability.spthy) its meaning: it shows the
+  model genuinely captures the linking threat, rather than holding trivially. The ONLY difference
+  between the two files is whether the header is wrapped in `senc(..., ~hk)`.
+
+  Run:  tamarin-prover --diff unlinkability-cleartext.spthy --prove
+  VERIFICATION STATUS: MACHINE-CHECKED — Observational_equivalence FALSIFIED, as intended.
+*/
+
+begin
+
+builtins: symmetric-encryption, diffie-hellman
+
+rule Emit_two_frames_cleartext:
+    [ Fr(~hk), Fr(~hk2), Fr(~a), Fr(~a2), Fr(~n1), Fr(~n2) ]
+  --[ Emitted() ]->
+    // header IN CLEAR: the pubkey is visible, so the same-vs-different chain is observable.
+    [ Out( <~n1, 'g'^~a, '1'> )
+    , Out( <~n2, diff('g'^~a, 'g'^~a2), '2'> ) ]
+
+end

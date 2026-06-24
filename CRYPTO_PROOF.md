@@ -20,6 +20,7 @@ Artifacts:
 |---|---|---|
 | Message secrecy | Tamarin symbolic proof (Dolev-Yao) | ✅ verified |
 | **Post-compromise security** | Tamarin symbolic proof | ✅ **verified (16 steps)** |
+| **Header unlinkability** (store can't link a chain's frames) | Tamarin observational equivalence (`--diff`) + negative control | ✅ **verified (2315 steps)** |
 | Implementation invariants (correctness, atomicity, single-use, out-of-order) | ScalaCheck stateful model, every reachable interleaving | ✅ green in CI |
 | Primitive soundness (X25519, HMAC, ChaCha20-Poly1305) | **delegated** to vetted libraries (JCA / `@noble`) | inherited |
 
@@ -30,6 +31,10 @@ tamarin-prover ratchet.spthy --prove        # Tamarin 1.12.0 + Maude 3.5.1, <1 s
   message_secrecy          (all-traces):   verified (37 steps)
   post_compromise_security (all-traces):   verified (16 steps)
   All wellformedness checks were successful.
+tamarin-prover --diff unlinkability.spthy --prove     # header unlinkability (indistinguishability)
+  Observational_equivalence: verified (2315 steps)
+tamarin-prover --diff unlinkability-cleartext.spthy --prove   # negative control: cleartext header
+  Observational_equivalence: falsified (10 steps)             # ← intended: proves the test has teeth
 ```
 
 ---
@@ -143,10 +148,12 @@ subtly wrong." All three would have shipped in an authored-but-unrun artifact.
 - **Bounded model.** The proof covers bootstrap + one full heal (two DH steps) — enough to exhibit PCS.
   An *unbounded* proof (arbitrarily many steps) is the known-hard Tamarin termination problem and needs
   reusable lemmas / a proof oracle; that is future work.
-- **Header unlinkability is not in this proof.** That the store cannot tell two frames of one chain apart
-  is an *indistinguishability* property requiring Tamarin's observational-equivalence (diff) mode — a
-  separate model (future work). Implementation evidence is the `header encryption removes the linking
-  tag` test.
+- **Header unlinkability is proven separately** (it is an *indistinguishability* property, so it lives in
+  Tamarin's observational-equivalence `--diff` mode, not the trace lemmas above). `unlinkability.spthy`
+  proves the store cannot tell whether two frames belong to the same sending chain — `Observational_
+  equivalence: verified (2315 steps)` — and `unlinkability-cleartext.spthy` is a negative control where
+  the header is in the clear and equivalence correctly *falsifies*, showing the model captures the real
+  linking threat. (Implementation echo: the `header encryption removes the linking tag` test.)
 - **Constant-time / side channels (Constitution II) are out of scope of both artifacts.** On the JVM they
   are not achievable at the bytecode level (JIT + GC); they are left to the vetted native primitives and
   the Rust sidecar, as documented in dh-ratchet.md §9.
@@ -159,10 +166,12 @@ subtly wrong." All three would have shipped in an authored-but-unrun artifact.
 ## Reproduce
 
 ```bash
-# Symbolic design proof
+# Symbolic design proofs
 brew install tamarin-prover/tap/tamarin-prover          # Tamarin + Maude + GraphViz
 cd specs/001-metadata-private-messenger/design/formal-analysis
-tamarin-prover ratchet.spthy --prove                    # all 4 lemmas verified, <1 s
+tamarin-prover ratchet.spthy --prove                          # secrecy + PCS: all 4 lemmas verified, <1 s
+tamarin-prover --diff unlinkability.spthy --prove             # unlinkability: observational equivalence verified
+tamarin-prover --diff unlinkability-cleartext.spthy --prove   # negative control: falsifies (as intended)
 
 # Executable implementation model (JDK 22+; macOS: export JAVA_HOME="$(/usr/libexec/java_home)")
 sbt "protocolCore/testOnly engine.DoubleRatchetModelSpec"

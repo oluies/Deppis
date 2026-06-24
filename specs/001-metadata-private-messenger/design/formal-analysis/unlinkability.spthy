@@ -1,0 +1,40 @@
+theory DeppisHeaderUnlinkability
+/*
+  HEADER UNLINKABILITY via observational equivalence (Tamarin --diff).
+  Design: ../dh-ratchet.md §2 (header encryption).  Companion to ratchet.spthy (trace properties).
+
+  Claim. The store (a passive observer of wire frames) cannot tell whether two frames belong to the
+  SAME sending chain or to DIFFERENT chains. This is the metadata-privacy crux: a DH ratchet's public
+  key is CONSTANT across a whole sending chain, so a cleartext header would be a perfect linking tag
+  (cluster all frames carrying the same pubkey). The design seals the header (pubkey + counters) under
+  a header key the store never holds, so the linking tag is encrypted away.
+
+  Method. We emit two frames and use `diff(L, R)` to put two worlds side by side:
+    * LEFT  world: frame 2 SHARES frame 1's chain — same header key ~hk, same ratchet pubkey 'g'^~a.
+    * RIGHT world: frame 2 is a DIFFERENT chain — fresh header key ~hk2, fresh pubkey 'g'^~a2.
+  Tamarin's automatically-generated `Observational_equivalence` lemma proves the attacker cannot
+  distinguish the two worlds. Equivalence ⇒ "same chain" is indistinguishable from "different chains"
+  ⇒ the store cannot link a chain's frames (unlinkability).
+
+  Run:  tamarin-prover --diff unlinkability.spthy --prove
+  The header keys ~hk, ~hk2 are fresh and NEVER revealed — modeling that they derive from the root
+  chain the store never sees (dh-ratchet.md §5). The 12-byte frame nonce is modeled by the fresh ~n1,
+  ~n2 emitted in the clear: it is per-frame random, so it is itself not a linking tag. See
+  unlinkability-cleartext.spthy for the negative control (cleartext header ⇒ this FALSIFIES).
+
+  VERIFICATION STATUS: MACHINE-CHECKED — Observational_equivalence VERIFIED (tamarin-prover 1.12.0).
+*/
+
+begin
+
+builtins: symmetric-encryption, diffie-hellman
+
+rule Emit_two_frames:
+    [ Fr(~hk), Fr(~hk2), Fr(~a), Fr(~a2), Fr(~n1), Fr(~n2) ]
+  --[ Emitted() ]->
+    // frame 1 — chain X: nonce in clear, header (pubkey 'g'^~a ‖ counter '1') sealed under ~hk.
+    [ Out( <~n1, senc(<'g'^~a, '1'>, ~hk)> )
+    // frame 2 — diff: LEFT reuses chain X (~hk, 'g'^~a); RIGHT is a fresh chain (~hk2, 'g'^~a2).
+    , Out( <~n2, senc(<diff('g'^~a, 'g'^~a2), '2'>, diff(~hk, ~hk2))> ) ]
+
+end
