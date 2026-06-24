@@ -286,15 +286,16 @@ plus the engine-level E2E in `engine.RoundTransportSpec`:
    intact`: a non-matching header takes the same `None`/drop path as a carrier, no mutation, no
    distinguishable error (Constitution II).
 
-**Beyond example tests**, two formal-analysis artifacts strengthen the security review
+**Beyond example tests**, the formal-analysis artifacts strengthen the security review
 (`formal-analysis/`):
 - a **ScalaCheck stateful model** (`engine.DoubleRatchetModelSpec`, runs in CI) that checks the
   invariants — correctness, atomicity/no-mutation-on-undecryptable, single-use, out-of-order
-  completeness — over *random* op interleavings with shrinking; and
-- a **Tamarin symbolic model** (`ratchet.spthy`) of the design's secrecy / forward-secrecy / PCS
-  lemmas against a Dolev-Yao attacker — authored, *not yet machine-checked* (honest status + run recipe
-  in `formal-analysis/README.md`). Header unlinkability needs Tamarin's observational-equivalence mode
-  and is tracked there as future work.
+  completeness — over *random* op interleavings with shrinking;
+- a **Tamarin symbolic model** (`ratchet.spthy`) — **machine-checked**: message secrecy + PCS verified
+  against a Dolev-Yao attacker (Tamarin 1.12.0); and
+- a **Tamarin observational-equivalence model** (`unlinkability.spthy`, `--diff`) — **machine-checked**:
+  the store cannot link two frames of one sending chain, with a cleartext-header negative control that
+  correctly falsifies. See `formal-analysis/README.md` and the repo-root `CRYPTO_PROOF.md`.
 
 ---
 

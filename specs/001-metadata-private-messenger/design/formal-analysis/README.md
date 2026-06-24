@@ -8,6 +8,7 @@ that drops the `DEV, NO METADATA PRIVACY` label. They attack two different quest
 |---|---|---|
 | **Does the *implementation* hold its invariants under every reachable op sequence?** | `engine.DoubleRatchetModelSpec` (ScalaCheck stateful model) | ✅ runs in CI (JVM), green |
 | **Does the *design* provide message secrecy + PCS against a Dolev-Yao attacker?** | `ratchet.spthy` (Tamarin symbolic model) | ✅ **machine-checked** — all 4 lemmas verified (Tamarin 1.12.0) |
+| **Can the store *link* two frames of one chain? (header unlinkability)** | `unlinkability.spthy` (Tamarin `--diff`) + negative control | ✅ **machine-checked** — observational equivalence verified; cleartext control falsifies |
 
 This split mirrors the Constitution's own layering. **Primitives** (X25519, HMAC-SHA256,
 ChaCha20-Poly1305) are delegated to vetted libraries — we *inherit* their verification (the same
@@ -99,9 +100,6 @@ This is the concrete argument for *actually running the tool* rather than trusti
 - The DH ratchet's *unbounded* loop is the known-hard part for Tamarin termination; this model is
   deliberately **bounded** to two steps (enough to exhibit one full heal). An unbounded proof needs
   reusable lemmas / a proof `oracle`, as the published Signal/Tamarin analyses do.
-- **Header unlinkability is NOT covered** — it is an *indistinguishability* property requiring Tamarin's
-  **observational-equivalence (diff)** mode, a separate model (future work). The implementation-level
-  evidence for it is the `header encryption removes the linking tag` test in `DoubleRatchetSpec`.
 
 ### Run recipe
 
@@ -110,6 +108,37 @@ This is the concrete argument for *actually running the tool* rather than trusti
 tamarin-prover ratchet.spthy --prove          # batch-prove all lemmas (<1 s)
 tamarin-prover interactive ratchet.spthy      # GUI at http://127.0.0.1:3001 to inspect the proofs
 ```
+
+---
+
+## 3. Header unlinkability (observational equivalence) — `unlinkability.spthy`
+
+The trace lemmas above are about *secrecy*; **unlinkability** is an *indistinguishability* property — the
+store must not tell whether two frames belong to the same sending chain — so it needs Tamarin's
+**observational-equivalence (`--diff`)** mode. This is the metadata-privacy crux: a DH ratchet's public
+key is constant across a sending chain, so a cleartext header would be a perfect linking tag; the design
+seals it under a header key the store never holds.
+
+`unlinkability.spthy` puts two worlds side by side with `diff(L, R)`: **LEFT** = frame 2 shares frame 1's
+chain (same header key, same ratchet pubkey); **RIGHT** = frame 2 is a different chain (fresh key, fresh
+pubkey). Tamarin's auto-generated `Observational_equivalence` lemma proves the attacker can't tell them
+apart ⇒ the store cannot link a chain's frames.
+
+`unlinkability-cleartext.spthy` is the **negative control**: the same model with the header *in the
+clear*. The pubkey is now visible, so same-vs-different chain is observable and equivalence must FAIL —
+which it does. This is what gives the positive result meaning: the model genuinely captures the linking
+threat rather than holding trivially. (The only difference between the two files is the `senc(…, ~hk)`
+wrapper.)
+
+```bash
+tamarin-prover --diff unlinkability.spthy           --prove   # Observational_equivalence: verified (2315 steps)
+tamarin-prover --diff unlinkability-cleartext.spthy --prove   # Observational_equivalence: falsified (10 steps)  ← negative control
+```
+
+Scope: the header keys are modeled as fresh secrets the store never holds (they derive from the root
+chain — dh-ratchet.md §5); the 12-byte frame nonce is the per-frame fresh value, itself not a linking
+tag. The implementation-level echo of this property is the `header encryption removes the linking tag`
+test in `DoubleRatchetSpec`.
 
 ---
 
