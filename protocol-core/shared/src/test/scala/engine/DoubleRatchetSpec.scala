@@ -149,6 +149,20 @@ class DoubleRatchetSpec extends AnyFunSuite:
     val (_, eve) = pair(seed = 2) // a responder bootstrapped from a DIFFERENT content root
     assert(eve.decrypt(alice.encrypt(inner("not for you"))).isEmpty)
 
+  test("a valid header with a tampered body leaves the ratchet intact (atomic receive)"):
+    val (alice, bob) = pair()
+    val w = alice.encrypt(inner("intact?"))
+    // Flip a byte in the message region (offset ≥ 68) — the sealed HEADER still authenticates, but the
+    // message AEAD will fail. The ratchet must NOT advance (no DH step / skip / counter / key wipe),
+    // so the genuine frame for the same position still decrypts afterwards.
+    val bad = w.clone()
+    bad(DoubleRatchet.WireSize - 1) = (bad(DoubleRatchet.WireSize - 1) ^ 0x01).toByte
+    assert(bob.decrypt(bad).isEmpty, "a tampered body ⇒ None")
+    assert(
+      bob.decrypt(w).map(text).contains("intact?"),
+      "the genuine frame still decrypts (state intact)"
+    )
+
   test("replaying a consumed frame returns None (the message key is gone)"):
     val (alice, bob) = pair()
     val w = alice.encrypt(inner("once"))

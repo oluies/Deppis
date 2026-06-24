@@ -55,3 +55,11 @@ class DoubleRatchetJsSpec extends AnyFunSuite:
     assert(bob.decrypt(alice.encrypt(inner("real"))).map(text).contains("real"))
     assert(bob.decrypt(Array.fill[Byte](DoubleRatchet.WireSize)(0x5a.toByte)).isEmpty)
     assert(bob.decrypt(alice.encrypt(inner("after"))).map(text).contains("after"))
+
+  test("a valid header with a tampered body leaves the ratchet intact on JS (atomic receive)"):
+    val (alice, bob) = pair()
+    val w = alice.encrypt(inner("intact?"))
+    val bad = w.clone()
+    bad(DoubleRatchet.WireSize - 1) = (bad(DoubleRatchet.WireSize - 1) ^ 0x01).toByte
+    assert(bob.decrypt(bad).isEmpty)
+    assert(bob.decrypt(w).map(text).contains("intact?"))

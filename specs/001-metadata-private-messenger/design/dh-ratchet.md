@@ -184,6 +184,13 @@ Counters are 4 bytes (not 2) so a chain can never silently overflow them — cos
 4. Else the frame is not for us / undecryptable ⇒ treated exactly like a carrier (no error that varies
    on content; matches the current `decryptFrame ⇒ None` path).
 
+**Atomic receive.** The sealed header and sealed message are authenticated under INDEPENDENT keys
+(`HK` vs `MK`, no AAD cross-binding), so a valid header with a tampered body must not advance the
+ratchet — otherwise an active attacker could flip one body bit to consume a ratchet position. The
+implementation therefore derives the frame's `MK` on a SCRATCH copy of the state, opens the body
+FIRST, and only replays the real mutations (DH step, skips, counter/key wipes) once the body AEAD
+verifies; a failure leaves the ratchet untouched (the no-mutation-on-undecryptable invariant).
+
 The 226→170 payload shrink is acceptable for chat text. If a future payload needs more room, the
 documented relaxation is to lift the per-frame plaintext cap by spanning multiple store frames at the
 transport layer (out of scope here); the ratchet format does not change.
@@ -193,8 +200,11 @@ transport layer (out of scope here); the ratchet format does not change.
 ## 7. Skipped / out-of-order keys — bounded
 
 Out-of-order and dropped frames are normal (the store is a mailbox; carrier rounds interleave). On a
-gap of `N - Nr` messages the receiver derives and **stashes** the intermediate `MK`s in `MKSKIPPED`,
-keyed by `(receiving-header-epoch, N)`. Bounds (DoS-resistant, like libsignal):
+gap of `N - Nr` messages the receiver derives and **stashes** the intermediate `MK`s, grouped by
+receiving-chain **epoch** — each epoch holds its header key in a **wipeable byte array** (not a hex
+`String`, which the JVM cannot zero) and an `N → MK` map; a drained or evicted epoch has its header key
+wiped, so no retired header key lingers un-erasably (a metadata-unlinkability concern). Bounds
+(DoS-resistant, like libsignal):
 - **`MAX_SKIP = 1000`** keys per chain step — a header claiming a larger jump is rejected as a carrier
   (no memory blow-up, no distinguishable error).
 - **`MAX_SKIP_CHAINS`** retained receiving epochs — oldest evicted FIFO; its stashed keys are wiped.

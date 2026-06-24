@@ -89,7 +89,6 @@ object DoubleRatchet:
     ((b(off) & 0xff) << 24) | ((b(off + 1) & 0xff) << 16) | ((b(off + 2) & 0xff) << 8) | (b(
       off + 3
     ) & 0xff)
-  private def hex(b: Array[Byte]): String = b.map(x => f"${x & 0xff}%02x").mkString
 
   // ---- Bootstrap (dh-ratchet.md §5): both sides derive a deterministic responder ratchet key + the
   //      root and the two shared header keys from the handshake `contentRoot`; no interactive prekey.
@@ -168,9 +167,14 @@ final class DoubleRatchet private (
   private var ns: Int = 0 // message number in the current sending chain
   private var nr: Int = 0 // message number in the current receiving chain
   private var pn: Int = 0 // length of the previous sending chain
-  // Skipped message keys for out-of-order / missed frames, keyed by (receiving header key, N).
-  // Insertion-ordered so the oldest can be evicted (and wiped) when the bound is hit.
-  private val skipped = mutable.LinkedHashMap.empty[(String, Int), Array[Byte]]
+  // Skipped message keys for out-of-order / missed frames, grouped by receiving-chain epoch. The
+  // header key is held as a WIPEABLE byte array (not a hex String, which the JVM cannot zero), so a
+  // retired header key leaves no un-erasable copy behind — same metadata-unlinkability concern that
+  // motivates wiping retired header keys in `dhRatchet`. Insertion-ordered (oldest evicted first).
+  private final class SkippedEpoch(val hk: Array[Byte]):
+    val keys = mutable.LinkedHashMap.empty[Int, Array[Byte]] // N -> message key
+  private val skippedEpochs = mutable.ArrayBuffer.empty[SkippedEpoch]
+  private var skippedCount = 0 // total stashed keys across all epochs (bounded by MaxSkipStore)
 
   /** True once a sending chain exists (the initiator from the start; the responder after its first
     * received message). The engine must not call `encrypt` / `encryptPending` while this is false. */
@@ -235,36 +239,74 @@ final class DoubleRatchet private (
               else withinSkip(nr, headerN)
             if !ok then None
             else
-              if isDhStep then
-                skipMessageKeys(headerPn) // finish the previous receiving chain (under the OLD HKr)
-                dhRatchet(dhPub)
-              skipMessageKeys(headerN) // skip up to this frame in the current receiving chain
-              val ck = ckr.get
-              val mk = messageKey(ck)
-              ckr = Some(nextCk(ck))
-              wipe(ck)
-              nr += 1
-              val inner = Aead.open(mk, nonce, sealedMsg)
-              wipe(mk)
-              inner
+              // ATOMIC receive: the sealed header and sealed message are authenticated under
+              // INDEPENDENT keys, so a valid header with a tampered body would otherwise advance the
+              // ratchet (DH step, skips, wipes) and only THEN fail the message AEAD — letting an active
+              // attacker consume a ratchet position with a single bit flip. So we first derive this
+              // frame's message key on a SCRATCH copy of the state (no instance mutation) and open the
+              // body; only on success do we replay the real mutations. A failure leaves the ratchet
+              // untouched (the no-mutation-on-undecryptable invariant, dh-ratchet.md §6/§9).
+              val mk = peekMessageKey(dhPub, headerN, isDhStep)
+              Aead.open(mk, nonce, sealedMsg) match
+                case None =>
+                  wipe(mk)
+                  None
+                case Some(inner) =>
+                  wipe(mk)
+                  if isDhStep then
+                    skipMessageKeys(
+                      headerPn
+                    ) // finish the previous chain (stash, under the OLD HKr)
+                    dhRatchet(dhPub)
+                  skipMessageKeys(headerN) // skip up to this frame in the current chain
+                  val ck = ckr.get
+                  ckr = Some(nextCk(ck))
+                  wipe(ck)
+                  nr += 1
+                  Some(inner)
 
-  /** Try the stashed out-of-order keys: for each distinct stored receiving header key, trial-open the
-    * header; on a match, look up (HK, N) and decrypt + remove + wipe that key. */
+  /** Derive THIS frame's message key without mutating instance state — used to verify the message
+    * AEAD before committing the ratchet mutations (see `decrypt`). Walks a scratch chain key forward;
+    * for a DH step it derives the would-be new receiving chain purely (no fresh sending key, no wipes
+    * of live state). */
+  private def peekMessageKey(dhPub: Array[Byte], headerN: Int, isDhStep: Boolean): Array[Byte] =
+    var ck =
+      if isDhStep then
+        val (rkTmp, ckrNew, nhkTmp) = kdfRk(rk, X25519.sharedSecret(dhsPriv, dhPub))
+        wipe(rkTmp)
+        wipe(nhkTmp)
+        ckrNew // a fresh array — safe to wipe during the walk below
+      else ckr.get.clone() // clone so the walk does not wipe the live receiving chain key
+    var i = if isDhStep then 0 else nr
+    while i < headerN do
+      val nx = nextCk(ck)
+      wipe(ck)
+      ck = nx
+      i += 1
+    val mk = messageKey(ck)
+    wipe(ck)
+    mk
+
+  /** Try the stashed out-of-order keys: for each stored receiving-chain epoch, trial-open the header
+    * with that epoch's header key; on a match, look up `N` and decrypt + remove + wipe that key. The
+    * message key is independent of the live ratchet state, so a body that fails to open here also
+    * leaves state untouched (no commit happened). */
   private def trySkipped(
       nonce: Array[Byte],
       sealedHeader: Array[Byte],
       sealedMsg: Array[Byte]
   ): Option[Array[Byte]] =
-    val distinctHks = skipped.keysIterator.map(_._1).toSeq.distinct
-    distinctHks.iterator
-      .flatMap { hkHex =>
-        // Recover the raw HK from any entry that carries it (we stored it as the hex key).
-        val hkRaw = hexToBytes(hkHex)
-        Aead.open(hkRaw, nonce, sealedHeader).map(h => (hkHex, dec4(h, DhBytes + CtrBytes)))
-      }
-      .collectFirst { case (hkHex, n) if skipped.contains((hkHex, n)) => (hkHex, n) }
-      .flatMap { case (hkHex, n) =>
-        val mk = skipped.remove((hkHex, n)).get
+    skippedEpochs.iterator
+      .flatMap(ep =>
+        Aead.open(ep.hk, nonce, sealedHeader).map(h => (ep, dec4(h, DhBytes + CtrBytes)))
+      )
+      .collectFirst { case (ep, n) if ep.keys.contains(n) => (ep, n) }
+      .flatMap { case (ep, n) =>
+        val mk = ep.keys.remove(n).get
+        skippedCount -= 1
+        if ep.keys.isEmpty then // epoch drained: wipe its header key and drop it
+          wipe(ep.hk)
+          skippedEpochs -= ep
         val inner = Aead.open(mk, nonce, sealedMsg)
         wipe(mk)
         inner
@@ -293,21 +335,33 @@ final class DoubleRatchet private (
     ckr match
       case None => ()
       case Some(_) =>
+        // All keys skipped here belong to the current receiving epoch (one header key); find or open
+        // its stash bucket once.
         val hk = hkr.get
+        val epoch = skippedEpochs.find(e => java.util.Arrays.equals(e.hk, hk)).getOrElse {
+          val e = new SkippedEpoch(hk.clone()); skippedEpochs += e; e
+        }
         while nr < until do
           val ck = ckr.get
-          val mk = messageKey(ck)
-          storeSkipped(hk, nr, mk)
+          epoch.keys(nr) = messageKey(ck)
+          skippedCount += 1
+          evictIfOverCap()
           ckr = Some(nextCk(ck))
           wipe(ck)
           nr += 1
 
-  private def storeSkipped(hk: Array[Byte], n: Int, mk: Array[Byte]): Unit =
-    skipped((hex(hk), n)) = mk
-    while skipped.size > MaxSkipStore do
-      val (oldestKey, oldestMk) = skipped.head
-      skipped.remove(oldestKey)
-      wipe(oldestMk)
+  /** Bound the stash (DoS-resistant): evict + wipe the oldest stashed message key, dropping (and
+    * wiping) an epoch once it is drained, until the total is within `MaxSkipStore`. */
+  private def evictIfOverCap(): Unit =
+    while skippedCount > MaxSkipStore && skippedEpochs.nonEmpty do
+      val oldest = skippedEpochs.head
+      val (n, mk) = oldest.keys.head
+      oldest.keys.remove(n)
+      wipe(mk)
+      skippedCount -= 1
+      if oldest.keys.isEmpty then
+        wipe(oldest.hk)
+        skippedEpochs.remove(0)
 
   /** A DH ratchet step: rotate header keys, derive the receiving chain from the peer's new public
     * key, then generate a FRESH random sending key pair and derive the new sending chain — this is
@@ -318,7 +372,7 @@ final class DoubleRatchet private (
     nr = 0
     // Rotate header keys, wiping the retired ones: a stale header key captured later would let an
     // attacker LINK this chain's past frames — the metadata leak header encryption exists to prevent.
-    // (Skipped-key entries are keyed by a hex COPY of the header key, so they survive the wipe.)
+    // (Skipped-key epochs hold their OWN cloned header-key copy, so they are unaffected by this wipe.)
     val retiredHks = hks
     val retiredHkr = hkr
     hks = Some(nhks)
@@ -340,6 +394,3 @@ final class DoubleRatchet private (
     dhsPub = newPub
     cks = Some(cksNew)
     nhks = nhksNew
-
-  private def hexToBytes(s: String): Array[Byte] =
-    s.grouped(2).map(Integer.parseInt(_, 16).toByte).toArray
