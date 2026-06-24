@@ -7,7 +7,7 @@ that drops the `DEV, NO METADATA PRIVACY` label. They attack two different quest
 | Question | Artifact | Status |
 |---|---|---|
 | **Does the *implementation* hold its invariants under every reachable op sequence?** | `engine.DoubleRatchetModelSpec` (ScalaCheck stateful model) | ✅ runs in CI (JVM), green |
-| **Does the *design* provide secrecy / forward secrecy / PCS against a Dolev-Yao attacker?** | `ratchet.spthy` (Tamarin symbolic model) | ⚠️ authored, **not yet machine-checked** (see below) |
+| **Does the *design* provide message secrecy + PCS against a Dolev-Yao attacker?** | `ratchet.spthy` (Tamarin symbolic model) | ✅ **machine-checked** — all 4 lemmas verified (Tamarin 1.12.0) |
 
 This split mirrors the Constitution's own layering. **Primitives** (X25519, HMAC-SHA256,
 ChaCha20-Poly1305) are delegated to vetted libraries — we *inherit* their verification (the same
@@ -53,44 +53,63 @@ healing — **Alice sends (step 1) → Bob receives + heals with a fresh DH `~b`
 the healed chain** — plus a chain-key **reveal** rule, and states:
 
 - `executable` — sanity: the protocol runs to completion.
+- `pcs_premise_reachable` — sanity: the reveal→heal→healed-send scenario PCS quantifies over is
+  reachable, so the all-traces PCS result is provably non-vacuous.
 - `message_secrecy` — a message leaks only if the attacker revealed *the very chain root that protects
   it* (`ProtectedBy(m, ck)` binds the reveal to the message, so the lemma is not trivially discharged by
   any unrelated reveal).
-- `post_compromise_security` — the premise requires **reveal(`r`) < heal(`h`) < send(`s`)**: even with
-  the step-1 chain root compromised, a message sent on a chain healed by a fresh DH *after* the
-  compromise stays secret. Because the heal lives in its own rule (`B_recv1_heal`), distinct from the
-  send (`B_send2`), `h < s` is satisfiable and the lemma is non-vacuous — it genuinely encodes "healing
-  recovers from a compromise," the formal statement of dh-ratchet.md §9 "Gained: PCS," rather than mere
-  secrecy in the absence of any compromise.
+- `post_compromise_security` — a message `m2` sent on a chain **healed** by a fresh DH `b` stays secret
+  **even though** that chain's pre-heal root `rk1` was **revealed** before the heal. The fresh `b`
+  correlates the healed send (`HealedSend(m2, b)`) with the heal (`Heal(b, rk1)`) of the *same session*,
+  and the reveal is of *that* session's pre-heal root (`RevealCK(rk1)` with `r < h`) — so it is genuine
+  post-compromise recovery, the formal statement of dh-ratchet.md §9 "Gained: PCS."
 
-### ⚠️ Verification status — read this before citing it
+### ✅ Verification status — machine-checked
 
-**The model is authored against Tamarin syntax but has NOT been run through `tamarin-prover`** — Tamarin
-(Haskell + Maude) is not installed in this environment or in CI. It is a **reviewed draft / starting
-artifact**, not a completed proof. Honest caveats:
+Run with **Tamarin 1.12.0 + Maude 3.5.1**, `tamarin-prover ratchet.spthy --prove` (<1 s, no oracle/reuse
+lemma needed — the model is bounded to two steps so it closes automatically; `--auto-sources` is not
+required):
 
-- It may need syntactic/well-formedness fixes on first real run.
-- The DH-ratchet's *unbounded* loop is the known-hard part for Tamarin termination; this model is
-  deliberately **bounded** to two steps. A general proof needs reusable lemmas and likely a proof
-  `oracle` (the published Signal/Tamarin analyses do exactly this).
-- **Header unlinkability is NOT covered here.** It is an *indistinguishability* property (the store must
-  not tell two frames of one chain apart), which requires Tamarin's **observational-equivalence (diff)**
-  mode — a separate model, tracked as future work. The trace lemmas above say nothing about it; the
-  implementation-level evidence for unlinkability is the `header encryption removes the linking tag`
-  test in `DoubleRatchetSpec`.
-
-### Run recipe (for a reviewer with Tamarin installed)
-
-```bash
-# macOS: brew install tamarin-prover/tap/tamarin-prover   (pulls GHC + Maude; slow)
-tamarin-prover ratchet.spthy --prove          # batch-prove all lemmas
-tamarin-prover interactive ratchet.spthy      # GUI at http://127.0.0.1:3001 to drive proofs
+```
+executable               (exists-trace): verified (7 steps)
+pcs_premise_reachable    (exists-trace): verified (6 steps)   # PCS premise is reachable ⇒ non-vacuous
+message_secrecy          (all-traces):   verified (37 steps)
+post_compromise_security (all-traces):   verified (16 steps)
+All wellformedness checks were successful.
 ```
 
-A green `--prove` over `post_compromise_security` (after any refinement Tamarin needs to close it) is
-the artifact that would let the security review sign off on the *design's* PCS claim — the lemma now
-encodes the reveal→heal→send scenario, so a passing run is meaningful rather than vacuous. Until the run
-is actually green it remains an honest work-in-progress.
+(The proof is **message secrecy + PCS**, not forward secrecy — there is no FS lemma here. The model has
+one message per chain root, so within-chain FS is not what Tamarin checks; FS rests on the one-way KDF
+chain + key wiping in the design, exercised by the single-use/replay tests in `DoubleRatchetModelSpec`.
+`pcs_premise_reachable` is an `exists-trace` companion proving the reveal→heal→send scenario is
+reachable, so the all-traces PCS result cannot be vacuously true.)
+
+**Running the prover materially improved the model** — it caught three defects an "authored but
+unchecked" draft would have shipped:
+1. a **circular header-key derivation** (the header was sealed under a key derived from the same DH it
+   carries — Tamarin's message-derivation check flagged it; the real design uses a bootstrap header key);
+2. a **free-variable scoping bug** in the PCS lemma (`#h` bound in one existential, used in another);
+3. an **over-broad PCS quantifier** — `m2` ranged over *all* messages, so the prover falsified it by
+   binding `m2` to a step-1 message and revealing its own key (a lemma bug, not a protocol flaw). Scoping
+   `m2` to healed-chain sends fixed it.
+
+This is the concrete argument for *actually running the tool* rather than trusting a hand-written model.
+
+**Out of scope (honest limits):**
+- The DH ratchet's *unbounded* loop is the known-hard part for Tamarin termination; this model is
+  deliberately **bounded** to two steps (enough to exhibit one full heal). An unbounded proof needs
+  reusable lemmas / a proof `oracle`, as the published Signal/Tamarin analyses do.
+- **Header unlinkability is NOT covered** — it is an *indistinguishability* property requiring Tamarin's
+  **observational-equivalence (diff)** mode, a separate model (future work). The implementation-level
+  evidence for it is the `header encryption removes the linking tag` test in `DoubleRatchetSpec`.
+
+### Run recipe
+
+```bash
+# macOS: brew install tamarin-prover/tap/tamarin-prover   (also installs Maude + GraphViz)
+tamarin-prover ratchet.spthy --prove          # batch-prove all lemmas (<1 s)
+tamarin-prover interactive ratchet.spthy      # GUI at http://127.0.0.1:3001 to inspect the proofs
+```
 
 ---
 
