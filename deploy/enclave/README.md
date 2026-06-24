@@ -49,7 +49,11 @@ to verify the result, SGX hardware. It is documented here, not run in CI:
    a signed **checkpoint** to the public append-only log (e.g. a Sigstore/Rekor- or Trillian-backed
    transparency service), and record the consistency proof from the previous checkpoint.
 4. **Pin.** Relying parties (clients) pin a checkpoint root out of band; thereafter a measurement is
-   trusted only via an inclusion proof to a pinned root — which the software above checks.
+   trusted only via an inclusion proof to a pinned root — the mechanism `ReferenceLogTrust.trusts`
+   implements and tests. NOTE: wiring this pinned-root inclusion check INTO the attestation appraisal
+   path (so the verifier consults a pinned root rather than the full live log) is part of the
+   still-open T056/T058 live-attestation integration; today the verifier appraises against the
+   logged reference set without the pinned-root gate.
 
 Until steps 1–4 run on real hardware with a real SGX toolchain, no build advertises privacy: the label
 stays `DEV, NO METADATA PRIVACY` (Constitution IV). This directory + the tested log mechanism are the

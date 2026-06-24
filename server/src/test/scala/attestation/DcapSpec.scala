@@ -14,7 +14,7 @@ class DcapSpec extends AnyFunSuite:
   private def bytes(xs: Int*): Vector[Byte] = xs.map(_.toByte).toVector
   private val mrEnclave = bytes(1, 2, 3, 4)
   private val mrSigner = bytes(9, 9, 9)
-  private val refs = ReferenceValues(Set(mrEnclave), Set(mrSigner))
+  private val refs = ReferenceValues(Set(Measurement(mrEnclave, mrSigner)))
   private val nonce = (0 until 16).map(i => (0xa0 + i).toByte).toVector
   private val enclaveKey = bytes(0x42, 0x43, 0x44)
 

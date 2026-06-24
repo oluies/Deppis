@@ -42,11 +42,10 @@ final class ReferenceLog:
       case -1 => None
       case i => Some(LoggedReference(m, i, TransparencyLog.inclusionProof(entries, i)))
 
-  /** The trusted reference set the [[AttestationVerifier]] appraises against — derived ONLY from the
-    * logged measurements, so the appraisal set is exactly the transparency-logged set. */
+  /** The trusted reference set the [[AttestationVerifier]] appraises against — exactly the logged
+    * `(mrEnclave, mrSigner)` measurements (whole pairs, so the binding is preserved). */
   def referenceValues: ReferenceValues =
-    val ms = (0 until entries.size).map(i => decode(entries(i)))
-    ReferenceValues(ms.map(_.mrEnclave).toSet, ms.map(_.mrSigner).toSet)
+    ReferenceValues((0 until entries.size).map(i => decode(entries(i))).toSet)
 
   private def decode(e: Array[Byte]): Measurement =
     val l1 = ((e(0) & 0xff) << 8) | (e(1) & 0xff)

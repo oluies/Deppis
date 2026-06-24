@@ -9,10 +9,7 @@ class AttestationSpec extends AnyFunSuite:
   private val mrEnclave = bytes(1, 2, 3, 4)
   private val mrSigner = bytes(9, 9, 9)
   private val measure = Measurement(mrEnclave, mrSigner)
-  private val refs = ReferenceValues(
-    allowedMrEnclave = Set(mrEnclave),
-    allowedMrSigner = Set(mrSigner)
-  )
+  private val refs = ReferenceValues(Set(measure))
   // >= MinNonceBytes (16) so the freshness guard passes; replay defence leans on this.
   private val nonce = (0 until 16).map(i => (0xa0 + i).toByte).toVector
   private val enclaveKey = bytes(0x42, 0x43, 0x44)

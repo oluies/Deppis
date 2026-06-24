@@ -37,8 +37,7 @@ class ReferenceLogSpec extends AnyFunSuite:
     val a = m(0x01, 0x02); val b = m(0x03, 0x04)
     log.append(a); log.append(b)
     val refs = log.referenceValues
-    assert(refs.allowedMrEnclave == Set(a.mrEnclave, b.mrEnclave))
-    assert(refs.allowedMrSigner == Set(a.mrSigner, b.mrSigner))
+    assert(refs.allowed == Set(a, b), "exactly the logged measurement pairs")
     // And the verifier, fed the log's reference set, passes the logged measurement and rejects others.
     val verifier = new SoftwareAttestationVerifier
     val nonce = Vector.tabulate(16)(i => i.toByte)
@@ -50,3 +49,23 @@ class ReferenceLogSpec extends AnyFunSuite:
       refs
     )
     assert(rogue match { case AttestationResult.Failed(_) => true; case _ => false })
+
+  test(
+    "a never-logged CROSS combination of two logged measurements is rejected (binding preserved)"
+  ):
+    // (E1,S1) and (E2,S2) logged; the cross (E1,S2) was never logged and must NOT be trusted — the
+    // measurement-to-signer binding is preserved (no Cartesian product).
+    val log = new ReferenceLog
+    val one = Measurement(Vector.fill(32)(0x11), Vector.fill(32)(0x22))
+    val two = Measurement(Vector.fill(32)(0x33), Vector.fill(32)(0x44))
+    log.append(one); log.append(two)
+    val cross = Measurement(one.mrEnclave, two.mrSigner) // E1 ‖ S2 — never logged
+    assert(log.reference(cross).isEmpty, "cross combination is not in the log")
+    val verifier = new SoftwareAttestationVerifier
+    val nonce = Vector.tabulate(16)(i => i.toByte)
+    val res =
+      verifier.verify(Quote(cross, Vector(1), nonce, Vector.empty), nonce, log.referenceValues)
+    assert(
+      res match { case AttestationResult.Failed(_) => true; case _ => false },
+      "cross ⇒ untrusted"
+    )
