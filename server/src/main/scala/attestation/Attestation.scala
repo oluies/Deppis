@@ -36,11 +36,11 @@ final case class Quote(
 )
 
 /** Transparency-logged reference values the measurement is appraised against (Constitution IX/X):
-  * only enclaves whose measurement is in the published, reviewed set are trusted. */
-final case class ReferenceValues(
-    allowedMrEnclave: Set[Vector[Byte]],
-    allowedMrSigner: Set[Vector[Byte]]
-)
+  * only enclaves whose measurement is in the published, reviewed set are trusted. The set holds whole
+  * `(mrEnclave, mrSigner)` measurements (PAIRS), so the `mrEnclave ↔ mrSigner` binding is preserved —
+  * appraising the two components against independent sets would accept a never-logged cross
+  * combination `(E1, S2)` of two logged measurements `(E1, S1)`, `(E2, S2)`. */
+final case class ReferenceValues(allowed: Set[Measurement])
 
 /** Outcome of appraising a quote. `Failed` reasons are fixed, public strings — never
   * secret-dependent (Constitution II). On `Passed`, the verified enclave key is released. */
@@ -110,7 +110,7 @@ abstract class AppraisingVerifier extends AttestationVerifier:
   /** Measurement appraisal compares against the published reference set. These are public
     * (transparency-logged) values, not secrets, so ordinary set membership is appropriate. */
   private def appraised(m: Measurement, refs: ReferenceValues): Boolean =
-    refs.allowedMrEnclave.contains(m.mrEnclave) && refs.allowedMrSigner.contains(m.mrSigner)
+    refs.allowed.contains(m) // exact (mrEnclave, mrSigner) pair — no cross-product
 
 object Attestation:
   /** Constant-time equality for the freshness-nonce comparison (Constitution III). Length is not
