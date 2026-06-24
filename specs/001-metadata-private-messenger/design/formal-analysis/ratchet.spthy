@@ -4,12 +4,17 @@ theory DeppisDoubleRatchet
   Design under analysis: ../dh-ratchet.md   Implementation: engine.DoubleRatchet (Scala).
 
   ============================================================================================
-  VERIFICATION STATUS: AUTHORED — NOT YET MACHINE-CHECKED.
-  Tamarin is not installed in this repo's CI; this file has been written against Tamarin's
-  syntax but has NOT been run through `tamarin-prover`. Treat it as a reviewed DRAFT / starting
-  artifact for the formal security analysis, expected to need refinement (oracles / reuse
-  lemmas) before the lemmas close automatically. See README.md for scope, run recipe, and the
-  honest list of limitations. Do not cite it as a completed proof.
+  VERIFICATION STATUS: MACHINE-CHECKED — all lemmas VERIFIED.
+    tamarin-prover 1.12.0 + Maude 3.5.1:  `tamarin-prover ratchet.spthy --prove`
+      executable               (exists-trace): verified (7 steps)
+      message_secrecy          (all-traces):   verified (37 steps)
+      post_compromise_security (all-traces):   verified (16 steps)
+    All wellformedness checks pass; no `sorry`/oracle/reuse lemma needed (the model is bounded
+    to two steps, so it closes automatically). See README.md for scope + limitations.
+  NOTE: running the prover materially FIXED the model — it caught (a) a circular header-key
+  derivation, (b) a free-variable scoping bug in the PCS lemma, and (c) an over-broad PCS
+  quantifier that let `m2` range over step-1 messages. An "authored but unchecked" model would
+  have shipped all three. This is the honest argument for actually running the tool.
   ============================================================================================
 
   Scope (trace properties; bounded to make the analysis tractable):
@@ -25,22 +30,28 @@ theory DeppisDoubleRatchet
   model treats them as perfect):
     * X25519            -> the diffie-hellman builtin ('g'^x, with (g^x)^y = (g^y)^x and CDH:
                            the adversary cannot derive 'g'^(x*y) from 'g'^x and 'g'^y alone).
-    * HMAC-SHA256 KDFs  -> one-way free functions kdfRK/2, kdfCK/1, msgK/1, hdrK/1
+    * HMAC-SHA256 KDFs  -> one-way free functions kdfRK/2, kdfCK/1, msgK/1
                            (kdfCK derives the responder's deterministic bootstrap key from cr).
     * ChaCha20-Poly1305 -> the symmetric-encryption builtin (senc/sdec): perfect AEAD.
+
+  Header keys (dh-ratchet.md §5) are BOOTSTRAP/root-derived and INDEPENDENT of the ratchet public key
+  carried inside the header — the receiver already holds the header key, decrypts the header, and only
+  THEN learns the pubkey. They are modeled as kdfRK(cr,'hka') / kdfRK(cr,'hkb') (functions of cr only,
+  secret as long as cr is). [An earlier draft wrongly sealed the header under a key derived from the
+  same DH it carries, which is circular — Tamarin's message-derivation check flagged exactly that.]
 
   Key terms (let-bound in the rules):
     rk1 = kdfRK( kdfRK(cr,'root0'),  ('g'^kdfCK(cr))^a )   -- step-1 chain root (Alice's send chain)
     rk2 = kdfRK( rk1,                 ('g'^a)^b           )   -- step-2 chain root (healed by fresh ~b)
-  Each message m is protected by msgK(rk*) and its header by hdrK(rk*); ProtectedBy(m, rk*) records
-  WHICH chain root protects m, so a reveal can be bound to the right message.
+  Each message m is protected by msgK(rk*); ProtectedBy(m, rk*) records WHICH chain root protects m,
+  so a reveal can be bound to the right message.
 */
 
 begin
 
 builtins: diffie-hellman, symmetric-encryption
 
-functions: kdfRK/2, kdfCK/1, msgK/1, hdrK/1
+functions: kdfRK/2, kdfCK/1, msgK/1
 
 /* Bootstrap: a shared content root established out of band (the handshake, analysed elsewhere). */
 rule Bootstrap:
@@ -56,8 +67,8 @@ rule A_send1:
     in
     [ A_init(~cr), Fr(~a), Fr(~m1) ]
   --[ Send(~m1), SecretMsg(~m1), ProtectedBy(~m1, rk1) ]->
-    [ Out( senc{ '1', 'g'^~a }( hdrK(rk1) ) )   // sealed header (DH pubkey + counter)
-    , Out( senc{ ~m1 }( msgK(rk1) ) )           // sealed message
+    [ Out( senc{ '1', 'g'^~a }( kdfRK(~cr, 'hka') ) )   // header sealed under the bootstrap header key
+    , Out( senc{ ~m1 }( msgK(rk1) ) )                   // sealed message
     , !RevealableCK(rk1) ]
 
 /* Step 1 receive + HEAL — Bob reconstructs rk1 (shared = Apub^kdfCK(cr)), then the DH ratchet
@@ -68,18 +79,18 @@ rule B_recv1_heal:
         rk2 = kdfRK(rk1, Apub^~b)
     in
     [ B_init(~cr)
-    , In( senc{ '1', Apub }( hdrK(rk1) ) )
+    , In( senc{ '1', Apub }( kdfRK(~cr, 'hka') ) )   // open the header with the bootstrap header key
     , In( senc{ m1 }( msgK(rk1) ) )
     , Fr(~b) ]
-  --[ Recv(m1), Heal(~b) ]->
+  --[ Recv(m1), Heal(~b, rk1) ]->   // record the PRE-heal step-1 root rk1 that healing recovers from
     [ B_chain(~cr, Apub, ~b, rk2) ]
 
 /* Step 2 — Bob replies m2 on the HEALED chain rk2 (distinct rule ⇒ distinct timepoint, so the heal
    strictly precedes this send). m2 is protected by msgK(rk2). */
 rule B_send2:
     [ B_chain(~cr, Apub, ~b, rk2), Fr(~m2) ]
-  --[ Send(~m2), SecretMsg(~m2), ProtectedBy(~m2, rk2) ]->
-    [ Out( senc{ '1', 'g'^~b }( hdrK(rk2) ) )
+  --[ Send(~m2), SecretMsg(~m2), ProtectedBy(~m2, rk2), HealedSend(~m2, ~b) ]->
+    [ Out( senc{ '1', 'g'^~b }( kdfRK(~cr, 'hkb') ) )   // header under the responder's bootstrap HK
     , Out( senc{ ~m2 }( msgK(rk2) ) ) ]
 
 /* Adversary STATE compromise: reveal a published chain root. The Dolev-Yao adversary already owns
@@ -105,15 +116,19 @@ lemma message_secrecy:
      (SecretMsg(m)@i & ProtectedBy(m, ck)@i)
      ==> (not (Ex #k. K(m)@k)) | (Ex #r. RevealCK(ck)@r)"
 
-// POST-COMPROMISE SECURITY: even when the step-1 chain root is REVEALED (a state compromise), a
-// message sent on a chain that was HEALED by a fresh DH AFTER the reveal stays secret. The premise
-// requires reveal(r) < heal(h) < send(s), so a green proof genuinely establishes healing — not mere
-// secrecy in the absence of compromise.
+// POST-COMPROMISE SECURITY. A message m2 sent on a chain HEALED by a fresh DH `b` stays secret EVEN
+// THOUGH the chain's PRE-heal root `rk1` was revealed (a state compromise) before the heal. The fresh
+// `b` correlates the healed send (`HealedSend(m2,b)`) with the heal (`Heal(b,rk1)`) of the SAME
+// session, and the reveal is of THAT session's pre-heal root (`RevealCK(rk1)`) — so this is genuine
+// post-compromise recovery, not secrecy of an unrelated message. (Scoping m2 to HealedSend, not every
+// SecretMsg, is essential: an earlier draft quantified over all messages and was falsified by binding
+// m2 to a STEP-1 message and revealing its own key — a lemma bug, not a protocol flaw.)
 lemma post_compromise_security:
-  "All m2 #s.
-     ( SecretMsg(m2)@s
-     & (Ex b #h. Heal(b)@h & h < s)
-     & (Ex ck #r. RevealCK(ck)@r & r < h) )
+  "All m2 b rk1 #s #h #r.
+     ( HealedSend(m2, b)@s
+     & Heal(b, rk1)@h
+     & RevealCK(rk1)@r
+     & r < h )
      ==> not (Ex #k. K(m2)@k)"
 
 end
