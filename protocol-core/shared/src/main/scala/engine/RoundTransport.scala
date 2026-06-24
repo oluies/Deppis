@@ -26,3 +26,11 @@ trait RoundTransport:
   /** Retrieve (and consume) a framed message under a token, if one is present (PONG store read,
     * single-use). `None` means no message under that token this round. */
   def retrieve(token: Array[Byte]): Option[Array[Byte]]
+
+  /** The privacy status of THIS backend (T058, Constitution IV/IX). The engine surfaces it as the
+    * client's privacy label, so the UI reports `METADATA PRIVATE` ONLY when connected to a real
+    * backend whose attestation passed. Defaults to the dev status: a transport must explicitly
+    * declare itself private (only the attested enclave-target front does), so a label can never be
+    * accidentally promoted. */
+  def privacyStatus: privacy.Privacy.BuildPrivacyStatus =
+    privacy.Privacy.BuildPrivacyStatus(privacy.Privacy.Backend.Dev, attestationPassed = false)

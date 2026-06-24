@@ -29,3 +29,8 @@ final class GrpcRoundTransport(
 
   def retrieve(token: Array[Byte]): Option[Array[Byte]] =
     store.read(token).toOption.flatten
+
+  /** Surface the backend's attestation-gated status so the engine's client label is true (T058): an
+    * unattested enclave-target backend stays `DEV, NO METADATA PRIVACY`; only a passing attestation
+    * promotes it to `METADATA PRIVATE`. */
+  override def privacyStatus: privacy.Privacy.BuildPrivacyStatus = store.privacyStatus

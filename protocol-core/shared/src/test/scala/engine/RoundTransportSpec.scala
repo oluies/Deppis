@@ -71,6 +71,40 @@ class RoundTransportSpec extends AnyFunSuite:
     assert(e.tick(1).isRight)
     assert(e.drainEvents().isEmpty)
 
+  test("the client privacy label reflects the transport's attestation status (T058)"):
+    // A transport that reports a given backend status (the only override; I/O is unused here).
+    final class StatusTransport(s: privacy.Privacy.BuildPrivacyStatus) extends RoundTransport:
+      def submit(token: Array[Byte], frame: Array[Byte]): Boolean = true
+      def fetchDigest(roundId: Long, clientLabel: Array[Byte]): Array[Byte] = new Array[Byte](64)
+      def retrieve(token: Array[Byte]): Option[Array[Byte]] = None
+      override def privacyStatus: privacy.Privacy.BuildPrivacyStatus = s
+    import privacy.Privacy
+    // Local-only (no transport) ⇒ dev label.
+    assert(!Engine().privacyStatus.metadataPrivate)
+    assert(Engine().privacyStatus.label == Privacy.DevLabel)
+    // A real, ATTESTED enclave-target backend ⇒ METADATA PRIVATE.
+    val attested = Engine(
+      Some(
+        StatusTransport(
+          Privacy.BuildPrivacyStatus(Privacy.Backend.EnclaveTarget, attestationPassed = true)
+        )
+      )
+    )
+    assert(
+      attested.privacyStatus.metadataPrivate && attested.privacyStatus.label == Privacy.PrivateLabel
+    )
+    // An UNATTESTED enclave-target backend ⇒ stays dev (the gate never promotes without attestation).
+    val unattested = Engine(
+      Some(
+        StatusTransport(
+          Privacy.BuildPrivacyStatus(Privacy.Backend.EnclaveTarget, attestationPassed = false)
+        )
+      )
+    )
+    assert(
+      !unattested.privacyStatus.metadataPrivate && unattested.privacyStatus.label == Privacy.DevLabel
+    )
+
   test("tick emits notified when the buddy's digest bit is set (FR-004)"):
     val t = FakeTransport()
     val (bob, _) = confirmedEngine(t, BuddyRole.Responder)

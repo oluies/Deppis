@@ -24,6 +24,9 @@ final class EnclaveObliviousStore(
   def metadataPrivate: Boolean = status.metadataPrivate
   def label: String = status.label
 
+  /** The full attestation-gated privacy status, for the transport to surface to the engine (T058). */
+  def privacyStatus: Privacy.BuildPrivacyStatus = status
+
   // gRPC failures surface as exceptions from the blocking stub; map them to the trait's Left
   // channel. Error text is generic (no secret-dependent content, Constitution II).
   def write(writeToken: Array[Byte], frame: Array[Byte]): Either[String, Unit] =
