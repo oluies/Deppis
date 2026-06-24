@@ -46,16 +46,22 @@ sbt "protocolCore/testOnly engine.DoubleRatchetModelSpec"
 ## 2. Tamarin symbolic model (design) — `ratchet.spthy`
 
 `ratchet.spthy` models the ratchet for a **Dolev-Yao attacker** (full network control) with the
-standard symbolic idealization our Constitution licenses: DH is the `diffie-hellman` builtin, AEAD is
-the `symmetric-encryption` builtin (perfect), and the HMAC KDFs are one-way free functions. It captures
-the **bootstrap + one DH step each direction** (the minimal trace that exhibits healing) and states:
+standard symbolic idealization our Constitution licenses: DH is the `diffie-hellman` builtin (with CDH —
+the attacker cannot derive `g^(xy)` from `g^x`, `g^y`), AEAD is the `symmetric-encryption` builtin
+(perfect), and the HMAC KDFs are one-way free functions. It captures the minimal trace that exhibits
+healing — **Alice sends (step 1) → Bob receives + heals with a fresh DH `~b` → Bob replies (step 2) on
+the healed chain** — plus a chain-key **reveal** rule, and states:
 
 - `executable` — sanity: the protocol runs to completion.
-- `message_secrecy` — a message stays secret from the attacker absent a reveal of the very chain key
-  protecting it.
-- `forward_secrecy_and_pcs` — revealing the step-1 chain key does **not** reveal the step-2 message: the
-  fresh healing DH (`Heal(~b)`) re-keys the root, so a past-state compromise cannot read post-healing
-  content. This is the formal statement of dh-ratchet.md §9 "Gained: post-compromise security."
+- `message_secrecy` — a message leaks only if the attacker revealed *the very chain root that protects
+  it* (`ProtectedBy(m, ck)` binds the reveal to the message, so the lemma is not trivially discharged by
+  any unrelated reveal).
+- `post_compromise_security` — the premise requires **reveal(`r`) < heal(`h`) < send(`s`)**: even with
+  the step-1 chain root compromised, a message sent on a chain healed by a fresh DH *after* the
+  compromise stays secret. Because the heal lives in its own rule (`B_recv1_heal`), distinct from the
+  send (`B_send2`), `h < s` is satisfiable and the lemma is non-vacuous — it genuinely encodes "healing
+  recovers from a compromise," the formal statement of dh-ratchet.md §9 "Gained: PCS," rather than mere
+  secrecy in the absence of any compromise.
 
 ### ⚠️ Verification status — read this before citing it
 
@@ -81,8 +87,10 @@ tamarin-prover ratchet.spthy --prove          # batch-prove all lemmas
 tamarin-prover interactive ratchet.spthy      # GUI at http://127.0.0.1:3001 to drive proofs
 ```
 
-A green `--prove` over `forward_secrecy_and_pcs` (after any refinement) is the artifact that would let
-the security review sign off on the *design's* PCS claim; until then it is an honest work-in-progress.
+A green `--prove` over `post_compromise_security` (after any refinement Tamarin needs to close it) is
+the artifact that would let the security review sign off on the *design's* PCS claim — the lemma now
+encodes the reveal→heal→send scenario, so a passing run is meaningful rather than vacuous. Until the run
+is actually green it remains an honest work-in-progress.
 
 ---
 
