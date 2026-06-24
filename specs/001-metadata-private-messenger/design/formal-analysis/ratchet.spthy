@@ -109,6 +109,14 @@ lemma executable:
   exists-trace
   "Ex m #i #j. Send(m)@i & Recv(m)@j & i < j"
 
+// Non-vacuity for post_compromise_security: the reveal -> heal -> healed-send scenario its all-traces
+// premise quantifies over is actually REACHABLE. Without this a passing all-traces PCS run could be
+// vacuously true (premise never satisfiable); this rules that out.
+lemma pcs_premise_reachable:
+  exists-trace
+  "Ex m2 b rk1 #s #h #r.
+     HealedSend(m2, b)@s & Heal(b, rk1)@h & RevealCK(rk1)@r & r < h"
+
 // SECRECY, bound to each message's OWN protecting key: a secret message leaks only if the adversary
 // revealed the very chain root that protects it (not just *some* reveal anywhere in the trace).
 lemma message_secrecy:

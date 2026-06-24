@@ -7,7 +7,7 @@ that drops the `DEV, NO METADATA PRIVACY` label. They attack two different quest
 | Question | Artifact | Status |
 |---|---|---|
 | **Does the *implementation* hold its invariants under every reachable op sequence?** | `engine.DoubleRatchetModelSpec` (ScalaCheck stateful model) | ✅ runs in CI (JVM), green |
-| **Does the *design* provide secrecy / forward secrecy / PCS against a Dolev-Yao attacker?** | `ratchet.spthy` (Tamarin symbolic model) | ✅ **machine-checked** — all 3 lemmas verified (Tamarin 1.12.0) |
+| **Does the *design* provide message secrecy + PCS against a Dolev-Yao attacker?** | `ratchet.spthy` (Tamarin symbolic model) | ✅ **machine-checked** — all 4 lemmas verified (Tamarin 1.12.0) |
 
 This split mirrors the Constitution's own layering. **Primitives** (X25519, HMAC-SHA256,
 ChaCha20-Poly1305) are delegated to vetted libraries — we *inherit* their verification (the same
@@ -53,6 +53,8 @@ healing — **Alice sends (step 1) → Bob receives + heals with a fresh DH `~b`
 the healed chain** — plus a chain-key **reveal** rule, and states:
 
 - `executable` — sanity: the protocol runs to completion.
+- `pcs_premise_reachable` — sanity: the reveal→heal→healed-send scenario PCS quantifies over is
+  reachable, so the all-traces PCS result is provably non-vacuous.
 - `message_secrecy` — a message leaks only if the attacker revealed *the very chain root that protects
   it* (`ProtectedBy(m, ck)` binds the reveal to the message, so the lemma is not trivially discharged by
   any unrelated reveal).
@@ -70,10 +72,17 @@ required):
 
 ```
 executable               (exists-trace): verified (7 steps)
+pcs_premise_reachable    (exists-trace): verified (6 steps)   # PCS premise is reachable ⇒ non-vacuous
 message_secrecy          (all-traces):   verified (37 steps)
 post_compromise_security (all-traces):   verified (16 steps)
 All wellformedness checks were successful.
 ```
+
+(The proof is **message secrecy + PCS**, not forward secrecy — there is no FS lemma here. The model has
+one message per chain root, so within-chain FS is not what Tamarin checks; FS rests on the one-way KDF
+chain + key wiping in the design, exercised by the single-use/replay tests in `DoubleRatchetModelSpec`.
+`pcs_premise_reachable` is an `exists-trace` companion proving the reveal→heal→send scenario is
+reachable, so the all-traces PCS result cannot be vacuously true.)
 
 **Running the prover materially improved the model** — it caught three defects an "authored but
 unchecked" draft would have shipped:

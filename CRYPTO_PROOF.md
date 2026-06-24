@@ -1,9 +1,11 @@
 # Crypto proof — content-layer security of the metadata-private messenger
 
 This is the assurance story for the **content** cryptography: the DH double ratchet with header
-encryption (`engine.DoubleRatchet`) that gives messages **forward secrecy** and **post-compromise
-security (PCS)**. It records what is proven, *how* it is proven, what the proof actually rests on, and
-what is deliberately out of scope.
+encryption (`engine.DoubleRatchet`). The ratchet gives messages **forward secrecy** (the one-way KDF
+chain + key wiping) and **post-compromise security (PCS)** (the DH ratchet). What is *machine-checked
+symbolically* here is **message secrecy + PCS** (forward secrecy is design-level, exercised by the
+implementation tests — see the scope note). This document records what is proven, *how*, what the proof
+rests on, and what is deliberately out of scope.
 
 Artifacts:
 - Symbolic design proof — [`specs/001-metadata-private-messenger/design/formal-analysis/ratchet.spthy`](specs/001-metadata-private-messenger/design/formal-analysis/ratchet.spthy) (+ [README](specs/001-metadata-private-messenger/design/formal-analysis/README.md))
@@ -24,6 +26,7 @@ Artifacts:
 ```
 tamarin-prover ratchet.spthy --prove        # Tamarin 1.12.0 + Maude 3.5.1, <1 s
   executable               (exists-trace): verified (7 steps)
+  pcs_premise_reachable    (exists-trace): verified (6 steps)    # PCS premise reachable ⇒ non-vacuous
   message_secrecy          (all-traces):   verified (37 steps)
   post_compromise_security (all-traces):   verified (16 steps)
   All wellformedness checks were successful.
@@ -74,9 +77,10 @@ All m2 b rk1 #s #h #r.
 
 The fresh key `b` correlates the heal and the send to one session; the reveal is of *that* session's
 pre-heal root. Tamarin verifies this holds across **all** traces — i.e. there is no attacker strategy,
-network manipulation, or key-reveal schedule that breaks it. Idealization (licensed by Constitution I,
-which delegates primitives): DH is the `diffie-hellman` builtin (with CDH), AEAD is perfect, the HMAC
-KDFs are one-way functions.
+network manipulation, or key-reveal schedule that breaks it — and a companion `exists-trace` lemma
+(`pcs_premise_reachable`) proves the reveal→heal→send scenario is actually reachable, so the all-traces
+result is provably non-vacuous. Idealization (licensed by Constitution I, which delegates primitives):
+DH is the `diffie-hellman` builtin (with CDH), AEAD is perfect, the HMAC KDFs are one-way functions.
 
 ---
 
@@ -160,7 +164,6 @@ brew install tamarin-prover/tap/tamarin-prover          # Tamarin + Maude + Grap
 cd specs/001-metadata-private-messenger/design/formal-analysis
 tamarin-prover ratchet.spthy --prove                    # all 3 lemmas verified, <1 s
 
-# Executable implementation model
-export JAVA_HOME="$(/usr/libexec/java_home -v 26)"
+# Executable implementation model (JDK 22+; macOS: export JAVA_HOME="$(/usr/libexec/java_home)")
 sbt "protocolCore/testOnly engine.DoubleRatchetModelSpec"
 ```
