@@ -162,7 +162,7 @@ subtly wrong." All three would have shipped in an authored-but-unrun artifact.
 # Symbolic design proof
 brew install tamarin-prover/tap/tamarin-prover          # Tamarin + Maude + GraphViz
 cd specs/001-metadata-private-messenger/design/formal-analysis
-tamarin-prover ratchet.spthy --prove                    # all 3 lemmas verified, <1 s
+tamarin-prover ratchet.spthy --prove                    # all 4 lemmas verified, <1 s
 
 # Executable implementation model (JDK 22+; macOS: export JAVA_HOME="$(/usr/libexec/java_home)")
 sbt "protocolCore/testOnly engine.DoubleRatchetModelSpec"
