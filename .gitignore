@@ -13,3 +13,6 @@ project/project/
 
 # npm deps for the Scala.js bundle
 node_modules/
+
+# Generated browser bundle of the Scala.js engine (build via scripts/build-web-bundle.sh)
+clients/flutter/web/protocol-engine.js

@@ -31,6 +31,12 @@
 
   <title>metadata_messenger</title>
   <link rel="manifest" href="manifest.json">
+
+  <!-- The real Scala.js protocol-core engine, bundled for the browser (see clients/flutter/README.md).
+       Loaded SYNCHRONOUSLY before flutter_bootstrap.js so `globalThis.ProtocolEngine` exists when the
+       app's createEngine() runs — otherwise it falls back to the labeled DevEngine. -->
+  <script src="protocol-engine.js"></script>
+  <script>window.ProtocolEngine = __mm.ProtocolEngine;</script>
 </head>
 <body>
   <!--

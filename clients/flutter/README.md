@@ -29,16 +29,30 @@ The Scala.js bundle uses ES/CommonJS modules and imports the vetted
 `createEngine()` uses it automatically; otherwise it falls back to `DevEngine`.
 
 ```sh
-# 1. link the engine bundle
+# 1. link the engine bundle (Scala.js full optimization)
 sbt 'protocolCoreJS/fullLinkJS'
-# 2. bundle it for the browser, exposing ProtocolEngine on the global scope, e.g.:
+# 2. bundle + MINIFY it for the browser, exposing ProtocolEngine on the global scope:
 npx esbuild protocol-core-js/target/scala-3.3.4/protocol-core-js-opt/main.js \
-  --bundle --global-name=__mm --format=iife \
+  --bundle --minify --global-name=__mm --format=iife \
   --outfile=clients/flutter/web/protocol-engine.js
-#    then in web/index.html, before main.dart.js:
-#    <script src="protocol-engine.js"></script>
-#    <script>window.ProtocolEngine = __mm.ProtocolEngine;</script>
 ```
+
+`web/index.html` already loads it (synchronously, before `flutter_bootstrap.js`):
+```html
+<script src="protocol-engine.js"></script>
+<script>window.ProtocolEngine = __mm.ProtocolEngine;</script>
+```
+If the bundle is absent (e.g. a fresh checkout, or CI's bundle-less build), the
+script 404s, `globalThis.ProtocolEngine` is undefined, and `createEngine()`
+degrades gracefully to the labeled `DevEngine` — so committing the script tags is
+safe even though the generated bundle is not checked in.
+
+**Size.** The engine is a full E2E crypto stack (Scala.js runtime + the ratchet +
+the vetted `@noble` primitives), so expect a few hundred KB raw — but the
+over-the-wire size is what matters and it compresses well. With `--minify`:
+~370 KB raw → **~100 KB gzip / ~80 KB brotli**. Serve compressed (any CDN/nginx
+does this); don't optimize against the raw number. (Without `--minify` it is
+~646 KB raw / ~118 KB gzip — minify is a free ~43% raw / ~15% gzip win.)
 
 (The bundling is a deployment build step — not part of `flutter test`/CI, which
 exercise the adapter via the fake handle and the engine via the Node e2e.)
