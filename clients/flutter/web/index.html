@@ -36,7 +36,9 @@
        Loaded SYNCHRONOUSLY before flutter_bootstrap.js so `globalThis.ProtocolEngine` exists when the
        app's createEngine() runs — otherwise it falls back to the labeled DevEngine. -->
   <script src="protocol-engine.js"></script>
-  <script>window.ProtocolEngine = __mm.ProtocolEngine;</script>
+  <!-- Guard so a 404'd/absent bundle is SILENT: `__mm` is undefined, we leave globalThis.ProtocolEngine
+       unset, and createEngine() takes the clean DevEngine path (no ReferenceError, no try/catch). -->
+  <script>if (typeof __mm !== 'undefined') window.ProtocolEngine = __mm.ProtocolEngine;</script>
 </head>
 <body>
   <!--

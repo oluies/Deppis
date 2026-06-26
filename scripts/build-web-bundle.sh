@@ -16,8 +16,10 @@ echo "==> 1/2 linking the Scala.js engine (fullLinkJS) …"
 sbt -batch -no-colors "protocolCoreJS/fullLinkJS" >/dev/null
 [ -f "$OPT" ] || { echo "link output not found: $OPT" >&2; exit 1; }
 
-echo "==> 2/2 bundling + minifying for the browser (esbuild) …"
-npx -y esbuild "$OPT" \
+echo "==> 2/2 bundling + minifying for the browser (pinned esbuild) …"
+ESB="node_modules/.bin/esbuild"
+[ -x "$ESB" ] || { echo "    installing pinned esbuild (package.json devDependencies) …"; npm install >/dev/null; }
+"$ESB" "$OPT" \
   --bundle --minify --global-name=__mm --format=iife \
   --outfile="$OUT"
 

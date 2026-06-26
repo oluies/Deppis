@@ -31,10 +31,11 @@ The Scala.js bundle uses ES/CommonJS modules and imports the vetted
 ```sh
 # 1. link the engine bundle (Scala.js full optimization)
 sbt 'protocolCoreJS/fullLinkJS'
-# 2. bundle + MINIFY it for the browser, exposing ProtocolEngine on the global scope:
+# 2. bundle + MINIFY it for the browser (pinned esbuild from package.json — run `npm install` once):
 npx esbuild protocol-core-js/target/scala-3.3.4/protocol-core-js-opt/main.js \
   --bundle --minify --global-name=__mm --format=iife \
   --outfile=clients/flutter/web/protocol-engine.js
+# (or just: scripts/build-web-bundle.sh, which does both steps + reports size)
 ```
 
 `web/index.html` already loads it (synchronously, before `flutter_bootstrap.js`):
