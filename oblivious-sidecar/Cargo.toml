@@ -8,16 +8,19 @@ description = "Constant-time oblivious primitives + gRPC PONG store / PING aggre
 # (no hand-rolled constant-time code). tonic/prost/tokio provide the gRPC sidecar server.
 [dependencies]
 subtle = "=2.6.1"
-tonic = "=0.12.3"
-prost = "=0.13.4"
-tokio = { version = "=1.42.0", features = ["rt-multi-thread", "macros", "net"] }
+tonic = "=0.14.6"
+# tonic 0.14 split the prost codec out of the core crate; the generated service code needs it.
+tonic-prost = "=0.14.6"
+prost = "=0.14.4"
+tokio = { version = "=1.52.3", features = ["rt-multi-thread", "macros", "net"] }
 # RustCrypto ChaCha20-Poly1305 (IETF/RFC 8439) — vetted AEAD (Constitution I, not hand-rolled) used
 # to OPEN receiver-sealed notification tokens inside the sidecar. Interoperates with the Scala side
 # (libsodium ietf): same construction, 12-byte nonce, tag-appended.
 chacha20poly1305 = "=0.10.1"
 
 [build-dependencies]
-tonic-build = "=0.12.3"
+# tonic 0.14 moved prost-based .proto compilation into tonic-prost-build (configure().compile_protos).
+tonic-prost-build = "=0.14.6"
 
 [dev-dependencies]
 proptest = "=1.11.0"

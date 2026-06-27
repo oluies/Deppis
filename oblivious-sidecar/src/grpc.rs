@@ -11,6 +11,8 @@ use tonic::{Request, Response, Status};
 
 /// Generated types for `store.proto` (`metadatamessenger.store.v1`).
 pub mod pb {
+    // tonic 0.14 codegen emits doc comments that trip clippy::doc_lazy_continuation (generated code).
+    #![allow(clippy::doc_lazy_continuation)]
     tonic::include_proto!("metadatamessenger.store.v1");
 }
 
