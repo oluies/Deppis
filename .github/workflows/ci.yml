@@ -26,7 +26,7 @@ jobs:
           java-version: "24" # Foreign Function & Memory API is final since 22
       - uses: sbt/setup-sbt@v1
       # No Node here: the JS engine tests run in the `scalajs` job, so this job stays JVM-only.
-      - uses: actions/cache@v5
+      - uses: actions/cache@v6
         with:
           path: |
             ~/.cache/coursier
@@ -60,7 +60,7 @@ jobs:
       - uses: actions/checkout@v7
       # Standalone scalafmt via Coursier — no sbt cold start, so this gate is fast and parallel.
       # Pinned to the .scalafmt.conf version; generated code is excluded there (project.excludePaths).
-      - uses: coursier/setup-action@v1
+      - uses: coursier/setup-action@v3
         with:
           jvm: temurin:24
           apps: scalafmt:3.8.3
@@ -103,7 +103,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: oblivious-sidecar
-      - uses: actions/cache@v5
+      - uses: actions/cache@v6
         with:
           path: |
             ~/.cache/coursier
@@ -126,12 +126,12 @@ jobs:
           distribution: temurin
           java-version: "24"
       - uses: sbt/setup-sbt@v1
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: "22" # Scala.js tests run under Node
       - name: Install the vetted JS crypto dep (@noble/hashes, pinned)
         run: npm ci
-      - uses: actions/cache@v5
+      - uses: actions/cache@v6
         with:
           path: |
             ~/.cache/coursier
