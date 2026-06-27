@@ -94,3 +94,38 @@ flutter analyze    # CI gate (T005)
 flutter test       # widget + engine-bridge tests
 flutter run -d chrome
 ```
+
+## Native (iOS / Android) — running the REAL engine via `flutter_js`
+
+On web the real engine is the Scala.js bundle reached through browser JS interop
+(`engine_factory_web.dart`). On **native** platforms there is no browser JS
+runtime, so today `engine_factory_io.dart` falls back to the labeled `DevEngine`
+stub. The intended path to the real engine on native is **`flutter_js`**: load
+the **same** `web/protocol-engine.js` bundle into the embedded JS engine
+(JavaScriptCore on iOS, QuickJS on Android) and back `ScalaJsEngine` with a
+synchronous `runtime.evaluate('ProtocolEngine…')` handle. No native crypto, no
+second engine — the vetted `@noble` crypto runs inside the JS runtime.
+
+**The one crux — RNG polyfill (validated).** The engine's randomness is
+`@JSGlobal("crypto")` → `crypto.getRandomValues` (`random.Rand`). JavaScriptCore
+has **no `crypto` global**, so `new ProtocolEngine()` throws
+`ReferenceError: crypto is not defined` at construction (it mints a per-session
+cover key). The fix is a **one-function polyfill** injected before loading the
+bundle, backed by Dart's secure random across the bridge:
+
+```js
+globalThis.crypto = { getRandomValues: (a) => { /* fill a from a Dart-bridged CSPRNG */ return a; } };
+```
+
+This was verified by running the exact `protocol-engine.js` bundle in a
+JavaScriptCore-equivalent sandbox (no `crypto`): without the polyfill the engine
+fails to construct; with **only** `getRandomValues` it runs the full
+add-buddy/send flow. Everything else (the ratchet, the JSON boundary, `@noble`)
+runs unmodified.
+
+**Prerequisites (not installable everywhere).** Building/running native needs a
+**full Xcode** + **CocoaPods** + an iOS **simulator** (iOS), or the Android SDK
++ an emulator (Android), plus `flutter create --platforms=ios,android .` to
+scaffold the platform folders. `flutter_js` is a plugin with native code, so it
+cannot be unit-tested on the Dart VM (`flutter test`) or built for web — guard
+its import to the native factory so it does not affect those builds.
