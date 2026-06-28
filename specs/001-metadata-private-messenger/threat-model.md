@@ -83,7 +83,7 @@ is the spec's headline observer (spec Input, §Assumptions).
 | | Phase C (attested) | Dev build today |
 |---|---|---|
 | **Sender ↔ receiver linkage** | CANNOT learn who talks to whom: every client emits **exactly one store write + one store read per round**, real or cover, byte-indistinguishable 256-byte frames (FR-012, FR-015a, ARCHITECTURE §6) | NO METADATA PRIVACY claimed; uniform shape is implemented but the backend it talks to leaks access patterns (§3.2) |
-| **Active vs. idle** | CANNOT distinguish (SC-003): traffic shape does not depend on whether a real message exists | Same caveat — not a privacy guarantee |
+| **Active vs. idle** | CANNOT distinguish (SC-003): traffic shape does not depend on whether a real message exists — *conditional on a non-rejecting store; see Known gaps below* | Same caveat — not a privacy guarantee |
 | **Frame contents** | CANNOT read: ChaCha20-Poly1305 over TLS 1.3; carrier frames are random-looking and same-size | CANNOT read content (TLS + AEAD hold), but this is content secrecy, not metadata privacy |
 | **Tampering / replay** | CANNOT forge delivery: AEAD authentication rejects modified frames; **non-recurrent retrieval tokens** (FR-014) mean a replayed read retrieves nothing | Same — single-use semantics enforced by protocol-core regardless of backend |
 | **Coarse participation** | **CAN** learn that a host uses the service and its coarse round cadence — explicitly out of scope (spec §Leaked) | CAN, same |
@@ -114,6 +114,33 @@ The store **never learns sender or receiver** in Phase C — that is the core of
 > channel proven still to deliver. Identical observable ⇒ the host's best guess is the `1/N` prior. The
 > store adding no distinguisher is obsd's oblivious selftest (T050/T052); the notify host's anonymity is
 > obsd's oblivious aggregation (T053).
+
+#### Known gaps — conditional non-recurrence (addressing/notify layer)
+
+A holistic crypto review (content-ratchet and attestation paths reviewed clean) found that the SC-002
+which-buddy anonymity and the FR-014 non-recurrent-token claims hold today only under two assumptions
+that the engine does not yet enforce unconditionally. Both are in the addressing/notify layer, not in
+content crypto or attestation, and both are pinned as characterization tests in
+`engine.RecurrenceGapsSpec` (the tests fail the day either is fixed, forcing these claims to be
+restored to unconditional):
+
+1. **Notify-bit collisions (T041c).** `NotifyDigest.bit` is `HMAC mod 512` with no collision avoidance,
+   so two buddies share a bit at birthday rate. A set shared bit signals both; the buddy without mail
+   misses its `retrieve`, its read counter does not advance, and the **same read token recurs** next
+   round — a clustering handle for the store. The fix is the pairing-time **bit-lease** (T041c, noted in
+   `tasks.md`) that assigns each buddy a collision-free bit. `AnonymitySpec` models the collision-free
+   case (it asserts distinct bits as a precondition).
+
+2. **Rejected-submit recurrence (retry-safe addressing).** The outgoing addressing counter advances
+   **only on a successful submit** (to keep sender/receiver tokens in lockstep), so an untrusted store
+   that selectively **rejects** a write makes the next round retry under the **same outgoing token**. An
+   idle client always writes a fresh cover token, so this is both an FR-014 token recurrence and an
+   active-vs-idle tell. The fix is round-id-derived addressing or a bounded receiver-side skip window so
+   every wire write — real, cover, or retry — uses a fresh token. `AnonymitySpec` models a non-rejecting
+   store (its `submit` always succeeds).
+
+Until both land, the unconditional SC-002/FR-014/SC-003 wording above is scoped to: collision-free
+notify bits **and** a store that does not selectively reject writes.
 The dev store learns access patterns and is therefore labeled non-private.
 
 ### 3.3 PING notify operator (notification service)
