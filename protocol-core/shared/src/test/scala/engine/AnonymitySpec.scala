@@ -15,7 +15,14 @@ import scala.collection.mutable
   * across all `N` worlds ⇒ the host's best guess is the `1/N` prior. (The frame bytes are encrypted —
   * proven in `RoundTransportSpec`/T042; the NOTIFY host's anonymity is the oblivious aggregation proven
   * by obsd's selftest — T053; and the store doesn't distinguish, proven by obsd's oblivious selftest +
-  * the real-obsd E2E. This spec pins the engine-level property the whole stack rests on.) */
+  * the real-obsd E2E. This spec pins the engine-level property the whole stack rests on.)
+  *
+  * SCOPE — two modeled assumptions, both with KNOWN GAPs pinned in `RecurrenceGapsSpec`: (1) the
+  * `N` buddies occupy DISTINCT notify bits (asserted as a precondition below) — under a birthday-rate
+  * bit collision the read token can recur (the unimplemented T041c bit-lease closes this); and (2) the
+  * store accepts every write (`HostView.submit` returns `true`) — a store that selectively REJECTS a
+  * write makes the outgoing token recur on retry. So the unconditional 1/N and active-vs-idle claims
+  * hold under collision-free bits + a non-rejecting store; the two gaps are the remaining protocol work. */
 class AnonymitySpec extends AnyFunSuite:
 
   import token.RetrievalToken

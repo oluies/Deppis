@@ -257,6 +257,15 @@ final class Engine(
             // indistinguishable. A real frame is dropped + advances the counter only on a successful
             // submit; on failure it stays queued and retries next round (its failed attempt is still
             // this round's one write — no extra write, no silent loss).
+            //
+            // KNOWN GAP — retry-safe addressing (pinned in RecurrenceGapsSpec): `sendCounter` advances
+            // ONLY on a successful submit (to keep sender/receiver tokens in lockstep), so a REJECTED
+            // submit makes the next round retry under the SAME outgoing token. An idle client always
+            // writes a fresh cover token, so an untrusted store that rejects a write and then sees the
+            // same token recur learns the client is actively retrying a real send — an FR-014 token
+            // recurrence AND an active-vs-idle tell. Closing it needs round-id-derived addressing or a
+            // bounded receiver-side skip window; until then the active-vs-idle claim below holds only
+            // against a store that does not selectively reject writes.
             var realSubmitted = false
             nextReal match
               case Some((pid, q)) if runtime.get(pid).exists(_.ratchet.canSend) =>
@@ -294,9 +303,12 @@ final class Engine(
             // Exactly ONE retrieve per round (the schedule's one-retrieve invariant, FR-012 fetch
             // path), NOTIFY-GUIDED per-buddy (FR-004): read EXACTLY the buddy whose digest bit is set
             // this round. Because that buddy's message is actually present, the read is a hit and its
-            // counter advances — so the per-round read-token stream is non-recurrent (FR-014) for ANY
-            // buddy count, active or idle. When no buddy's bit is set, a cover read under a fresh
-            // token keeps the fetch trace one-read-per-round.
+            // counter advances — so the per-round read-token stream is non-recurrent (FR-014), PROVIDED
+            // notify bits do not collide. Collision-freedom is the still-unimplemented T041c bit-lease;
+            // under a birthday-rate collision a signaled bit can target the wrong buddy, miss, and
+            // re-issue the same read token next round (KNOWN GAP, pinned in RecurrenceGapsSpec; see the
+            // non-recurrence note at the cursor below). When no buddy's bit is set, a cover read under a
+            // fresh token keeps the fetch trace one-read-per-round.
             val signaled = runtime.toSeq
               .flatMap { case (pid, rt) =>
                 book.get(pid).filter(_.state == BuddyState.Confirmed).map(rel => (pid, rt, rel))

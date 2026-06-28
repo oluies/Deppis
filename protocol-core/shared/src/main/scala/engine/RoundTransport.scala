@@ -19,8 +19,9 @@ trait RoundTransport:
 
   /** This round's PING notify digest for `clientLabel` (one fetch per round). Each of the client's
     * buddies maps to a one-hot bit; a set bit means THAT buddy signaled mail this round, so the
-    * engine reads exactly the signaled buddy (always a hit ⇒ a non-recurrent read token, FR-014) and
-    * emits `notified` first (FR-004). An all-zero digest (carrier) ⇒ no mail. */
+    * engine reads exactly the signaled buddy (a hit ⇒ a non-recurrent read token, FR-014 — conditional
+    * on collision-free bits, the unimplemented T041c bit-lease; see `RecurrenceGapsSpec`) and emits
+    * `notified` first (FR-004). An all-zero digest (carrier) ⇒ no mail. */
   def fetchDigest(roundId: Long, clientLabel: Array[Byte]): Array[Byte]
 
   /** Retrieve (and consume) a framed message under a token, if one is present (PONG store read,
