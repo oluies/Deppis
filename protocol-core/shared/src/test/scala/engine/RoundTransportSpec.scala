@@ -30,9 +30,13 @@ class RoundTransportSpec extends AnyFunSuite:
       mutable.ArrayBuffer.empty[Array[Byte]] // pairKeys signaled for next fetch
     val submits = mutable.ArrayBuffer.empty[(Array[Byte], Array[Byte])]
     val retrieves = mutable.ArrayBuffer.empty[Array[Byte]]
+    // The engine's OUTGOING notify signals (roundId, label, bit) — one per round (FR-012 notify layer).
+    val signals = mutable.ArrayBuffer.empty[(Long, Vector[Byte], Int)]
 
     /** Signal that the buddy with `pairKey` has mail this round (its bit is set at the next fetch). */
     def signalMail(pairKey: Array[Byte]): Unit = pendingMail += pairKey
+    override def signal(roundId: Long, label: Array[Byte], bit: Int): Unit =
+      signals += ((roundId, label.toVector, bit))
     def submit(token: Array[Byte], frame: Array[Byte]): Boolean =
       submits += ((token, frame))
       if acceptSubmit then store(hex(token)) = frame
@@ -122,6 +126,66 @@ class RoundTransportSpec extends AnyFunSuite:
     val (bob, _) = confirmedEngine(t, BuddyRole.Responder)
     bob.tick(1)
     assert(!bob.drainEvents().exists(_.isInstanceOf[EngineEvent.Notified]))
+
+  test(
+    "the engine emits exactly ONE notify signal per round — real to the peer, else a decoy (FR-012)"
+  ):
+    // Alice knows Bob's notify label (set at pairing), so a real send signals (bobLabel, round-rotated
+    // bit); an idle round signals a DECOY to a per-client void label (NOT Bob's). Uniform one-signal-
+    // per-round hides active-vs-idle at the notify layer from the untrusted host.
+    val bobLabel = "bob-agg-label".getBytes
+    val t = FakeTransport()
+    val alice = Engine(Some(t), clientLabel = "alice".getBytes)
+    val pid = alice
+      .addBuddy(secret("shared"), BuddyRole.Initiator, peerNotifyLabel = bobLabel)
+      .toOption
+      .get
+      .pairId
+    alice.confirmBuddy(pid, matched = true); alice.drainEvents()
+    alice.sendMessage(pid, "hi")
+    alice.tick(1) // real send ⇒ signal Bob
+    alice.tick(2) // idle ⇒ decoy
+    alice.tick(3) // idle ⇒ decoy
+    assert(t.signals.map(_._1) == Seq(1L, 2L, 3L), "exactly one signal per round, in order")
+    // Round 1 is a real signal to Bob's FIXED-WIDTH label tag under the pair's round-1 rotated bit.
+    assert(
+      t.signals(0)._2 == NotifyDigest.labelTag(bobLabel).toVector,
+      "real send signals the peer"
+    )
+    assert(t.signals(0)._3 == bitOf(pairKeyOf("shared"), 1L), "under the pair's round-rotated bit")
+    // Idle rounds signal a DECOY — never the peer's label — so no peer is notified.
+    val realTag = NotifyDigest.labelTag(bobLabel).toVector
+    assert(t.signals(1)._2 != realTag && t.signals(2)._2 != realTag, "decoys")
+    // CRITICAL (FR-012, no active-vs-idle size leak): every signal's label is the SAME length, so the
+    // sealed-token byte size is identical on real and idle rounds.
+    assert(t.signals.map(_._2.size).distinct == Seq(t.signals.head._2.size), "uniform label length")
+
+  test(
+    "notify label tag is fixed-width regardless of the peer label's length (no which-buddy size leak)"
+  ):
+    // Two peers with very different raw label lengths must produce SAME-length signal labels, so the
+    // sealed-token size can't reveal which buddy was notified.
+    val tShort = FakeTransport(); val tLong = FakeTransport()
+    def realSignalLen(t: FakeTransport, peerLabel: Array[Byte]): Int =
+      val e = Engine(Some(t), clientLabel = "me".getBytes)
+      val pid = e
+        .addBuddy(secret("s"), BuddyRole.Initiator, peerNotifyLabel = peerLabel)
+        .toOption
+        .get
+        .pairId
+      e.confirmBuddy(pid, matched = true); e.drainEvents()
+      e.sendMessage(pid, "x"); e.tick(1)
+      t.signals.head._2.size
+    assert(realSignalLen(tShort, "b".getBytes) == realSignalLen(tLong, ("y" * 200).getBytes))
+
+  test("a local-only buddy (no peer notify label) still emits one decoy signal per round"):
+    // No peerNotifyLabel ⇒ the engine can't notify the peer, but it STILL signals once per round (a
+    // decoy) so an unconfigured/local-only client is not distinguishable from a configured one.
+    val t = FakeTransport()
+    val (bob, _) =
+      confirmedEngine(t, BuddyRole.Responder) // confirmedEngine adds with no peer label
+    bob.tick(1); bob.tick(2)
+    assert(t.signals.size == 2 && t.signals.forall(_._2.nonEmpty), "one decoy signal per round")
 
   test("a message submitted by the sender is retrieved + surfaced by the receiver"):
     val (alice, bob, pairId, _, tb) = sharedPair()

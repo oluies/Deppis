@@ -24,6 +24,16 @@ object NotifyDigest:
     val b = RetrievalToken.derive(pairKey, "notify-bit", "", roundId)
     (((b(0) & 0xff) << 8) | (b(1) & 0xff)) % Bits
 
+  /** A FIXED-WIDTH (32-byte) tag for an aggregation label, used on the wire for BOTH signaling and
+    * fetching. The sealed signal token is `[round(8)][bit(2)][label]` (+ fixed AEAD overhead), so its
+    * length grows with the label; if a real signal used the peer's arbitrary-length `clientLabel` and a
+    * decoy used a 32-byte void label, the untrusted host could tell active from idle (and which buddy,
+    * across differing label lengths) by RPC size. Tagging every label to a constant width makes every
+    * signal/fetch the same length. It is deterministic, so a sender's `labelTag(peerLabel)` matches the
+    * receiver's `labelTag(clientLabel)` for the same raw label (the front aggregates by the tag). */
+  def labelTag(rawLabel: Array[Byte]): Array[Byte] =
+    RetrievalToken.derive(rawLabel, "notify-label", "", 0L)
+
   /** Is `bit` set in `digest`? */
   def isSet(digest: Array[Byte], bit: Int): Boolean =
     val idx = bit >> 3

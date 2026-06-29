@@ -6,8 +6,7 @@ import java.net.{InetSocketAddress, ServerSocket, Socket}
 import java.util.concurrent.TimeUnit
 import metadatamessenger.store.v1.{store as spb}
 import metadatamessenger.notify.v1.{notify as npb}
-import engine.{BuddyRole, Engine, EngineEvent, KeySchedule, NotifyDigest}
-import handshake.Handshake
+import engine.{BuddyRole, Engine, EngineEvent}
 import ping.DevNotificationServer
 import crypto.Crypto
 
@@ -73,10 +72,16 @@ object DeppisDemo:
 
     val aliceLabel = "alice-client".getBytes
     val bobLabel = "bob-client".getBytes
+    // DEV PING-front stand-in: seals notify tokens with the key obsd opens with (the REAL front seals
+    // server-side INSIDE the attested enclave, so a client never holds the key). The engine drives one
+    // signal per round through this — real to the peer, or a decoy — so notify volume is uniform.
+    val sealer = DevNotificationServer(notifyKey)
+    val seal: (Long, Int, Array[Byte]) => Array[Byte] = (r, b, l) => sealer.issueToken(r, b, l)
     def front(): GrpcRoundTransport =
       new GrpcRoundTransport(
         new EnclaveObliviousStore(storeStub, attested = false),
-        new EnclaveNotificationClient(notifyStub, attested = false)
+        new EnclaveNotificationClient(notifyStub, attested = false),
+        notifySealer = Some(seal)
       )
     val alice = Engine(Some(front()), clientLabel = aliceLabel)
     val bob = Engine(Some(front()), clientLabel = bobLabel)
@@ -89,9 +94,11 @@ object DeppisDemo:
 
     // 1) Out-of-band pairing: same shared secret, opposite roles; safety numbers compared by hand.
     val secret = "meet-me-at-the-old-bridge".getBytes
-    val a = alice.addBuddy(secret, BuddyRole.Initiator).toOption.get
+    // Each side learns the OTHER's notify label at pairing, so its engine can fire the peer's
+    // "mail waiting" when it sends a real frame.
+    val a = alice.addBuddy(secret, BuddyRole.Initiator, peerNotifyLabel = bobLabel).toOption.get
     alice.confirmBuddy(a.pairId, matched = true); alice.drainEvents()
-    val b = bob.addBuddy(secret, BuddyRole.Responder).toOption.get
+    val b = bob.addBuddy(secret, BuddyRole.Responder, peerNotifyLabel = aliceLabel).toOption.get
     bob.confirmBuddy(b.pairId, matched = true); bob.drainEvents()
     log("alice", s"paired with bob — safetyNumber ${a.safetyNumber}")
     log("bob", s"paired with alice — safetyNumber ${b.safetyNumber}")
@@ -99,18 +106,6 @@ object DeppisDemo:
       println("  ✗ safety numbers differ — pairing would be rejected")
       return false
     println("  ✓ safety numbers match → out-of-band verification succeeds\n")
-
-    // The PING aggregation front (stand-in): when Alice sends a real frame, it SEALS Bob's per-buddy
-    // bit (a token bound to the round) and signals it to obsd over gRPC — exactly as a PONG-side
-    // front would. `sealer` only mints the token (it shares obsd's notify key); `pingSignal` is the
-    // actual gRPC call into obsd, whose digest Bob's engine then reads. This bridge is not yet a
-    // standalone process.
-    val sealer = DevNotificationServer(notifyKey)
-    val pingSignal = new EnclaveNotificationClient(notifyStub, attested = false)
-    val pairKey = Handshake.init(secret).pairKey
-    // Bob's engine derives the notify bit from the addressing root (the forward-secrecy root split),
-    // ROTATED per round (T041c) — so the signaller recomputes it for each round it signals.
-    val bobAddrKey = KeySchedule.addrKey(pairKey)
 
     // 2) Alice queues a message.
     val message = "see you at dusk"
@@ -124,18 +119,11 @@ object DeppisDemo:
     var round = 1L
     val maxRounds = 5L
     while !delivered && round <= maxRounds do
+      // The engine drives notify itself now: each tick emits exactly one signal through the transport —
+      // real to Bob when a real frame went out, else a decoy — so notify volume is uniform every round
+      // (active-vs-idle indistinguishable at the notify layer, FR-012), not just on real rounds.
       val ad = alice.tick(round).toOption.get
       val aliceReal = !ad.carrier
-      // DEV stand-in only: signalling obsd ONLY on real rounds makes the notify RPC volume depend on
-      // whether a real message was sent — an active-vs-idle distinguisher at the front. The engine's
-      // own store traffic is already uniform; the REAL PONG/PING front MUST likewise decouple signal
-      // timing/volume from real-message presence (aggregation + cover signalling). Safe here only
-      // because the whole run is DEV, NO METADATA PRIVACY.
-      if aliceReal then
-        pingSignal.signal(
-          round,
-          sealer.issueToken(round, NotifyDigest.bit(bobAddrKey, round), bobLabel)
-        )
       log(
         "alice",
         f"round $round: wrote ${if aliceReal then "REAL  frame" else "cover frame"} (256B, indistinguishable)"

@@ -83,6 +83,12 @@ final class Engine(
   private val coverKey = random.Rand.bytes(32)
   private var coverCounter = 0L // send-path cover frames
   private var coverReadCounter = 0L // fetch-path cover reads
+  // A per-client VOID notify label for decoy signals: every round the engine emits exactly one notify
+  // signal (FR-012 at the notify layer), real to a peer or a decoy to this label, so the untrusted host
+  // sees uniform signal-RPC volume. Nobody fetches this label, so a decoy bit set in its digest is
+  // harmless. Derived from the cover key (never leaves the engine; opaque to the host inside a sealed
+  // token). A fresh array per use so a transport can't retain/mutate it.
+  private def voidNotifyLabel: Array[Byte] = RetrievalToken.derive(coverKey, "notify-void", "", 0L)
   // Positive diagnostic for the unreachable orphan branch in `tick` (an outbox entry with no
   // runtime/book). Stays 0 in correct operation; a non-zero value means an internal invariant broke.
   private var orphanedDrops = 0L
@@ -163,7 +169,11 @@ final class Engine(
   /** Run the add-friend handshake. Derives `pairId`/`safetyNumber`/`pairKey` from the shared
     * secret (symmetric), records a Pending relationship, and returns ONLY the comparable values —
     * the derived `pairKey` never leaves the engine. */
-  def addBuddy(sharedSecret: Array[Byte], role: BuddyRole): Either[EngineError, AddBuddyResult] =
+  def addBuddy(
+      sharedSecret: Array[Byte],
+      role: BuddyRole,
+      peerNotifyLabel: Array[Byte] = Array.emptyByteArray
+  ): Either[EngineError, AddBuddyResult] =
     if sharedSecret.isEmpty then Left(EngineError("invalid_arg", "shared secret required"))
     else
       val init = Handshake.init(sharedSecret)
@@ -173,7 +183,17 @@ final class Engine(
       val addrKey = KeySchedule.addrKey(init.pairKey)
       val contentRoot = KeySchedule.contentRoot(init.pairKey)
       wipe(init.pairKey)
-      val rel = BuddyRelationship(init.pairId, init.safetyNumber, BuddyState.Pending, addrKey)
+      // `peerNotifyLabel` is the label the PEER fetches under (so we can fire their "mail waiting" when
+      // we send them a real frame). Empty ⇒ local-only for this buddy. Cloned so the caller's array
+      // can't mutate our copy.
+      val rel =
+        BuddyRelationship(
+          init.pairId,
+          init.safetyNumber,
+          BuddyState.Pending,
+          addrKey,
+          peerNotifyLabel.clone()
+        )
       book.add(rel) match
         case Right(nb) =>
           book = nb
@@ -249,7 +269,7 @@ final class Engine(
             // half-applied send (no submitted frame, no advanced counter).
             // One PING digest fetch per round (may also reject an out-of-range round atomically,
             // before any send side effect). The set bits say exactly which buddies signaled mail.
-            val digest = t.fetchDigest(roundId, clientLabel)
+            val digest = t.fetchDigest(roundId, NotifyDigest.labelTag(clientLabel))
             // Exactly ONE store write per round (cover traffic, FR-012): a real frame under its
             // outgoing token if one is queued, otherwise a carrier frame under a fresh random-looking
             // cover token. So the store-write trace (one 256-byte write per round, random 32-byte
@@ -267,6 +287,9 @@ final class Engine(
             // bounded receiver-side skip window; until then the active-vs-idle claim below holds only
             // against a store that does not selectively reject writes.
             var realSubmitted = false
+            // The peer to notify this round, if we actually sent them a real frame AND know their notify
+            // label: (label, addrKey). Otherwise we emit a DECOY signal below — exactly one signal/round.
+            var realSignal: Option[(Array[Byte], Array[Byte])] = None
             nextReal match
               case Some((pid, q)) if runtime.get(pid).exists(_.ratchet.canSend) =>
                 (runtime.get(pid), book.get(pid)) match
@@ -285,6 +308,8 @@ final class Engine(
                       rt.sendCounter += 1
                       dropHead(pid, q)
                       realSubmitted = true
+                      if rel.peerNotifyLabel.nonEmpty then
+                        realSignal = Some((rel.peerNotifyLabel, rel.addrKey))
                   case _ =>
                     // Defensive: an outbox entry always has a runtime + book entry (sendMessage
                     // requires a confirmed buddy; removeBuddy clears both), so this is unreachable via
@@ -300,6 +325,20 @@ final class Engine(
                 // byte-indistinguishable from a real one, so holding a message looks like any idle round.
                 coverCounter += 1
                 t.submit(RetrievalToken.derive(coverKey, "cover", "", coverCounter), coverFrame())
+            // Exactly ONE notify signal per round (FR-012 cover traffic at the NOTIFY layer, mirroring
+            // the single store write above): notify the PEER we just sent a real frame to, else emit a
+            // DECOY to this client's void label that nobody fetches. Either way the untrusted host sees
+            // one same-shaped (sealed) signal RPC per round, so notify timing/volume can't distinguish an
+            // active client from an idle one. The bit is round-rotated (T041c) in both cases.
+            // Labels are tagged to a FIXED width (NotifyDigest.labelTag) so a real and a decoy signal —
+            // and signals to buddies whose raw labels differ in length — are byte-length identical on the
+            // wire; otherwise the sealed-token size would leak active-vs-idle / which-buddy.
+            realSignal match
+              case Some((label, addrKey)) =>
+                t.signal(roundId, NotifyDigest.labelTag(label), NotifyDigest.bit(addrKey, roundId))
+              case None =>
+                val void = voidNotifyLabel
+                t.signal(roundId, NotifyDigest.labelTag(void), NotifyDigest.bit(void, roundId))
             // Exactly ONE retrieve per round (the schedule's one-retrieve invariant, FR-012 fetch
             // path), NOTIFY-GUIDED per-buddy (FR-004). T041c (collision-free notify): each buddy's
             // notify bit is ROTATED per round (NotifyDigest.bit(addrKey, roundId)), so a collision
