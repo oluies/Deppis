@@ -304,8 +304,8 @@ final class Engine(
             // path), NOTIFY-GUIDED per-buddy (FR-004). T041c (collision-free notify): each buddy's
             // notify bit is ROTATED per round (NotifyDigest.bit(addrKey, roundId)), so a collision
             // between two of this receiver's buddies is transient, not permanent. We serve a buddy ONLY
-            // when its set bit is UNAMBIGUOUS this round — no OTHER relationship of this client maps to
-            // that bit — which makes the read a GUARANTEED hit (only the holder of the pair key could
+            // when its set bit is UNAMBIGUOUS this round — no OTHER active relationship of this client
+            // maps to that bit — which makes the read a GUARANTEED hit (only the holder of the pair key could
             // have sealed that bit), so the read counter always advances and the read-token stream is
             // non-recurrent (FR-014) UNCONDITIONALLY over collisions. On an ambiguous round we cannot
             // tell which party signaled, so we serve none and issue a fresh cover read; the colliding
@@ -317,15 +317,21 @@ final class Engine(
                 .filter(_.state == BuddyState.Confirmed)
                 .map(rel => (pid, rt, rel, NotifyDigest.bit(rel.addrKey, roundId)))
             }
-            // How many of THIS client's relationships map to each bit this round — over ALL states
-            // (Pending/Confirmed/Removed), because a peer still pending here (the confirm window) or one
-            // that keeps signaling after we removed it can also set a bit. A confirmed candidate is safe
-            // to serve only if its bit is unique across ALL relationships (else the set bit might be
-            // some other party's, and serving the confirmed buddy would miss and recur its token).
+            // How many of THIS client's ACTIVE relationships (Pending ∪ Confirmed — bounded by the 512
+            // cap) map to each bit this round. Pending is included because a peer that confirmed first
+            // signals during our confirm window. A confirmed candidate is safe to serve only if its bit
+            // is unique across this set (else the set bit might be another party's, so serving the
+            // confirmed buddy would miss and recur its token). Removed relationships are EXCLUDED so the
+            // set stays bounded — they are retained forever for duplicate-add detection, and a peer that
+            // keeps signaling long AFTER we removed it is the same counter-frozen-on-miss residual as the
+            // rejected-submit gap, resolved by the same retry-safe addressing (see RecurrenceGapsSpec #2).
             val bitCount: Map[Int, Int] =
-              book.relationships.foldLeft(Map.empty[Int, Int]) { (m, rel) =>
-                val b = NotifyDigest.bit(rel.addrKey, roundId); m.updated(b, m.getOrElse(b, 0) + 1)
-              }
+              book.relationships.iterator
+                .filter(_.state != BuddyState.Removed)
+                .foldLeft(Map.empty[Int, Int]) { (m, rel) =>
+                  val b = NotifyDigest.bit(rel.addrKey, roundId);
+                  m.updated(b, m.getOrElse(b, 0) + 1)
+                }
             val candidates = confirmed.filter { case (_, _, _, b) => NotifyDigest.isSet(digest, b) }
             // Mail is waiting iff some buddy's bit is set (FR-004), even on an ambiguous round.
             if candidates.nonEmpty then emit(EngineEvent.Notified(roundId))

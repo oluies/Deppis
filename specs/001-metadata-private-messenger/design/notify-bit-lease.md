@@ -109,11 +109,17 @@ the bound; no silent cap.)
 ### Residual risks
 
 - Slight delivery delay under collision (above) — bounded, no leak.
-- A peer that is pending here (the confirm window) or that keeps signaling after removal can also set
-  a bit. **Handled:** ambiguity ranges over ALL of the client's relationships (`BuddyBook.relationships`,
-  any state), not just confirmed, so such a peer's colliding bit still defers the confirmed buddy to a
-  cover read rather than a missed serve. Covered by a `RecurrenceGapsSpec` test (pending-peer collision
-  ⇒ no recurrence). [roborev Medium, addressed]
+- A peer that is pending here (the confirm window) can also set a bit. **Handled:** ambiguity ranges
+  over the client's ACTIVE relationships (`BuddyBook.relationships` filtered to non-Removed = Pending ∪
+  Confirmed, bounded by the 512 cap), not just confirmed, so a pending peer's colliding bit defers the
+  confirmed buddy to a cover read rather than a missed serve. Covered by a `RecurrenceGapsSpec` test
+  (pending-peer collision ⇒ no recurrence). [roborev Medium #1, addressed]
+- Removed relationships are **excluded** from the count (they are retained forever for duplicate-add
+  detection, so counting them would grow the ambiguity set without bound → delivery starvation —
+  [roborev Medium #2]). The trade: a peer that keeps signaling long after we removed it can sporadically
+  (~1/512 per round) collide with a live buddy and, because that buddy's read counter is frozen on the
+  resulting miss, recur its read token. This is the **same counter-frozen-on-miss residual as GAP #2**
+  (rejected-submit) and is resolved by the same retry-safe / round-id-derived addressing — tracked there.
 
 ---
 

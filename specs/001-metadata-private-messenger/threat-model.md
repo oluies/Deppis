@@ -126,12 +126,16 @@ attestation). Both are pinned as characterization tests in `engine.RecurrenceGap
    ambiguous, the receiver could mis-target the idle buddy, its `retrieve` missed, and the **same read
    token recurred**. T041c now derives the bit from the pair key **and the round id**
    (`NotifyDigest.bit(pairKey, roundId)`), so collisions are *transient*, and `Engine.tick` serves a
-   buddy only when its set bit is **unambiguous among ALL of this client's relationships** that round —
-   confirmed, pending, *or* removed, since a peer can still signal during the confirm window or before
-   it learns of a removal. An unambiguous set bit is therefore a guaranteed hit; an ambiguous round
-   defers to a fresh cover read and the buddies re-signal next round. So the SC-002 which-buddy
-   anonymity and FR-014 read-token non-recurrence now hold **unconditionally over collisions** (no
-   distinct-bit assumption). Cost: a bounded ~1-round delivery delay under collision, never a leak.
+   buddy only when its set bit is **unambiguous among this client's ACTIVE relationships** that round —
+   confirmed *and* pending (pending is included because a peer that confirmed first signals during our
+   confirm window). This set is bounded by the 512-buddy cap. An unambiguous set bit is therefore a
+   guaranteed hit; an ambiguous round defers to a fresh cover read and the buddies re-signal next round.
+   So the SC-002 which-buddy anonymity and FR-014 read-token non-recurrence hold **unconditionally over
+   collisions among active relationships** (no distinct-bit assumption). Cost: a bounded ~1-round
+   delivery delay under collision, never a leak. (A peer that keeps signaling long *after* we removed it
+   is excluded from the count to keep it bounded — retained removed relationships would grow without
+   limit — so it can sporadically collide with a live buddy; that is the same counter-frozen-on-miss
+   residual as #2 and is resolved by the same retry-safe addressing.)
    Design: `design/notify-bit-lease.md` (per-round rotation realizes T041c's goal without a static
    pairing-time lease, which the lease-less architecture cannot carry).
 
