@@ -301,29 +301,36 @@ final class Engine(
                 coverCounter += 1
                 t.submit(RetrievalToken.derive(coverKey, "cover", "", coverCounter), coverFrame())
             // Exactly ONE retrieve per round (the schedule's one-retrieve invariant, FR-012 fetch
-            // path), NOTIFY-GUIDED per-buddy (FR-004). T041c (collision-free notify): each confirmed
-            // buddy's notify bit is ROTATED per round (NotifyDigest.bit(addrKey, roundId)), so a
-            // collision between two of this receiver's buddies is transient, not permanent. We serve a
-            // buddy ONLY when its set bit is UNAMBIGUOUS this round — no other confirmed buddy maps to
+            // path), NOTIFY-GUIDED per-buddy (FR-004). T041c (collision-free notify): each buddy's
+            // notify bit is ROTATED per round (NotifyDigest.bit(addrKey, roundId)), so a collision
+            // between two of this receiver's buddies is transient, not permanent. We serve a buddy ONLY
+            // when its set bit is UNAMBIGUOUS this round — no OTHER relationship of this client maps to
             // that bit — which makes the read a GUARANTEED hit (only the holder of the pair key could
             // have sealed that bit), so the read counter always advances and the read-token stream is
-            // non-recurrent (FR-014) UNCONDITIONALLY. On an ambiguous round (two buddies share a set
-            // bit) we cannot tell which signaled, so we serve none and issue a fresh cover read; the
-            // colliding buddies re-signal next round, where rotation almost surely separates them
-            // (a bounded ~1-round delivery delay under collision, never a token recurrence / leak).
+            // non-recurrent (FR-014) UNCONDITIONALLY over collisions. On an ambiguous round we cannot
+            // tell which party signaled, so we serve none and issue a fresh cover read; the colliding
+            // buddies re-signal next round, where rotation almost surely separates them (a bounded
+            // ~1-round delivery delay under collision, never a token recurrence / leak).
             val confirmed = runtime.toSeq.flatMap { case (pid, rt) =>
               book
                 .get(pid)
                 .filter(_.state == BuddyState.Confirmed)
                 .map(rel => (pid, rt, rel, NotifyDigest.bit(rel.addrKey, roundId)))
             }
-            // Bits shared by 2+ confirmed buddies THIS round are ambiguous → cannot be safely served.
-            val ambiguous: Set[Int] =
-              confirmed.groupBy(_._4).collect { case (b, xs) if xs.sizeIs > 1 => b }.toSet
+            // How many of THIS client's relationships map to each bit this round — over ALL states
+            // (Pending/Confirmed/Removed), because a peer still pending here (the confirm window) or one
+            // that keeps signaling after we removed it can also set a bit. A confirmed candidate is safe
+            // to serve only if its bit is unique across ALL relationships (else the set bit might be
+            // some other party's, and serving the confirmed buddy would miss and recur its token).
+            val bitCount: Map[Int, Int] =
+              book.relationships.foldLeft(Map.empty[Int, Int]) { (m, rel) =>
+                val b = NotifyDigest.bit(rel.addrKey, roundId); m.updated(b, m.getOrElse(b, 0) + 1)
+              }
             val candidates = confirmed.filter { case (_, _, _, b) => NotifyDigest.isSet(digest, b) }
             // Mail is waiting iff some buddy's bit is set (FR-004), even on an ambiguous round.
             if candidates.nonEmpty then emit(EngineEvent.Notified(roundId))
-            val signaled = candidates.filterNot { case (_, _, _, b) => ambiguous(b) }.sortBy(_._1)
+            val signaled =
+              candidates.filter { case (_, _, _, b) => bitCount.getOrElse(b, 0) == 1 }.sortBy(_._1)
             if signaled.nonEmpty then
               // Serve one UNAMBIGUOUSLY-signaled buddy per round, ROTATING the start so co-signaling
               // buddies are not starved (the rest re-signal next round).

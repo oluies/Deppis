@@ -54,8 +54,10 @@ class AnonymitySpec extends AnyFunSuite:
   // Rounds run per world. A buffer over K because under T041c a round where the active buddy's
   // ROTATED bit collides with another confirmed buddy's bit is ambiguous and defers one delivery to
   // the next round — the buffer lets all K arrive within a FIXED-length trace (so the per-world
-  // observables stay comparable for the indistinguishability assertions). Collisions are rare
-  // (~3/512 per round for N=4), so 2 spare rounds are ample.
+  // observables stay comparable for the indistinguishability assertions). For the fixed secrets and
+  // rounds below this is DETERMINISTIC, not statistical (~3/512 per round for N=4 is just the prior),
+  // so 2 spare rounds are ample; if a derivation change ever exceeds the buffer the `delivered == K`
+  // assertion fails loudly with the world index, not as a flake.
   private val R = 8
   private val buddySecrets = (0 until N).map(i => secret(s"buddy-$i"))
 

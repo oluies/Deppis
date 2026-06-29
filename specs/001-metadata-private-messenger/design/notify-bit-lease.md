@@ -109,8 +109,11 @@ the bound; no silent cap.)
 ### Residual risks
 
 - Slight delivery delay under collision (above) — bounded, no leak.
-- The unambiguity argument assumes only confirmed buddies signal a receiver's label; a
-  removed/pending buddy that still emits is already out of scope (confirmed-filter). Add a test.
+- A peer that is pending here (the confirm window) or that keeps signaling after removal can also set
+  a bit. **Handled:** ambiguity ranges over ALL of the client's relationships (`BuddyBook.relationships`,
+  any state), not just confirmed, so such a peer's colliding bit still defers the confirmed buddy to a
+  cover read rather than a missed serve. Covered by a `RecurrenceGapsSpec` test (pending-peer collision
+  ⇒ no recurrence). [roborev Medium, addressed]
 
 ---
 

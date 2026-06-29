@@ -58,13 +58,22 @@ class RecurrenceGapsSpec extends AnyFunSuite:
   private def bitOf(s: Array[Byte], roundId: Long): Int =
     NotifyDigest.bit(KeySchedule.addrKey(handshake.Handshake.init(s).pairKey), roundId)
 
-  /** Find a round in which two distinct buddy secrets' ROTATED notify bits collide — to GUARANTEE the
-    * ambiguity-cover path is exercised. Per-round bits collide ~1/512 of rounds, so a few-thousand
-    * round scan is a near-certain find. */
-  private def collisionRound(a: Array[Byte], b: Array[Byte]): Long =
-    (1L to 20000L)
-      .find(r => bitOf(a, r) == bitOf(b, r))
-      .getOrElse(fail("no colliding round found for the pair within the scan window"))
+  /** The first `count` rounds in which two distinct buddy secrets' ROTATED notify bits collide — used
+    * to GUARANTEE the ambiguity-cover path is exercised. NOTE: deterministic for the fixed secrets (not
+    * statistical); the scan window is generous, and a `fail` makes a derivation change loud, not flaky. */
+  private def collisionRounds(a: Array[Byte], b: Array[Byte], count: Int): Seq[Long] =
+    val acc = mutable.ArrayBuffer.empty[Long]
+    var r = 1L
+    while acc.size < count && r <= 200000L do
+      if bitOf(a, r) == bitOf(b, r) then acc += r
+      r += 1
+    if acc.size < count then
+      fail(
+        s"found only ${acc.size}/$count colliding rounds in 200000 — did the bit derivation change?"
+      )
+    acc.toSeq
+
+  private def collisionRound(a: Array[Byte], b: Array[Byte]): Long = collisionRounds(a, b, 1).head
 
   /** A store the receiver reads from, recording every read token; `signalMail` QUEUES a buddy and
     * `fetchDigest(roundId)` sets its ROUND-ROTATED bit (matching the engine), then clears the queue. */
@@ -138,4 +147,37 @@ class RecurrenceGapsSpec extends AnyFunSuite:
     assert(
       delivered == msgs,
       s"active buddy delivered $delivered/$msgs despite the collision round"
+    )
+
+  test("T041c: a pending/colliding peer cannot make a confirmed idle buddy's read token recur"):
+    // Bob has a CONFIRMED idle buddy C (no sender) and a still-PENDING buddy X (added, not yet
+    // confirmed — the confirm window). X's peer keeps signaling X's bit. On rounds where X's rotated
+    // bit collides with C's, C's bit appears SET; if ambiguity ranged only over CONFIRMED buddies the
+    // engine would serve C, MISS (C has no mail), and re-issue C's frozen read token — recurrence.
+    // Because ambiguity ranges over ALL relationships (X is pending-but-present), those rounds are
+    // ambiguous ⇒ a fresh cover read ⇒ no recurrence. Two colliding rounds are used so a confirmed-only
+    // regression would serve C twice at the same frozen counter and fail this test.
+    val sIdleC = secret("confirmed-idle")
+    val sPendX = secret("pending-peer")
+    val cols = collisionRounds(sIdleC, sPendX, 2)
+
+    val store = mutable.Map.empty[String, Array[Byte]]
+    val recvHost = RecvHost(store)
+    val bob = Engine(Some(recvHost), clientLabel = secret("bob"))
+    val rcC = bob.addBuddy(sIdleC, BuddyRole.Responder).toOption.get
+    bob.confirmBuddy(rcC.pairId, matched = true) // C: confirmed, idle
+    bob.addBuddy(sPendX, BuddyRole.Responder) // X: added but NOT confirmed ⇒ Pending
+    bob.drainEvents()
+
+    for r <- cols do
+      recvHost.signalMail(
+        sPendX
+      ) // X's (pending) peer signals — sets X's rotated bit, == C's that round
+      bob.tick(r)
+      bob.drainEvents()
+
+    assert(recvHost.reads.size == cols.size, "one read per round")
+    assert(
+      recvHost.reads.distinct.size == recvHost.reads.size,
+      "no recurrence: a pending/colliding peer must not force a confirmed idle buddy to be served"
     )
