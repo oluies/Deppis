@@ -17,36 +17,46 @@ import scala.collection.mutable
   * by obsd's selftest — T053; and the store doesn't distinguish, proven by obsd's oblivious selftest +
   * the real-obsd E2E. This spec pins the engine-level property the whole stack rests on.)
   *
-  * SCOPE — two modeled assumptions, both with KNOWN GAPs pinned in `RecurrenceGapsSpec`: (1) the
-  * `N` buddies occupy DISTINCT notify bits (asserted as a precondition below) — under a birthday-rate
-  * bit collision the read token can recur (the unimplemented T041c bit-lease closes this); and (2) the
-  * store accepts every write (`HostView.submit` returns `true`) — a store that selectively REJECTS a
-  * write makes the outgoing token recur on retry. So the unconditional 1/N and active-vs-idle claims
-  * hold under collision-free bits + a non-rejecting store; the two gaps are the remaining protocol work. */
+  * SCOPE: collision-free notify is now handled by T041c (per-round bit ROTATION + ambiguity-cover in
+  * `Engine.tick`), so read-token non-recurrence holds even when two of a receiver's buddies' bits
+  * collide in a round — no distinct-bit precondition is needed (a colliding round defers to a cover
+  * read; see `RecurrenceGapsSpec`). One modeled assumption remains: the store accepts every write
+  * (`HostView.submit` returns `true`); a store that selectively REJECTS a write still makes the
+  * OUTGOING token recur on retry (GAP #2, retry-safe addressing — pinned in `RecurrenceGapsSpec`). */
 class AnonymitySpec extends AnyFunSuite:
 
   import token.RetrievalToken
 
   private def secret(s: String): Array[Byte] = s.getBytes("UTF-8")
-  private def bitOf(pairKey: Array[Byte]): Int = NotifyDigest.bit(KeySchedule.addrKey(pairKey))
+  private def bitOf(pairKey: Array[Byte], roundId: Long): Int =
+    NotifyDigest.bit(KeySchedule.addrKey(pairKey), roundId)
 
   /** A transport that records the store host's full observable: every submit (token, frame) and every
-    * retrieve token. `signalMail` sets a buddy's one-hot digest bit for the next round. */
+    * retrieve token. `signalMail` QUEUES a buddy as having mail; `fetchDigest(roundId)` sets that
+    * buddy's ROUND-ROTATED bit (T041c) and clears the queue — matching the engine's per-round bit. */
   private final class HostView(store: mutable.Map[String, Array[Byte]]) extends RoundTransport:
-    private val digest = new Array[Byte](64)
+    private val pendingMail = mutable.ArrayBuffer.empty[Array[Byte]]
     val submits = mutable.ArrayBuffer.empty[(Vector[Byte], Vector[Byte])]
     val retrieves = mutable.ArrayBuffer.empty[Vector[Byte]]
-    def signalMail(pairKey: Array[Byte]): Unit =
-      val b = bitOf(pairKey); digest(b >> 3) = (digest(b >> 3) | (1 << (b & 7))).toByte
+    def signalMail(pairKey: Array[Byte]): Unit = pendingMail += pairKey
     def submit(t: Array[Byte], f: Array[Byte]): Boolean =
       submits += ((t.toVector, f.toVector)); store(t.toVector.toString) = f; true
     def fetchDigest(roundId: Long, clientLabel: Array[Byte]): Array[Byte] =
-      val out = digest.clone(); java.util.Arrays.fill(digest, 0.toByte); out
+      val out = new Array[Byte](64)
+      for pk <- pendingMail do
+        val b = bitOf(pk, roundId); out(b >> 3) = (out(b >> 3) | (1 << (b & 7))).toByte
+      pendingMail.clear(); out
     def retrieve(t: Array[Byte]): Option[Array[Byte]] =
       retrieves += t.toVector; store.remove(t.toVector.toString)
 
   private val N = 4
-  private val K = 6 // rounds per world
+  private val K = 6 // messages the active buddy sends
+  // Rounds run per world. A buffer over K because under T041c a round where the active buddy's
+  // ROTATED bit collides with another confirmed buddy's bit is ambiguous and defers one delivery to
+  // the next round — the buffer lets all K arrive within a FIXED-length trace (so the per-world
+  // observables stay comparable for the indistinguishability assertions). Collisions are rare
+  // (~3/512 per round for N=4), so 2 spare rounds are ample.
+  private val R = 8
   private val buddySecrets = (0 until N).map(i => secret(s"buddy-$i"))
 
   /** The store host's full observable for one world, plus a delivery count (non-vacuity). */
@@ -57,7 +67,7 @@ class AnonymitySpec extends AnyFunSuite:
   )
 
   /** A receiver with all `N` buddies confirmed (the anonymity set), where ONLY buddy `active` actually
-    * communicates: it sends a real message each of `K` rounds and the receiver reads it. Returns the
+    * communicates: it sends `K` real messages and the receiver reads them over `R` rounds. Returns the
     * store host's full observable (the writes it sees + the reads the receiver issues) and the count
     * delivered. */
   private def world(active: Int): Observable =
@@ -75,11 +85,13 @@ class AnonymitySpec extends AnyFunSuite:
     val pid = alice.addBuddy(s, BuddyRole.Initiator).toOption.get.pairId
     alice.confirmBuddy(pid, matched = true); alice.drainEvents()
     var delivered = 0
-    (1 to K).foreach { round =>
-      alice.sendMessage(pid, s"m$round");
-      alice.tick(round.toLong) // active buddy writes a real frame
-      recvHost.signalMail(handshake.Handshake.init(s).pairKey) // its (and only its) bit is set
-      bob.tick(round.toLong) // receiver reads exactly that buddy — a hit ⇒ the token advances
+    (1 to R).foreach { round =>
+      if round <= K then alice.sendMessage(pid, s"m$round")
+      alice.tick(round.toLong) // active buddy writes a real frame (rounds 1..K), else a carrier
+      // Re-signal while mail is undelivered: a rare ambiguous round defers one delivery, so the active
+      // buddy re-signals until all K land (within the R-round buffer).
+      if delivered < K then recvHost.signalMail(handshake.Handshake.init(s).pairKey)
+      bob.tick(round.toLong) // serves the active buddy when its rotated bit is unambiguous (a hit)
       delivered += bob.drainEvents().count(_.isInstanceOf[EngineEvent.MessageReceived])
     }
     // The store host sees every write: the active buddy's real frames AND the receiver's cover writes.
@@ -89,16 +101,16 @@ class AnonymitySpec extends AnyFunSuite:
       delivered
     )
 
-  // Precondition: the N buddies map to DISTINCT one-hot notify bits, so a signaled buddy's read is a
-  // genuine hit (not a T041c birthday collision that would target the wrong buddy and fail opaquely).
-  test("the N buddy secrets occupy distinct notify bits (anonymity-set precondition)"):
-    assert(buddySecrets.map(s => bitOf(handshake.Handshake.init(s).pairKey)).distinct.size == N)
+  // No distinct-bit precondition is needed anymore: T041c rotates each buddy's bit per round and the
+  // engine serves only UNAMBIGUOUS set bits (a colliding round defers to a cover read), so the
+  // anonymity below holds unconditionally over collisions. (Bit collisions are exercised directly in
+  // `RecurrenceGapsSpec`.)
 
   test("the host's read-token trace has the same SHAPE no matter which buddy is active"):
     val traces = (0 until N).map(i => world(i).reads)
     // One read per round in every world, every token a full retrieval token — the host sees the same
     // shape regardless of which buddy is communicating (count/size leak nothing).
-    traces.foreach(tr => assert(tr.size == K, s"expected $K reads, got ${tr.size}"))
+    traces.foreach(tr => assert(tr.size == R, s"expected $R reads, got ${tr.size}"))
     traces.foreach(tr =>
       assert(tr.forall(_.size == RetrievalToken.Length), "all tokens full length")
     )
@@ -116,7 +128,7 @@ class AnonymitySpec extends AnyFunSuite:
   test("read AND write tokens are non-recurrent across ALL buddies and rounds (no clustering)"):
     val obs = (0 until N).map(world)
     val reads = obs.flatMap(_.reads)
-    assert(reads.size == N * K && reads.distinct.size == reads.size, "read tokens all unique")
+    assert(reads.size == N * R && reads.distinct.size == reads.size, "read tokens all unique")
     val writeTokens = obs.flatMap(_.writes.map(_._1))
     assert(
       writeTokens.distinct.size == writeTokens.size,

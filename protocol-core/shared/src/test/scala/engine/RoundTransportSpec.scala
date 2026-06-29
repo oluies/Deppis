@@ -15,28 +15,33 @@ class RoundTransportSpec extends AnyFunSuite:
   private def pairKeyOf(s: String): Array[Byte] = handshake.Handshake.init(secret(s)).pairKey
   // The engine derives the notify bit from the addressing root (the forward-secrecy root split), so a
   // test signaller must too — single source of truth via KeySchedule.addrKey.
-  private def bitOf(pairKey: Array[Byte]): Int = NotifyDigest.bit(KeySchedule.addrKey(pairKey))
+  private def bitOf(pairKey: Array[Byte], roundId: Long): Int =
+    NotifyDigest.bit(KeySchedule.addrKey(pairKey), roundId)
 
   /** In-memory store + a 512-bit PING digest, recording the observable submit + fetch traces.
-    * `fetchDigest` is per-round: it returns the current digest and RESETS it (obsd semantics), so a
-    * signal must be set each round mail should be delivered. Separate transports can share a store. */
+    * Notify is per-round: `signalMail` QUEUES a buddy as having mail, and `fetchDigest(roundId)`
+    * computes that buddy's ROUND-ROTATED bit (T041c) into the digest and clears the queue — exactly
+    * what the real front does, and matching the engine's per-round derivation, so a signal must be
+    * set each round mail should be delivered. Separate transports can share a store. */
   private final class FakeTransport(val store: mutable.Map[String, Array[Byte]] = mutable.Map.empty)
       extends RoundTransport:
     var acceptSubmit: Boolean = true
-    private val digest = new Array[Byte](64)
+    private val pendingMail =
+      mutable.ArrayBuffer.empty[Array[Byte]] // pairKeys signaled for next fetch
     val submits = mutable.ArrayBuffer.empty[(Array[Byte], Array[Byte])]
     val retrieves = mutable.ArrayBuffer.empty[Array[Byte]]
 
-    /** Signal that the buddy with `pairKey` has mail this round (sets its one-hot bit). */
-    def signalMail(pairKey: Array[Byte]): Unit =
-      val bit = bitOf(pairKey); digest(bit >> 3) = (digest(bit >> 3) | (1 << (bit & 7))).toByte
+    /** Signal that the buddy with `pairKey` has mail this round (its bit is set at the next fetch). */
+    def signalMail(pairKey: Array[Byte]): Unit = pendingMail += pairKey
     def submit(token: Array[Byte], frame: Array[Byte]): Boolean =
       submits += ((token, frame))
       if acceptSubmit then store(hex(token)) = frame
       acceptSubmit
     def fetchDigest(roundId: Long, clientLabel: Array[Byte]): Array[Byte] =
-      val out = digest.clone()
-      var i = 0; while i < digest.length do { digest(i) = 0; i += 1 } // per-round reset
+      val out = new Array[Byte](64)
+      for pk <- pendingMail do
+        val bit = bitOf(pk, roundId); out(bit >> 3) = (out(bit >> 3) | (1 << (bit & 7))).toByte
+      pendingMail.clear() // per-round reset
       out
     def retrieve(token: Array[Byte]): Option[Array[Byte]] =
       retrieves += token
@@ -285,7 +290,10 @@ class RoundTransportSpec extends AnyFunSuite:
     val rounds = 12
     var delivered = 0
     for r <- 1 to rounds do
-      if r <= 5 then tb.signalMail(pairKeyOf("buddy-B")) // B has mail for 5 rounds; A never signals
+      // B re-signals every round until all its mail is delivered; A never signals. Under T041c a round
+      // where A's and B's ROTATED bits collide is ambiguous, so B defers to the next round (where
+      // rotation separates them) — hence re-signal-until-delivered rather than a fixed 5-round window.
+      if delivered < 5 then tb.signalMail(pairKeyOf("buddy-B"))
       bob.tick(r)
       delivered += bob.drainEvents().count(_.isInstanceOf[EngineEvent.MessageReceived])
     assert(tb.retrieves.size == rounds, "one read per round")

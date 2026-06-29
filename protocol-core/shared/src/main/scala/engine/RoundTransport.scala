@@ -18,9 +18,9 @@ trait RoundTransport:
   def submit(token: Array[Byte], frame: Array[Byte]): Boolean
 
   /** This round's PING notify digest for `clientLabel` (one fetch per round). Each of the client's
-    * buddies maps to a one-hot bit; a set bit means THAT buddy signaled mail this round, so the
-    * engine reads exactly the signaled buddy (a hit ⇒ a non-recurrent read token, FR-014 — conditional
-    * on collision-free bits, the unimplemented T041c bit-lease; see `RecurrenceGapsSpec`) and emits
+    * buddies maps to a one-hot bit ROTATED per round (T041c); a set bit means THAT buddy signaled mail
+    * this round. The engine serves a buddy only when its set bit is UNAMBIGUOUS that round (a guaranteed
+    * hit ⇒ a non-recurrent read token, FR-014; a colliding round defers to a cover read) and emits
     * `notified` first (FR-004). An all-zero digest (carrier) ⇒ no mail. */
   def fetchDigest(roundId: Long, clientLabel: Array[Byte]): Array[Byte]
 
