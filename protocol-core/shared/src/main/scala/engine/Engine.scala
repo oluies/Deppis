@@ -104,7 +104,7 @@ final class Engine(
     // (Stage 2), since retransmitting under the current counter token would itself recur (GAP #2).
     var nextSendSeq: Long = 0L // sequence to assign the NEXT new outgoing message
     var highRecv: Long =
-      NoSeq // highest sequence we have received from the peer (dedup + our outgoing ack)
+      ArqFrame.NoSeq // highest sequence we have received from the peer (dedup + our outgoing ack)
     // The CONTENT ratchet: the full DH double ratchet with header encryption (post-compromise
     // security). The initiator can send immediately; the responder's sending chain opens only once it
     // has received the initiator's first frame (initiator-sends-first; see DoubleRatchet/dh-ratchet.md
@@ -142,32 +142,10 @@ final class Engine(
   // separate root); the content root is wiped, and each DH step mixes a fresh secret (PCS).
   private val InnerSize = DoubleRatchet.InnerSize // the plaintext the ratchet seals per message
 
-  // Stop-and-wait ARQ framing (retry-safe-addressing.md). The sealed inner block is
-  //   [ackSeq(8 BE)][msgSeq(8 BE)][padded message]
-  // so every frame (real, ack-only, or — once round-derived addressing lands — a retransmit) carries
-  // the sender's highest-received sequence (so the peer can stop retransmitting) and this message's
-  // sequence (so the receiver can de-duplicate retransmits). `ackSeq`/`msgSeq` are encrypted (inside
-  // the ratchet inner block), so the store never sees them. The message region is the remaining bytes.
-  private val ArqHeaderBytes = 16
-  private val MsgPayloadInner = InnerSize - ArqHeaderBytes // padded-message region (156B)
-  private val NoSeq: Long =
-    -1L // an ack-only frame carries no new message (empty payload, msgSeq=NoSeq)
-
-  private def enc8(v: Long): Array[Byte] =
-    val out = new Array[Byte](8)
-    var i = 0
-    while i < 8 do { out(i) = ((v >>> (56 - 8 * i)) & 0xff).toByte; i += 1 }
-    out
-  private def dec8(b: Array[Byte], off: Int): Long =
-    var v = 0L
-    var i = 0
-    while i < 8 do { v = (v << 8) | (b(off + i) & 0xffL); i += 1 }
-    v
-
-  /** Build the ratchet inner block for an ARQ frame: `[ackSeq][msgSeq][paddedPayload]`. `paddedPayload`
-    * is already `MsgPayloadInner` bytes (a padded message; or, in Stage 2, padded-empty for ack-only). */
-  private def arqInner(ackSeq: Long, msgSeq: Long, paddedPayload: Array[Byte]): Array[Byte] =
-    enc8(ackSeq) ++ enc8(msgSeq) ++ paddedPayload
+  // Stop-and-wait ARQ framing lives in [[ArqFrame]] (pure + unit-tested): the ratchet inner block is
+  // [ackSeq(8)][msgSeq(8)][padded message], encrypted inside the ratchet so the store never sees it.
+  // The message region is the remaining bytes.
+  private val MsgPayloadInner = InnerSize - ArqFrame.HeaderBytes // padded-message region (156B)
 
   /** Zero a key buffer in place (cross-platform; the forward-secrecy boundary depends on wiping old
     * key material so it cannot be recovered from memory). */
@@ -333,7 +311,8 @@ final class Engine(
                     // DH header + ARQ inner block ([ackSeq][msgSeq][padded message]); ackSeq piggybacks
                     // our highest-received sequence so the peer can stop retransmitting.
                     val msgSeq = rt.nextSendSeq
-                    val wire = rt.ratchet.encryptPending(arqInner(rt.highRecv, msgSeq, q.head))
+                    val wire =
+                      rt.ratchet.encryptPending(ArqFrame.encode(rt.highRecv, msgSeq, q.head))
                     if t.submit(
                         dirToken(rel.addrKey, rt.role, peerRole(rt.role), rt.sendCounter),
                         wire
@@ -429,21 +408,22 @@ final class Engine(
                 // — or None for a carrier / non-matching frame, WITHOUT advancing the ratchet.
                 rt.ratchet.decrypt(wire).foreach { inner =>
                   // ARQ inner block: [ackSeq][msgSeq][padded message]. De-duplicate + deliver this
-                  // message by its sequence (a retransmit re-presents an already-seen msgSeq); track the
-                  // highest received so our outgoing ackSeq is correct. (The PEER's ackSeq at inner[0:8]
-                  // is carried on the wire but only consumed once advance-on-ack/retransmit lands with
-                  // round-derived addressing in Stage 2 — retransmitting under the current counter token
-                  // would itself recur.)
-                  val msgSeq = dec8(inner, 8)
-                  val isNewMessage = msgSeq != NoSeq && msgSeq > rt.highRecv
-                  if isNewMessage then
-                    rt.highRecv = msgSeq
+                  // message by its sequence (a retransmit re-presents an already-seen msgSeq). Advance
+                  // `highRecv` ONLY after a successful unpad+deliver — otherwise a malformed-pad frame
+                  // would mark the sequence received without surfacing it, which (once Stage 2 consumes
+                  // the ack) would let the sender stop retransmitting a message we never delivered.
+                  // (The PEER's ackSeq at inner[0:8] is carried on the wire but only consumed in Stage 2,
+                  // with round-derived addressing — retransmitting under the current counter token would
+                  // itself recur.)
+                  val msgSeq = ArqFrame.msgSeqOf(inner)
+                  if ArqFrame.isNewMessage(msgSeq, rt.highRecv) then
                     Frame
-                      .unpad(inner.slice(ArqHeaderBytes, InnerSize), MsgPayloadInner)
+                      .unpad(ArqFrame.payloadOf(inner), MsgPayloadInner)
                       .toOption
-                      .foreach(p =>
+                      .foreach { p =>
+                        rt.highRecv = msgSeq // advance only on successful delivery
                         emit(EngineEvent.MessageReceived(pid, new String(p, UTF_8), roundId))
-                      )
+                      }
                 }
               }
             else
