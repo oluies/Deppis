@@ -28,6 +28,16 @@ trait RoundTransport:
     * single-use). `None` means no message under that token this round. */
   def retrieve(token: Array[Byte]): Option[Array[Byte]]
 
+  /** Notify the PEER (via the PING front) that mail is waiting: set `bit` in `label`'s digest for this
+    * round. The engine emits EXACTLY ONE signal per round — the real peer's `(label, bit)` when it sent
+    * them a real frame, otherwise a DECOY to a per-client void label no one fetches — so the untrusted
+    * host sees uniform signal-RPC volume (active-vs-idle indistinguishable at the notify layer, FR-012),
+    * exactly mirroring the one-store-write-per-round rule. The transport seals `(round, bit, label)`;
+    * the trusted enclave front opens it and ORs the bit into `label`'s digest (a decoy is harmless —
+    * no one reads the void label). Default no-op: a transport that does not back notify simply drops it
+    * (local-only delivery), and the engine still calls it uniformly. */
+  def signal(roundId: Long, label: Array[Byte], bit: Int): Unit = ()
+
   /** The privacy status of THIS backend (T058, Constitution IV/IX). The engine surfaces it as the
     * client's privacy label, so the UI reports `METADATA PRIVATE` ONLY when connected to a real
     * backend whose attestation passed. Defaults to the dev status: a transport must explicitly

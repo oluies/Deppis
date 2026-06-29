@@ -15,12 +15,23 @@ import engine.RoundTransport
   * a consumed frame). So neither a send nor a receive is silently lost on a transient failure. */
 final class GrpcRoundTransport(
     store: EnclaveObliviousStore,
-    notify: EnclaveNotificationClient
+    notify: EnclaveNotificationClient,
+    // Mints a sealed notify token `(roundId, bit, label) => sealedBytes`. The engine drives one signal
+    // per round (real peer or decoy); this seals + sends it. DEV: the sealer shares obsd's notify key
+    // (the same dev key obsd opens with); the REAL front seals server-side INSIDE the attested enclave,
+    // so a client never holds the key. `None` ⇒ notify not wired (local-only) ⇒ `signal` is a no-op.
+    notifySealer: Option[(Long, Int, Array[Byte]) => Array[Byte]] = None
 ) extends RoundTransport:
 
   /** `true` iff the store accepted the frame; `false` lets the engine retry next round. */
   def submit(token: Array[Byte], frame: Array[Byte]): Boolean =
     store.write(token, frame).isRight
+
+  /** Seal + send this round's notify signal (the engine guarantees exactly one per round, real or
+    * decoy — FR-012 at the notify layer). A backend failure is swallowed (the message still delivers
+    * once the peer fetches; a lost signal just delays the "mail waiting" indicator). */
+  override def signal(roundId: Long, label: Array[Byte], bit: Int): Unit =
+    notifySealer.foreach(seal => notify.signal(roundId, seal(roundId, bit, label)): Unit)
 
   /** This round's PING notify digest for the client (per-buddy one-hot bits). On a transient
     * failure, an all-zero digest (no mail) — the message simply waits for next round. */

@@ -22,7 +22,12 @@ object Buddy:
       // The retained ADDRESSING root (`KeySchedule.addrKey`) — retrieval tokens + notify bit derive
       // from this, NOT the raw pair key (which is wiped after the forward-secrecy root split). Never
       // crosses the engine boundary.
-      addrKey: Array[Byte]
+      addrKey: Array[Byte],
+      // The PEER's notify aggregation label (the label THEY fetch their digest under), learned at
+      // pairing. The engine signals this when it sends this buddy a real frame so the peer's "mail
+      // waiting" fires. Empty ⇒ local-only (no notify delivery for this buddy). Not secret — the
+      // store/notify host sees it anyway when the peer fetches — but it never crosses the API boundary.
+      peerNotifyLabel: Array[Byte] = Array.emptyByteArray
   )
 
   final class BuddyBook private (private val rels: Map[String, BuddyRelationship]):
