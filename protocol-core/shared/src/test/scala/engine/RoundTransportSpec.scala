@@ -147,11 +147,36 @@ class RoundTransportSpec extends AnyFunSuite:
     alice.tick(2) // idle ⇒ decoy
     alice.tick(3) // idle ⇒ decoy
     assert(t.signals.map(_._1) == Seq(1L, 2L, 3L), "exactly one signal per round, in order")
-    // Round 1 is a real signal to Bob's label under the pair's round-1 rotated bit.
-    assert(t.signals(0)._2 == bobLabel.toVector, "real send signals the peer's label")
+    // Round 1 is a real signal to Bob's FIXED-WIDTH label tag under the pair's round-1 rotated bit.
+    assert(
+      t.signals(0)._2 == NotifyDigest.labelTag(bobLabel).toVector,
+      "real send signals the peer"
+    )
     assert(t.signals(0)._3 == bitOf(pairKeyOf("shared"), 1L), "under the pair's round-rotated bit")
-    // Idle rounds signal a DECOY — never the peer's label — so volume is uniform but no peer is notified.
-    assert(t.signals(1)._2 != bobLabel.toVector && t.signals(2)._2 != bobLabel.toVector, "decoys")
+    // Idle rounds signal a DECOY — never the peer's label — so no peer is notified.
+    val realTag = NotifyDigest.labelTag(bobLabel).toVector
+    assert(t.signals(1)._2 != realTag && t.signals(2)._2 != realTag, "decoys")
+    // CRITICAL (FR-012, no active-vs-idle size leak): every signal's label is the SAME length, so the
+    // sealed-token byte size is identical on real and idle rounds.
+    assert(t.signals.map(_._2.size).distinct == Seq(t.signals.head._2.size), "uniform label length")
+
+  test(
+    "notify label tag is fixed-width regardless of the peer label's length (no which-buddy size leak)"
+  ):
+    // Two peers with very different raw label lengths must produce SAME-length signal labels, so the
+    // sealed-token size can't reveal which buddy was notified.
+    val tShort = FakeTransport(); val tLong = FakeTransport()
+    def realSignalLen(t: FakeTransport, peerLabel: Array[Byte]): Int =
+      val e = Engine(Some(t), clientLabel = "me".getBytes)
+      val pid = e
+        .addBuddy(secret("s"), BuddyRole.Initiator, peerNotifyLabel = peerLabel)
+        .toOption
+        .get
+        .pairId
+      e.confirmBuddy(pid, matched = true); e.drainEvents()
+      e.sendMessage(pid, "x"); e.tick(1)
+      t.signals.head._2.size
+    assert(realSignalLen(tShort, "b".getBytes) == realSignalLen(tLong, ("y" * 200).getBytes))
 
   test("a local-only buddy (no peer notify label) still emits one decoy signal per round"):
     // No peerNotifyLabel ⇒ the engine can't notify the peer, but it STILL signals once per round (a

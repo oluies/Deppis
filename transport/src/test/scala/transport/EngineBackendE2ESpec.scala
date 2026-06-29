@@ -55,11 +55,16 @@ class EngineBackendE2ESpec extends AnyFunSuite with ObsdHarness:
       val aliceStore = new EnclaveObliviousStore(storeStub, attested = false)
       assert(aliceStore.write(aliceToken, wire).isRight)
       // Alice signals Bob's notification under the PER-BUDDY bit Bob's engine checks for THIS round
-      // (T041c rotates the bit per round; Bob ticks round 1L below).
+      // (T041c rotates the bit per round; Bob ticks round 1L below) and the FIXED-WIDTH label tag Bob's
+      // engine fetches under (uniform sealed-token length, no active-vs-idle size leak).
       val buddyBit = engine.NotifyDigest.bit(addrKey, 1L)
       val sealer = DevNotificationServer(notifyKey)
       val aliceNotify = new EnclaveNotificationClient(notifyStub, attested = false)
-      assert(aliceNotify.signal(1L, sealer.issueToken(1L, buddyBit, bobLabel)).isRight)
+      assert(
+        aliceNotify
+          .signal(1L, sealer.issueToken(1L, buddyBit, engine.NotifyDigest.labelTag(bobLabel)))
+          .isRight
+      )
 
       // --- Bob ticks: notify-before-retrieval ---
       bob.tick(1L)

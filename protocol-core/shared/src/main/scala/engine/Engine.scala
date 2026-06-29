@@ -269,7 +269,7 @@ final class Engine(
             // half-applied send (no submitted frame, no advanced counter).
             // One PING digest fetch per round (may also reject an out-of-range round atomically,
             // before any send side effect). The set bits say exactly which buddies signaled mail.
-            val digest = t.fetchDigest(roundId, clientLabel)
+            val digest = t.fetchDigest(roundId, NotifyDigest.labelTag(clientLabel))
             // Exactly ONE store write per round (cover traffic, FR-012): a real frame under its
             // outgoing token if one is queued, otherwise a carrier frame under a fresh random-looking
             // cover token. So the store-write trace (one 256-byte write per round, random 32-byte
@@ -330,12 +330,15 @@ final class Engine(
             // DECOY to this client's void label that nobody fetches. Either way the untrusted host sees
             // one same-shaped (sealed) signal RPC per round, so notify timing/volume can't distinguish an
             // active client from an idle one. The bit is round-rotated (T041c) in both cases.
+            // Labels are tagged to a FIXED width (NotifyDigest.labelTag) so a real and a decoy signal —
+            // and signals to buddies whose raw labels differ in length — are byte-length identical on the
+            // wire; otherwise the sealed-token size would leak active-vs-idle / which-buddy.
             realSignal match
               case Some((label, addrKey)) =>
-                t.signal(roundId, label, NotifyDigest.bit(addrKey, roundId))
+                t.signal(roundId, NotifyDigest.labelTag(label), NotifyDigest.bit(addrKey, roundId))
               case None =>
                 val void = voidNotifyLabel
-                t.signal(roundId, void, NotifyDigest.bit(void, roundId))
+                t.signal(roundId, NotifyDigest.labelTag(void), NotifyDigest.bit(void, roundId))
             // Exactly ONE retrieve per round (the schedule's one-retrieve invariant, FR-012 fetch
             // path), NOTIFY-GUIDED per-buddy (FR-004). T041c (collision-free notify): each buddy's
             // notify bit is ROTATED per round (NotifyDigest.bit(addrKey, roundId)), so a collision
