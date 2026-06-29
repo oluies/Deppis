@@ -223,8 +223,9 @@ class RecurrenceGapsSpec extends AnyFunSuite:
       bob.tick(r)
       bob.drainEvents()
 
-    assert(recvHost.reads.size == cols.size, "one read per round")
+    assert(recvHost.reads.size == cols.size && cols.size == 2, "two reads, one per collision round")
+    // Mirror GAP #2's explicit form: BOTH reads are C's SAME frozen token (recvCounter never advanced).
     assert(
-      recvHost.reads.distinct.size < recvHost.reads.size,
-      "KNOWN GAP #3: a removed-but-signaling peer's collision recurs a confirmed idle buddy's read token"
+      recvHost.reads(0) == recvHost.reads(1),
+      "KNOWN GAP #3: a removed-but-signaling peer recurs C's SAME frozen read token (fix: flip to !=)"
     )
