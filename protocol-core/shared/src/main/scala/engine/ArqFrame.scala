@@ -12,11 +12,22 @@ object ArqFrame:
   /** Bytes the ack+seq header consumes from the ratchet inner block. */
   val HeaderBytes: Int = 16
 
+  /** The exact width of the padded message region = the ratchet inner block minus the ARQ header. The
+    * ratchet seals a fixed `InnerSize`, so every ARQ inner block is `HeaderBytes + PayloadBytes`; the
+    * engine pads each message to this width. (Single source of truth — the engine reuses it.) */
+  val PayloadBytes: Int = DoubleRatchet.InnerSize - HeaderBytes
+
   /** Sentinel `msgSeq` for a frame carrying no new message (an ack-only frame — Stage 2). */
   val NoSeq: Long = -1L
 
-  /** `[ackSeq][msgSeq][paddedPayload]`. `paddedPayload` is already the message region's width. */
+  /** `[ackSeq][msgSeq][paddedPayload]`. `paddedPayload` MUST be exactly [[PayloadBytes]] wide (a
+    * message already padded to the message region); enforced so a wrong-width caller fails loudly here
+    * rather than corrupting `Frame.unpad` at the receiver. */
   def encode(ackSeq: Long, msgSeq: Long, paddedPayload: Array[Byte]): Array[Byte] =
+    require(
+      paddedPayload.length == PayloadBytes,
+      s"ARQ payload ${paddedPayload.length} != $PayloadBytes"
+    )
     enc8(ackSeq) ++ enc8(msgSeq) ++ paddedPayload
 
   def ackSeqOf(inner: Array[Byte]): Long = dec8(inner, 0)

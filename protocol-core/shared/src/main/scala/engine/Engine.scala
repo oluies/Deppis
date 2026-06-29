@@ -145,7 +145,8 @@ final class Engine(
   // Stop-and-wait ARQ framing lives in [[ArqFrame]] (pure + unit-tested): the ratchet inner block is
   // [ackSeq(8)][msgSeq(8)][padded message], encrypted inside the ratchet so the store never sees it.
   // The message region is the remaining bytes.
-  private val MsgPayloadInner = InnerSize - ArqFrame.HeaderBytes // padded-message region (156B)
+  private val MsgPayloadInner =
+    ArqFrame.PayloadBytes // padded-message region (InnerSize - 16 = 156B)
 
   /** Zero a key buffer in place (cross-platform; the forward-secrecy boundary depends on wiping old
     * key material so it cannot be recovered from memory). */
