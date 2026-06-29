@@ -99,6 +99,13 @@ final class Engine(
     var nextSendSeq: Long = 0L // sequence to assign the NEXT new outgoing (head) message
     var headSeq: Long =
       ArqFrame.NoSeq // the in-flight head's sequence, or NoSeq if nothing in flight
+    // The head's encrypted 256-byte wire, CACHED so a retransmit resubmits the SAME bytes under a fresh
+    // round token rather than re-`encrypt`ing (which would advance the ratchet every round and push an
+    // offline peer past MaxSkip). Re-encrypted only when the head changes or our ack (`highRecv`)
+    // advances — both bounded by message count, not rounds — so `Ns` cannot grow unboundedly.
+    var headWire: Array[Byte] = null
+    var headWireAck: Long =
+      ArqFrame.NoSeq // the highRecv baked into headWire (refresh the ack on change)
     var peerAcked: Long = ArqFrame.NoSeq // highest sequence the PEER has acknowledged from us
     var highRecv: Long =
       ArqFrame.NoSeq // highest sequence we have received (dedup + our outgoing ack)
@@ -120,6 +127,9 @@ final class Engine(
   // Fairness cursor: when several buddies signal the SAME round, rotate which one is served so no
   // (e.g. higher-pairId) buddy is starved under the one-read-per-round limit.
   private var recvCursor = 0L
+  // Send-side fairness cursor: with one write per round, rotate which sending buddy is (re)transmitted
+  // so a slow/offline peer's held head cannot monopolize the slot and starve the others.
+  private var sendCursor = 0L
 
   // A directional retrieval token: messages FROM `from` TO `to` in a given ROUND (T041c/retry-safe
   // addressing). Both parties derive the same token from the shared pair key + the (symmetric) role
@@ -294,11 +304,14 @@ final class Engine(
             // Exactly ONE store write per round (cover traffic, FR-012), under a ROUND-DERIVED token so
             // a reject/retry never recurs (retry-safe addressing, GAP #2). Priority for the one write:
             //   1. (RE)TRANSMIT a queued head to a confirmed buddy that can send — the head is HELD and
-            //      retransmitted each round (each `encrypt` advances the ratchet, so every transmit is a
-            //      distinct, decryptable frame the receiver de-dups by msgSeq) until the peer ACKs it
-            //      (advance-on-ack, handled in the receive path);
+            //      retransmitted each round under a fresh round token until the peer ACKs it. The
+            //      encrypted wire is CACHED (re-encrypted only on head/ack change), so the ratchet does
+            //      not advance per round (an offline peer stays within MaxSkip). Senders are rotated
+            //      (sendCursor) so no slow peer's head monopolizes the slot.
             //   2. else an ACK-ONLY frame to a confirmed buddy we owe an ack (so it stops retransmitting),
-            //      when we have no real frame for it (a real frame already carries our ack);
+            //      when we have no real frame for it (a real frame already carries our ack). Ack-only is
+            //      encrypted FRESH each time so it always decodes (distinguishable from a cached-content
+            //      retransmit, whose decrypt fails after the first delivery — see the receive path).
             //   3. else a COVER write under a fresh cover token.
             // The store sees one same-shaped 256-byte write per round either way (active/idle uniform).
             var realSubmitted = false
@@ -308,13 +321,21 @@ final class Engine(
                 rt <- runtime.get(pid)
                 rel <- book.get(pid) if rel.state == BuddyState.Confirmed && rt.ratchet.canSend
               yield (rt, rel)
-            val txTarget = outbox.iterator
-              .flatMap {
+            // Sending buddies (non-empty outbox, can send), rotated fairly by sendCursor.
+            val sendable = outbox.iterator
+              .collect {
                 case (pid, q) if q.nonEmpty =>
                   confirmedSendable(pid).map((rt, rel) => (pid, rt, rel, q))
-                case _ => None
               }
-              .nextOption()
+              .flatten
+              .toVector
+              .sortBy(_._1)
+            val txTarget =
+              if sendable.isEmpty then None
+              else
+                val tgt = sendable((Math.floorMod(sendCursor, sendable.size.toLong)).toInt)
+                sendCursor += 1
+                Some(tgt)
             val ackTarget = runtime.keysIterator
               .flatMap { pid =>
                 if outbox.get(pid).exists(_.nonEmpty) then
@@ -323,10 +344,7 @@ final class Engine(
                   confirmedSendable(pid).collect { case (rt, rel) if rt.ackOwed => (pid, rt, rel) }
               }
               .nextOption()
-            def sendTo(rt: BuddyRuntime, rel: BuddyRelationship, inner: Array[Byte]): Unit =
-              // `encrypt` advances the ratchet per transmit (fresh key each time) so every frame the
-              // receiver gets is decryptable and de-duped by msgSeq; round-derived token ⇒ no recurrence.
-              val wire = rt.ratchet.encrypt(inner)
+            def submitWire(rt: BuddyRuntime, rel: BuddyRelationship, wire: Array[Byte]): Unit =
               if t.submit(dirToken(rel.addrKey, rt.role, peerRole(rt.role), roundId), wire) then
                 rt.ackOwed = false // our outgoing frame carried our ack
                 realSubmitted = true
@@ -337,11 +355,21 @@ final class Engine(
                 if rt.headSeq == ArqFrame.NoSeq then
                   rt.headSeq = rt.nextSendSeq
                   rt.nextSendSeq += 1
-                sendTo(rt, rel, ArqFrame.encode(rt.highRecv, rt.headSeq, q.head))
+                  rt.headWire = null
+                // (Re)encrypt the head wire only when it's new or our ack advanced; otherwise resubmit
+                // the cached bytes so the ratchet does not advance per retransmit.
+                if rt.headWire == null || rt.headWireAck != rt.highRecv then
+                  rt.headWire = rt.ratchet.encrypt(ArqFrame.encode(rt.highRecv, rt.headSeq, q.head))
+                  rt.headWireAck = rt.highRecv
+                submitWire(rt, rel, rt.headWire)
               case None =>
                 ackTarget match
                   case Some((_, rt, rel)) =>
-                    sendTo(rt, rel, ArqFrame.encode(rt.highRecv, ArqFrame.NoSeq, emptyPayload))
+                    submitWire(
+                      rt,
+                      rel,
+                      rt.ratchet.encrypt(ArqFrame.encode(rt.highRecv, ArqFrame.NoSeq, emptyPayload))
+                    )
                   case None =>
                     coverCounter += 1
                     t.submit(
@@ -410,34 +438,40 @@ final class Engine(
               t.retrieve(dirToken(rel.addrKey, peerRole(rt.role), rt.role, readRound)).foreach {
                 wire =>
                   // Run the frame through the DH double ratchet: it trial-decrypts the encrypted header,
-                  // performs a DH step + skipped-key handling as needed (PCS), and returns the inner block
-                  // — or None for a carrier / non-matching frame, WITHOUT advancing the ratchet.
-                  rt.ratchet.decrypt(wire).foreach { inner =>
-                    // ARQ inner block: [ackSeq][msgSeq][padded message].
-                    // 1) Consume the PEER's ack: it reports the peer's highest received sequence FROM US,
-                    //    so once it covers our in-flight head, that head is delivered+acked — advance our
-                    //    ratchet past it and drop it (advance-on-ack; stops our retransmits).
-                    val ackSeq = ArqFrame.ackSeqOf(inner)
-                    if ackSeq > rt.peerAcked then rt.peerAcked = ackSeq
-                    if rt.headSeq != ArqFrame.NoSeq && rt.peerAcked >= rt.headSeq then
-                      outbox.get(pid).filter(_.nonEmpty).foreach(q => dropHead(pid, q))
-                      rt.headSeq = ArqFrame.NoSeq
-                    // 2) De-duplicate + deliver this message by its sequence (a retransmit re-presents an
-                    //    already-seen msgSeq; an ack-only frame carries NoSeq). Owe an ack ONLY for a
-                    //    content frame (msgSeq != NoSeq) — never for an ack-only, so acks don't ping-pong.
-                    val msgSeq = ArqFrame.msgSeqOf(inner)
-                    if msgSeq != ArqFrame.NoSeq then
-                      rt.ackOwed =
-                        true // received content ⇒ owe the peer an ack (notify-driven re-ack)
-                      if ArqFrame.isNewMessage(msgSeq, rt.highRecv) then
-                        Frame
-                          .unpad(ArqFrame.payloadOf(inner), MsgPayloadInner)
-                          .toOption
-                          .foreach { p =>
-                            rt.highRecv = msgSeq // advance only on successful delivery
-                            emit(EngineEvent.MessageReceived(pid, new String(p, UTF_8), roundId))
-                          }
-                  }
+                  // performs a DH step + skipped-key handling as needed (PCS), and returns the inner
+                  // block — or None for a carrier / a CACHED content retransmit we already consumed.
+                  rt.ratchet.decrypt(wire) match
+                    case None =>
+                      // A frame WAS present but didn't decrypt: a cached CONTENT retransmit whose ratchet
+                      // key we consumed on first delivery (ack-only frames are encrypted fresh and always
+                      // decode, so they never land here). The peer is still retransmitting ⇒ we owe it a
+                      // (re-)ack so it stops. (A genuine carrier here is harmless to re-ack.)
+                      rt.ackOwed = true
+                    case Some(inner) =>
+                      // ARQ inner block: [ackSeq][msgSeq][padded message].
+                      // 1) Consume the PEER's ack: it reports the peer's highest received sequence FROM
+                      //    US, so once it covers our in-flight head, that head is delivered+acked — drop
+                      //    it + clear its cached wire (advance-on-ack; stops our retransmits).
+                      val ackSeq = ArqFrame.ackSeqOf(inner)
+                      if ackSeq > rt.peerAcked then rt.peerAcked = ackSeq
+                      if rt.headSeq != ArqFrame.NoSeq && rt.peerAcked >= rt.headSeq then
+                        outbox.get(pid).filter(_.nonEmpty).foreach(q => dropHead(pid, q))
+                        rt.headSeq = ArqFrame.NoSeq
+                        rt.headWire = null
+                      // 2) De-duplicate + deliver by sequence (a retransmit re-presents an already-seen
+                      //    msgSeq; an ack-only frame carries NoSeq). Owe an ack ONLY for a content frame
+                      //    (msgSeq != NoSeq) — never for an ack-only, so acks don't ping-pong.
+                      val msgSeq = ArqFrame.msgSeqOf(inner)
+                      if msgSeq != ArqFrame.NoSeq then
+                        rt.ackOwed = true // received content ⇒ owe the peer an ack
+                        if ArqFrame.isNewMessage(msgSeq, rt.highRecv) then
+                          Frame
+                            .unpad(ArqFrame.payloadOf(inner), MsgPayloadInner)
+                            .toOption
+                            .foreach { p =>
+                              rt.highRecv = msgSeq // advance only on successful delivery
+                              emit(EngineEvent.MessageReceived(pid, new String(p, UTF_8), roundId))
+                            }
               }
             else
               // No unambiguously-signaled buddy (idle OR an ambiguous collision round): a cover read

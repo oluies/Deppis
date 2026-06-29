@@ -350,18 +350,19 @@ class RoundTransportSpec extends AnyFunSuite:
     assert(bobMsgs == Seq("m1", "m2", "m3"), s"in order, got $bobMsgs")
 
   test(
-    "frame content is encrypted: real and carrier wire frames are 256B, random, no plaintext (T042)"
+    "frame content is encrypted: real and cover wire frames are 256B, random, no plaintext (T042)"
   ):
-    val t = FakeTransport()
-    val (e, pairId) = confirmedEngine(t, BuddyRole.Initiator)
     val plaintext = "the secret meeting time is noon"
-    e.sendMessage(pairId, plaintext)
-    e.tick(1) // real send (encrypted)
-    e.tick(2) // idle ⇒ carrier (encrypted)
-    val realWire = t.submits(0)._2
-    val carrierWire = t.submits(1)._2
+    // A sending engine ⇒ a real frame; a separate idle engine ⇒ a cover frame (under ARQ an in-flight
+    // head keeps retransmitting, so an idle engine is how you observe a cover write).
+    val ts = FakeTransport(); val (es, pid) = confirmedEngine(ts, BuddyRole.Initiator)
+    es.sendMessage(pid, plaintext); es.tick(1)
+    val realWire = ts.submits(0)._2
+    val ti = FakeTransport(); val (ei, _) = confirmedEngine(ti, BuddyRole.Initiator)
+    ei.tick(1) // idle ⇒ cover write
+    val coverWire = ti.submits(0)._2
     assert(
-      realWire.length == frame.Frame.Size && carrierWire.length == frame.Frame.Size,
+      realWire.length == frame.Frame.Size && coverWire.length == frame.Frame.Size,
       "both wire frames are 256B"
     )
     // The real frame does NOT contain the plaintext bytes — it's encrypted, not padded plaintext.
@@ -369,10 +370,10 @@ class RoundTransportSpec extends AnyFunSuite:
       !new String(realWire, "ISO-8859-1").contains(plaintext),
       "plaintext must not appear on the wire"
     )
-    // The carrier is NOT all-zero (it's an encryption of zeros under a random key) — so it is
-    // byte-indistinguishable from a real frame (both high-entropy 256B blobs), not a zero block.
-    assert(carrierWire.exists(_ != 0), "carrier frame must be encrypted (not all-zero)")
-    assert(!realWire.sameElements(carrierWire))
+    // The cover frame is NOT all-zero (it's high-entropy random) — byte-indistinguishable from a real
+    // frame, not a zero block.
+    assert(coverWire.exists(_ != 0), "cover frame must be random (not all-zero)")
+    assert(!realWire.sameElements(coverWire))
 
   test(
     "bidirectional delivery: the responder replies after receiving (initiator-sends-first, ARQ)"
@@ -458,3 +459,55 @@ class RoundTransportSpec extends AnyFunSuite:
     assert(got.count(_.startsWith("b")) == 3, s"B starved? got $got")
     assert(got.filter(_.startsWith("a")) == Seq("a1", "a2", "a3"), s"A out of order: $got")
     assert(got.filter(_.startsWith("b")) == Seq("b1", "b2", "b3"), s"B out of order: $got")
+
+  test(
+    "OFFLINE PEER: a head retransmitted for >MaxSkip rounds still delivers when the peer returns"
+  ):
+    // The head retransmits every round while unacked, but the cached-wire design does NOT advance the
+    // ratchet per round, so a peer offline far longer than MaxSkip (1000) can still decrypt on return.
+    // (Pre-fix `encrypt`-per-transmit grew Ns by one per round and stalled permanently past ~1000.)
+    val (alice, bob, pid, _) = connectedPair()
+    alice.sendMessage(pid, "still here?")
+    for r <- 1L to 1500L do
+      alice.tick(r) // Alice retransmits 1500 rounds; Bob is OFFLINE (not ticking)
+    val got = mutable.ArrayBuffer.empty[String]
+    for r <- 1501L to 1520L do
+      alice.tick(r); bob.tick(r)
+      got ++= bob.drainEvents().collect { case EngineEvent.MessageReceived(_, t, _) => t }
+    assert(got == Seq("still here?"), s"offline-then-online delivery failed, got $got")
+
+  test(
+    "SEND FAIRNESS: one engine sending to TWO buddies delivers to both (no head-of-line blocking)"
+  ):
+    // Without a send-side cursor the first buddy's held head monopolizes the one-write-per-round slot
+    // and starves the other; the sendCursor rotation must deliver to both.
+    val be = FakeBackend()
+    val alice = Engine(Some(be.transport()), clientLabel = "alice".getBytes)
+    val pid1 =
+      alice
+        .addBuddy(secret("s1"), BuddyRole.Initiator, peerNotifyLabel = "b1".getBytes)
+        .toOption
+        .get
+        .pairId
+    val pid2 =
+      alice
+        .addBuddy(secret("s2"), BuddyRole.Initiator, peerNotifyLabel = "b2".getBytes)
+        .toOption
+        .get
+        .pairId
+    alice.confirmBuddy(pid1, matched = true); alice.confirmBuddy(pid2, matched = true);
+    alice.drainEvents()
+    val b1 = Engine(Some(be.transport()), clientLabel = "b1".getBytes)
+    b1.addBuddy(secret("s1"), BuddyRole.Responder, peerNotifyLabel = "alice".getBytes)
+    b1.confirmBuddy(pid1, matched = true); b1.drainEvents()
+    val b2 = Engine(Some(be.transport()), clientLabel = "b2".getBytes)
+    b2.addBuddy(secret("s2"), BuddyRole.Responder, peerNotifyLabel = "alice".getBytes)
+    b2.confirmBuddy(pid2, matched = true); b2.drainEvents()
+    alice.sendMessage(pid1, "to-b1"); alice.sendMessage(pid2, "to-b2")
+    val g1 = mutable.ArrayBuffer.empty[String]; val g2 = mutable.ArrayBuffer.empty[String]
+    for r <- 1L to 30L do
+      alice.tick(r); b1.tick(r); b2.tick(r)
+      g1 ++= b1.drainEvents().collect { case EngineEvent.MessageReceived(_, t, _) => t }
+      g2 ++= b2.drainEvents().collect { case EngineEvent.MessageReceived(_, t, _) => t }
+    assert(g1 == Seq("to-b1"), s"b1 starved? got $g1")
+    assert(g2 == Seq("to-b2"), s"b2 starved? got $g2")
