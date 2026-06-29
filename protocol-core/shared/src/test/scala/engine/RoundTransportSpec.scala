@@ -51,6 +51,60 @@ class RoundTransportSpec extends AnyFunSuite:
       retrieves += token
       store.remove(hex(token))
 
+  /** A shared in-memory backend modelling obsd: one token→frame store plus a notify aggregator that
+    * CONNECTS `signal`→`fetchDigest` (per round + label tag), so two engines wired to it drive the full
+    * stop-and-wait ARQ flow automatically — auto-signal on send, auto-ack on receipt. Round-derived
+    * addressing reads the PREVIOUS round's writes (one-round latency), so ticking both engines in any
+    * order per round is fine. */
+  private final class FakeBackend:
+    val store = mutable.Map.empty[String, Array[Byte]]
+    private val bits = mutable.Map.empty[(Long, Vector[Byte]), mutable.Set[Int]]
+    var rejectSubmit = false
+    var writes = 0
+    val retrieves = mutable.ArrayBuffer.empty[Vector[Byte]] // every read token, across all clients
+    def transport(): RoundTransport = new RoundTransport:
+      def submit(token: Array[Byte], frame: Array[Byte]): Boolean =
+        writes += 1
+        if rejectSubmit then false else { store(hex(token)) = frame; true }
+      def retrieve(token: Array[Byte]): Option[Array[Byte]] =
+        retrieves += token.toVector; store.remove(hex(token))
+      override def signal(roundId: Long, label: Array[Byte], bit: Int): Unit =
+        bits.getOrElseUpdate((roundId, label.toVector), mutable.Set.empty) += bit
+      def fetchDigest(roundId: Long, clientLabel: Array[Byte]): Array[Byte] =
+        val out = new Array[Byte](64)
+        bits
+          .get((roundId, clientLabel.toVector))
+          .foreach(_.foreach { b =>
+            out(b >> 3) = (out(b >> 3) | (1 << (b & 7))).toByte
+          })
+        out
+
+  /** Alice (Initiator) + Bob (Responder) over ONE connected backend, each knowing the other's notify
+    * label, so the engines auto-signal + auto-ack the ARQ flow. */
+  private def connectedPair(): (Engine, Engine, String, FakeBackend) =
+    val be = FakeBackend()
+    val aLabel = "alice".getBytes; val bLabel = "bob".getBytes
+    val alice = Engine(Some(be.transport()), clientLabel = aLabel)
+    val pid = alice
+      .addBuddy(secret("shared"), BuddyRole.Initiator, peerNotifyLabel = bLabel)
+      .toOption
+      .get
+      .pairId
+    alice.confirmBuddy(pid, matched = true); alice.drainEvents()
+    val bob = Engine(Some(be.transport()), clientLabel = bLabel)
+    bob.addBuddy(secret("shared"), BuddyRole.Responder, peerNotifyLabel = aLabel)
+    bob.confirmBuddy(pid, matched = true); bob.drainEvents()
+    (alice, bob, pid, be)
+
+  /** Tick both engines through rounds `from..to`, collecting each side's delivered messages. */
+  private def converse(a: Engine, b: Engine, from: Long, to: Long): (Seq[String], Seq[String]) =
+    val ma = mutable.ArrayBuffer.empty[String]; val mb = mutable.ArrayBuffer.empty[String]
+    for r <- from to to do
+      a.tick(r); b.tick(r)
+      ma ++= a.drainEvents().collect { case EngineEvent.MessageReceived(_, t, _) => t }
+      mb ++= b.drainEvents().collect { case EngineEvent.MessageReceived(_, t, _) => t }
+    (ma.toSeq, mb.toSeq)
+
   private def confirmedEngine(t: RoundTransport, role: BuddyRole): (Engine, String) =
     val e = Engine(Some(t), clientLabel = "client".getBytes)
     val r = e.addBuddy(secret("shared"), role).toOption.get
@@ -128,11 +182,11 @@ class RoundTransportSpec extends AnyFunSuite:
     assert(!bob.drainEvents().exists(_.isInstanceOf[EngineEvent.Notified]))
 
   test(
-    "the engine emits exactly ONE notify signal per round — real to the peer, else a decoy (FR-012)"
+    "the engine emits exactly ONE notify signal per round — to the peer while in flight, else a decoy"
   ):
-    // Alice knows Bob's notify label (set at pairing), so a real send signals (bobLabel, round-rotated
-    // bit); an idle round signals a DECOY to a per-client void label (NOT Bob's). Uniform one-signal-
-    // per-round hides active-vs-idle at the notify layer from the untrusted host.
+    // One signal per round (uniform volume, FR-012). While a message is in flight it RETRANSMITS each
+    // round (advance-on-ack), signaling the PEER; when idle the signal is a DECOY to a per-client void
+    // label (NOT Bob's). Either way exactly one same-length signal per round.
     val bobLabel = "bob-agg-label".getBytes
     val t = FakeTransport()
     val alice = Engine(Some(t), clientLabel = "alice".getBytes)
@@ -142,20 +196,18 @@ class RoundTransportSpec extends AnyFunSuite:
       .get
       .pairId
     alice.confirmBuddy(pid, matched = true); alice.drainEvents()
-    alice.sendMessage(pid, "hi")
-    alice.tick(1) // real send ⇒ signal Bob
-    alice.tick(2) // idle ⇒ decoy
-    alice.tick(3) // idle ⇒ decoy
-    assert(t.signals.map(_._1) == Seq(1L, 2L, 3L), "exactly one signal per round, in order")
-    // Round 1 is a real signal to Bob's FIXED-WIDTH label tag under the pair's round-1 rotated bit.
-    assert(
-      t.signals(0)._2 == NotifyDigest.labelTag(bobLabel).toVector,
-      "real send signals the peer"
-    )
-    assert(t.signals(0)._3 == bitOf(pairKeyOf("shared"), 1L), "under the pair's round-rotated bit")
-    // Idle rounds signal a DECOY — never the peer's label — so no peer is notified.
     val realTag = NotifyDigest.labelTag(bobLabel).toVector
-    assert(t.signals(1)._2 != realTag && t.signals(2)._2 != realTag, "decoys")
+    // Idle (nothing queued): one DECOY signal per round, never the peer.
+    alice.tick(1); alice.tick(2)
+    assert(t.signals.map(_._1) == Seq(1L, 2L), "one signal per idle round")
+    assert(t.signals.forall(_._2 != realTag), "idle rounds signal a decoy, not the peer")
+    assert(t.signals.map(_._2.size).distinct.size == 1, "uniform label length (no size leak)")
+    // In flight (queued, unacked here): retransmits each round, signaling the peer every round.
+    t.signals.clear()
+    alice.sendMessage(pid, "hi")
+    alice.tick(3); alice.tick(4)
+    assert(t.signals.map(_._2) == Seq(realTag, realTag), "in-flight ⇒ signal the peer each round")
+    assert(t.signals(0)._3 == bitOf(pairKeyOf("shared"), 3L), "under round 3's rotated bit")
     // CRITICAL (FR-012, no active-vs-idle size leak): every signal's label is the SAME length, so the
     // sealed-token byte size is identical on real and idle rounds.
     assert(t.signals.map(_._2.size).distinct == Seq(t.signals.head._2.size), "uniform label length")
@@ -249,7 +301,6 @@ class RoundTransportSpec extends AnyFunSuite:
       if r % 2 == 1 then e.sendMessage(pairId, s"msg$r")
       e.tick(r)
     assert(t.submits.size == 5)
-    assert(e.internalAnomalyCount == 0)
 
   test(
     "one store write per round holds under a transient submit failure (actual store, not attempts)"
@@ -284,17 +335,19 @@ class RoundTransportSpec extends AnyFunSuite:
     val (alice, pairId) = confirmedEngine(t, BuddyRole.Initiator)
     alice.sendMessage(pairId, "x")
     t.acceptSubmit = false
-    assert(alice.tick(1).toOption.get.carrier)
+    assert(alice.tick(1).toOption.get.carrier, "a rejected submit is reported as a carrier round")
     t.acceptSubmit = true
-    assert(!alice.tick(2).toOption.get.carrier)
-    assert(alice.tick(3).toOption.get.carrier)
+    assert(!alice.tick(2).toOption.get.carrier, "the successful (re)transmit is a real round")
+    // (Under ARQ an unacked message keeps retransmitting under fresh round tokens; idle⇒carrier is
+    // covered once a message is acked — see the connected-backend tests.)
 
-  test("multiple waiting messages are delivered one per round (uniform fetch, FR-012)"):
-    val (alice, bob, pairId, _, tb) = sharedPair()
-    alice.sendMessage(pairId, "m1"); alice.tick(1)
-    alice.sendMessage(pairId, "m2"); alice.tick(2)
-    tb.signalMail(pairKeyOf("shared")); bob.tick(3); assert(msgs(bob) == Seq("m1"))
-    tb.signalMail(pairKeyOf("shared")); bob.tick(4); assert(msgs(bob) == Seq("m2"))
+  test(
+    "multiple queued messages are delivered IN ORDER (stop-and-wait ARQ over the connected backend)"
+  ):
+    val (alice, bob, pid, _) = connectedPair()
+    alice.sendMessage(pid, "m1"); alice.sendMessage(pid, "m2"); alice.sendMessage(pid, "m3")
+    val (_, bobMsgs) = converse(alice, bob, 1, 24)
+    assert(bobMsgs == Seq("m1", "m2", "m3"), s"in order, got $bobMsgs")
 
   test(
     "frame content is encrypted: real and carrier wire frames are 256B, random, no plaintext (T042)"
@@ -321,94 +374,87 @@ class RoundTransportSpec extends AnyFunSuite:
     assert(carrierWire.exists(_ != 0), "carrier frame must be encrypted (not all-zero)")
     assert(!realWire.sameElements(carrierWire))
 
-  test("bidirectional delivery: the responder replies after receiving (DH-ratchet ping-pong E2E)"):
-    val (alice, bob, pairId, ta, tb) = sharedPair()
-    // Initiator sends first; the responder cannot send until it has received (initiator-sends-first).
-    assert(bob.sendMessage(pairId, "too early") == Right(1)) // queues, but bob can't send it yet
-    // Bob can't send before receiving ⇒ a CARRIER round (its one store write is a cover frame, so the
-    // trace is uniform); the message is held, not lost.
-    assert(
-      bob.tick(0).toOption.exists(_.carrier),
-      "responder's held message yields a carrier round"
-    )
-    // Alice → Bob.
-    alice.sendMessage(pairId, "hi bob"); alice.tick(1)
-    tb.signalMail(pairKeyOf("shared")); bob.tick(2)
-    assert(msgs(bob) == Seq("hi bob"))
-    // Now bob's receiving DH step has opened a sending chain — its held reply now flows back.
-    bob.tick(3)
-    ta.signalMail(pairKeyOf("shared")); alice.tick(4)
-    assert(msgs(alice) == Seq("too early"))
-    // A fresh reply both ways keeps the ping-pong (and the DH ratchet healing) going.
-    bob.sendMessage(pairId, "hi alice"); bob.tick(5)
-    ta.signalMail(pairKeyOf("shared")); alice.tick(6)
-    assert(msgs(alice) == Seq("hi alice"))
-    alice.sendMessage(pairId, "see you"); alice.tick(7)
-    tb.signalMail(pairKeyOf("shared")); bob.tick(8)
-    assert(msgs(bob) == Seq("see you"))
-
-  test("MULTI-BUDDY fetch is non-recurrent: read exactly the signaled buddy (T041b, FR-014)"):
-    // Bob has two confirmed buddies A and B. Only B is sending. Each round, the digest signals B's
-    // bit (B has mail) and never A's. Bob reads B's (advancing, fresh) real token on signaled rounds
-    // and a fresh cover token otherwise — A's frozen token is NEVER read, so NO token recurs even
-    // with multiple buddies (the recurrence the previous round-robin design left open).
-    val store = mutable.Map.empty[String, Array[Byte]]
-    val tb = new FakeTransport(store)
-    val tsB = new FakeTransport(store) // B's sender, shares the store
-    val bob = Engine(Some(tb), clientLabel = "bob".getBytes)
-    val pidA = handshake.Handshake.init(secret("buddy-A")).pairId
-    val pidB = handshake.Handshake.init(secret("buddy-B")).pairId
-    bob.addBuddy(secret("buddy-A"), BuddyRole.Responder); bob.confirmBuddy(pidA, matched = true)
-    bob.addBuddy(secret("buddy-B"), BuddyRole.Responder); bob.confirmBuddy(pidB, matched = true)
-    bob.drainEvents()
-    val senderB = Engine(Some(tsB), clientLabel = "B".getBytes)
-    senderB.addBuddy(secret("buddy-B"), BuddyRole.Initiator);
-    senderB.confirmBuddy(pidB, matched = true); senderB.drainEvents()
-    for r <- 1 to 5 do { senderB.sendMessage(pidB, s"b$r"); senderB.tick(r) }
-    tb.retrieves.clear()
-
-    val rounds = 12
-    var delivered = 0
-    for r <- 1 to rounds do
-      // B re-signals every round until all its mail is delivered; A never signals. Under T041c a round
-      // where A's and B's ROTATED bits collide is ambiguous, so B defers to the next round (where
-      // rotation separates them) — hence re-signal-until-delivered rather than a fixed 5-round window.
-      if delivered < 5 then tb.signalMail(pairKeyOf("buddy-B"))
-      bob.tick(r)
-      delivered += bob.drainEvents().count(_.isInstanceOf[EngineEvent.MessageReceived])
-    assert(tb.retrieves.size == rounds, "one read per round")
-    assert(tb.retrieves.map(hex).toSet.size == rounds, "NO read token recurs, even multi-buddy")
-    assert(delivered == 5, s"all of B's messages delivered, got $delivered")
+  test(
+    "bidirectional delivery: the responder replies after receiving (initiator-sends-first, ARQ)"
+  ):
+    val (alice, bob, pid, _) = connectedPair()
+    // Initiator sends first; the responder queues its reply but cannot send until it has received.
+    assert(bob.sendMessage(pid, "too early") == Right(1))
+    alice.sendMessage(pid, "hi bob")
+    val (aliceMsgs, bobMsgs) = converse(alice, bob, 1, 20)
+    assert(bobMsgs == Seq("hi bob"), s"bob got $bobMsgs")
+    assert(aliceMsgs == Seq("too early"), s"alice got $aliceMsgs")
+    // A fresh reply each way keeps the ping-pong (and the DH ratchet healing) going.
+    alice.sendMessage(pid, "see you"); bob.sendMessage(pid, "hi alice")
+    val (aliceMsgs2, bobMsgs2) = converse(alice, bob, 21, 40)
+    assert(bobMsgs2 == Seq("see you") && aliceMsgs2 == Seq("hi alice"), s"$aliceMsgs2 / $bobMsgs2")
 
   test(
-    "two buddies signaling the SAME round are both served over time (no starvation, T041c edge)"
+    "MULTI-BUDDY: only the active buddy delivers, and no read token recurs (round-derived, FR-014)"
   ):
-    // A and B each have several messages and BOTH signal every round. With one read/round, the
-    // fairness cursor must rotate so NEITHER (regardless of pairId order) is starved.
-    val store = mutable.Map.empty[String, Array[Byte]]
-    val tb = new FakeTransport(store)
-    val tsA = new FakeTransport(store); val tsB = new FakeTransport(store)
-    val bob = Engine(Some(tb), clientLabel = "bob".getBytes)
-    val pidA = handshake.Handshake.init(secret("buddy-A")).pairId
-    val pidB = handshake.Handshake.init(secret("buddy-B")).pairId
-    bob.addBuddy(secret("buddy-A"), BuddyRole.Responder); bob.confirmBuddy(pidA, matched = true)
-    bob.addBuddy(secret("buddy-B"), BuddyRole.Responder); bob.confirmBuddy(pidB, matched = true)
+    // Bob has two confirmed buddies; only B has a sender. B's messages are delivered; A never sends, so
+    // A's slot is never even addressed. Read tokens are round-derived ⇒ all distinct (no recurrence).
+    val be = FakeBackend()
+    val bob = Engine(Some(be.transport()), clientLabel = "bob".getBytes)
+    val pidA =
+      bob
+        .addBuddy(secret("buddy-A"), BuddyRole.Responder, peerNotifyLabel = "A".getBytes)
+        .toOption
+        .get
+        .pairId
+    val pidB =
+      bob
+        .addBuddy(secret("buddy-B"), BuddyRole.Responder, peerNotifyLabel = "B".getBytes)
+        .toOption
+        .get
+        .pairId
+    bob.confirmBuddy(pidA, matched = true); bob.confirmBuddy(pidB, matched = true);
     bob.drainEvents()
-    val sa = Engine(Some(tsA), clientLabel = "A".getBytes)
-    sa.addBuddy(secret("buddy-A"), BuddyRole.Initiator); sa.confirmBuddy(pidA, matched = true);
-    sa.drainEvents()
-    val sb = Engine(Some(tsB), clientLabel = "B".getBytes)
-    sb.addBuddy(secret("buddy-B"), BuddyRole.Initiator); sb.confirmBuddy(pidB, matched = true);
-    sb.drainEvents()
-    for r <- 1 to 3 do {
-      sa.sendMessage(pidA, s"a$r"); sa.tick(r); sb.sendMessage(pidB, s"b$r"); sb.tick(r)
-    }
+    val senderB = Engine(Some(be.transport()), clientLabel = "B".getBytes)
+    senderB.addBuddy(secret("buddy-B"), BuddyRole.Initiator, peerNotifyLabel = "bob".getBytes)
+    senderB.confirmBuddy(pidB, matched = true); senderB.drainEvents()
+    for i <- 1 to 4 do senderB.sendMessage(pidB, s"b$i")
+    val got = mutable.ArrayBuffer.empty[String]
+    for r <- 1L to 30L do
+      senderB.tick(r); bob.tick(r)
+      got ++= bob.drainEvents().collect { case EngineEvent.MessageReceived(_, t, _) => t }
+    assert(got == Seq("b1", "b2", "b3", "b4"), s"B's messages delivered in order, got $got")
+    assert(
+      be.retrieves.distinct.size == be.retrieves.size,
+      "round-derived ⇒ no read token recurs, even multi-buddy"
+    )
 
-    val received = mutable.ArrayBuffer.empty[String]
-    for r <- 1 to 12 do
-      tb.signalMail(pairKeyOf("buddy-A")); tb.signalMail(pairKeyOf("buddy-B")) // BOTH signal
-      bob.tick(r)
-      received ++= bob.drainEvents().collect { case EngineEvent.MessageReceived(_, txt, _) => txt }
-    // Both buddies fully delivered — neither starved — and (distinct messages) all 6 arrived.
-    assert(received.count(_.startsWith("a")) == 3, s"A starved? got $received")
-    assert(received.count(_.startsWith("b")) == 3, s"B starved? got $received")
+  test("two buddies both sending to Bob are both delivered over time — no starvation (T041c edge)"):
+    // Bob has two confirmed buddies A and B, EACH with its own sender, both sending concurrently. With
+    // one read per round the fairness cursor + ARQ retransmit must deliver BOTH (neither starved).
+    val be = FakeBackend()
+    val bob = Engine(Some(be.transport()), clientLabel = "bob".getBytes)
+    val pidA =
+      bob
+        .addBuddy(secret("buddy-A"), BuddyRole.Responder, peerNotifyLabel = "A".getBytes)
+        .toOption
+        .get
+        .pairId
+    val pidB =
+      bob
+        .addBuddy(secret("buddy-B"), BuddyRole.Responder, peerNotifyLabel = "B".getBytes)
+        .toOption
+        .get
+        .pairId
+    bob.confirmBuddy(pidA, matched = true); bob.confirmBuddy(pidB, matched = true);
+    bob.drainEvents()
+    val sa = Engine(Some(be.transport()), clientLabel = "A".getBytes)
+    sa.addBuddy(secret("buddy-A"), BuddyRole.Initiator, peerNotifyLabel = "bob".getBytes)
+    sa.confirmBuddy(pidA, matched = true); sa.drainEvents()
+    val sb = Engine(Some(be.transport()), clientLabel = "B".getBytes)
+    sb.addBuddy(secret("buddy-B"), BuddyRole.Initiator, peerNotifyLabel = "bob".getBytes)
+    sb.confirmBuddy(pidB, matched = true); sb.drainEvents()
+    for i <- 1 to 3 do { sa.sendMessage(pidA, s"a$i"); sb.sendMessage(pidB, s"b$i") }
+    val got = mutable.ArrayBuffer.empty[String]
+    for r <- 1L to 40L do
+      sa.tick(r); sb.tick(r); bob.tick(r)
+      got ++= bob.drainEvents().collect { case EngineEvent.MessageReceived(_, txt, _) => txt }
+    assert(got.count(_.startsWith("a")) == 3, s"A starved? got $got")
+    assert(got.count(_.startsWith("b")) == 3, s"B starved? got $got")
+    assert(got.filter(_.startsWith("a")) == Seq("a1", "a2", "a3"), s"A out of order: $got")
+    assert(got.filter(_.startsWith("b")) == Seq("b1", "b2", "b3"), s"B out of order: $got")

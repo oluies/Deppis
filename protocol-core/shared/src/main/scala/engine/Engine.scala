@@ -89,22 +89,20 @@ final class Engine(
   // harmless. Derived from the cover key (never leaves the engine; opaque to the host inside a sealed
   // token). A fresh array per use so a transport can't retain/mutate it.
   private def voidNotifyLabel: Array[Byte] = RetrievalToken.derive(coverKey, "notify-void", "", 0L)
-  // Positive diagnostic for the unreachable orphan branch in `tick` (an outbox entry with no
-  // runtime/book). Stays 0 in correct operation; a non-zero value means an internal invariant broke.
-  private var orphanedDrops = 0L
 
   private final class BuddyRuntime(val role: BuddyRole, contentRoot: Array[Byte]):
-    // ADDRESSING counters (which store slot) — separate from the content ratchet's internal Ns/Nr.
-    // The role fixes the token direction; both stay non-recurrent.
-    var sendCounter: Long = 0L
-    var recvCounter: Long = 0L
-    // Stop-and-wait ARQ state (retry-safe-addressing.md). The content sequence is engine-level, carried
-    // encrypted in the inner block (independent of the ratchet's internal Ns). Stage 1 establishes the
-    // sequence + dedup + ack CARRIAGE; advance-on-ack/retransmit arrive with round-derived addressing
-    // (Stage 2), since retransmitting under the current counter token would itself recur (GAP #2).
-    var nextSendSeq: Long = 0L // sequence to assign the NEXT new outgoing message
+    // Stop-and-wait ARQ state (retry-safe-addressing.md, Stage 2). Addressing is now ROUND-DERIVED
+    // (dirToken keyed by roundId, not a per-pair counter), so a reject/miss never recurs a token; the
+    // head message is held and RETRANSMITTED each round under a fresh round token until the peer ACKs
+    // it. The content sequence is engine-level (carried encrypted in the inner block, independent of
+    // the ratchet's internal Ns).
+    var nextSendSeq: Long = 0L // sequence to assign the NEXT new outgoing (head) message
+    var headSeq: Long =
+      ArqFrame.NoSeq // the in-flight head's sequence, or NoSeq if nothing in flight
+    var peerAcked: Long = ArqFrame.NoSeq // highest sequence the PEER has acknowledged from us
     var highRecv: Long =
-      ArqFrame.NoSeq // highest sequence we have received from the peer (dedup + our outgoing ack)
+      ArqFrame.NoSeq // highest sequence we have received (dedup + our outgoing ack)
+    var ackOwed: Boolean = false // we were signaled by/received from the peer ⇒ owe it an ack
     // The CONTENT ratchet: the full DH double ratchet with header encryption (post-compromise
     // security). The initiator can send immediately; the responder's sending chain opens only once it
     // has received the initiator's first frame (initiator-sends-first; see DoubleRatchet/dh-ratchet.md
@@ -123,16 +121,20 @@ final class Engine(
   // (e.g. higher-pairId) buddy is starved under the one-read-per-round limit.
   private var recvCursor = 0L
 
-  // A directional retrieval token: messages FROM `from` TO `to` for the given counter. Both parties
-  // derive the same token from the shared pair key + the (symmetric) role pair, so the receiver can
-  // reconstruct exactly what the sender stored.
+  // A directional retrieval token: messages FROM `from` TO `to` in a given ROUND (T041c/retry-safe
+  // addressing). Both parties derive the same token from the shared pair key + the (symmetric) role
+  // pair + the public roundId. ROUND-DERIVED (not a per-pair counter): every wire write — real, cover,
+  // retransmit — uses a fresh token, so a rejected submit or a missed/false-notified read can never
+  // recur a token (GAP #2/#3). Sender and receiver rendezvous because notify is round-synchronized
+  // (the sender signals round R; the receiver reads round R's token), and reliability comes from the
+  // ARQ retransmit-until-acked rather than from the store persisting a fixed-counter slot.
   private def dirToken(
       pairKey: Array[Byte],
       from: BuddyRole,
       to: BuddyRole,
-      counter: Long
+      roundId: Long
   ): Array[Byte] =
-    RetrievalToken.derive(pairKey, from.toString, to.toString, counter)
+    RetrievalToken.derive(pairKey, from.toString, to.toString, roundId)
 
   // Frame-content encryption (T042 + the DH double ratchet). A wire frame is exactly the store's 256
   // bytes; the per-buddy `DoubleRatchet` owns the layout — nonce(12) ‖ AEAD(HK, header) ‖ AEAD(MK,
@@ -140,13 +142,16 @@ final class Engine(
   // message. The plaintext block it seals per message is `DoubleRatchet.InnerSize` (so `sendMessage`
   // pads to that). The retrieval token + notify bit still derive from the retained `addrKey` (a
   // separate root); the content root is wiped, and each DH step mixes a fresh secret (PCS).
-  private val InnerSize = DoubleRatchet.InnerSize // the plaintext the ratchet seals per message
 
   // Stop-and-wait ARQ framing lives in [[ArqFrame]] (pure + unit-tested): the ratchet inner block is
   // [ackSeq(8)][msgSeq(8)][padded message], encrypted inside the ratchet so the store never sees it.
   // The message region is the remaining bytes.
   private val MsgPayloadInner =
     ArqFrame.PayloadBytes // padded-message region (InnerSize - 16 = 156B)
+
+  /** Padded-empty payload for an ack-only frame (no message; the frame just carries the ackSeq). */
+  private def emptyPayload: Array[Byte] =
+    Frame.pad(Array.emptyByteArray, MsgPayloadInner).toOption.get
 
   /** Zero a key buffer in place (cross-platform; the forward-secrecy boundary depends on wiping old
     * key material so it cannot be recovered from memory). */
@@ -276,72 +281,73 @@ final class Engine(
             nextReal.foreach { case (pid, q) => dropHead(pid, q) }
             plan.kind == Schedule.FrameKind.Carrier
           case Some(t) =>
+            // Round-derived addressing has no write/read barrier within a round, so we WRITE under this
+            // round's token (`roundId`) but READ the PREVIOUS round's writes (`readRound`), which are
+            // guaranteed complete — a one-round delivery latency. The notify digest and read token both
+            // target `readRound`; the store write + outgoing signal target `roundId`.
+            val readRound = roundId - 1
             // Poll notifications FIRST — before any send side effect. This emits `notified` (FR-004,
-            // still before retrieval) and, crucially, lets a transport reject the round up front
-            // (e.g. an out-of-range round id) so an invalid round fails atomically without a
-            // half-applied send (no submitted frame, no advanced counter).
-            // One PING digest fetch per round (may also reject an out-of-range round atomically,
-            // before any send side effect). The set bits say exactly which buddies signaled mail.
-            val digest = t.fetchDigest(roundId, NotifyDigest.labelTag(clientLabel))
-            // Exactly ONE store write per round (cover traffic, FR-012): a real frame under its
-            // outgoing token if one is queued, otherwise a carrier frame under a fresh random-looking
-            // cover token. So the store-write trace (one 256-byte write per round, random 32-byte
-            // token) is identical whether or not a real message is sent — active and idle clients are
-            // indistinguishable. A real frame is dropped + advances the counter only on a successful
-            // submit; on failure it stays queued and retries next round (its failed attempt is still
-            // this round's one write — no extra write, no silent loss).
-            //
-            // KNOWN GAP — retry-safe addressing (pinned in RecurrenceGapsSpec): `sendCounter` advances
-            // ONLY on a successful submit (to keep sender/receiver tokens in lockstep), so a REJECTED
-            // submit makes the next round retry under the SAME outgoing token. An idle client always
-            // writes a fresh cover token, so an untrusted store that rejects a write and then sees the
-            // same token recur learns the client is actively retrying a real send — an FR-014 token
-            // recurrence AND an active-vs-idle tell. Closing it needs round-id-derived addressing or a
-            // bounded receiver-side skip window; until then the active-vs-idle claim below holds only
-            // against a store that does not selectively reject writes.
+            // still before retrieval) and lets a transport reject the round up front (e.g. an
+            // out-of-range round id) so an invalid round fails atomically without a half-applied send.
+            // One PING digest fetch per round; the set bits say which buddies wrote in `readRound`.
+            val digest = t.fetchDigest(readRound, NotifyDigest.labelTag(clientLabel))
+            // Exactly ONE store write per round (cover traffic, FR-012), under a ROUND-DERIVED token so
+            // a reject/retry never recurs (retry-safe addressing, GAP #2). Priority for the one write:
+            //   1. (RE)TRANSMIT a queued head to a confirmed buddy that can send — the head is HELD and
+            //      retransmitted each round (each `encrypt` advances the ratchet, so every transmit is a
+            //      distinct, decryptable frame the receiver de-dups by msgSeq) until the peer ACKs it
+            //      (advance-on-ack, handled in the receive path);
+            //   2. else an ACK-ONLY frame to a confirmed buddy we owe an ack (so it stops retransmitting),
+            //      when we have no real frame for it (a real frame already carries our ack);
+            //   3. else a COVER write under a fresh cover token.
+            // The store sees one same-shaped 256-byte write per round either way (active/idle uniform).
             var realSubmitted = false
-            // The peer to notify this round, if we actually sent them a real frame AND know their notify
-            // label: (label, addrKey). Otherwise we emit a DECOY signal below — exactly one signal/round.
             var realSignal: Option[(Array[Byte], Array[Byte])] = None
-            nextReal match
-              case Some((pid, q)) if runtime.get(pid).exists(_.ratchet.canSend) =>
-                (runtime.get(pid), book.get(pid)) match
-                  case (Some(rt), Some(rel)) =>
-                    // Seal the inner frame at the current ratchet position (peek, no advance — a failed
-                    // submit must retry at the same position). The 256-byte wire carries the encrypted
-                    // DH header + ARQ inner block ([ackSeq][msgSeq][padded message]); ackSeq piggybacks
-                    // our highest-received sequence so the peer can stop retransmitting.
-                    val msgSeq = rt.nextSendSeq
-                    val wire =
-                      rt.ratchet.encryptPending(ArqFrame.encode(rt.highRecv, msgSeq, q.head))
-                    if t.submit(
-                        dirToken(rel.addrKey, rt.role, peerRole(rt.role), rt.sendCounter),
-                        wire
-                      )
-                    then
-                      rt.ratchet
-                        .commitSend() // advance + wipe the old chain key only on a real send
-                      rt.sendCounter += 1
-                      rt.nextSendSeq += 1
-                      dropHead(pid, q)
-                      realSubmitted = true
-                      if rel.peerNotifyLabel.nonEmpty then
-                        realSignal = Some((rel.peerNotifyLabel, rel.addrKey))
-                  case _ =>
-                    // Defensive: an outbox entry always has a runtime + book entry (sendMessage
-                    // requires a confirmed buddy; removeBuddy clears both), so this is unreachable via
-                    // the API. Drop the orphaned frame to avoid a stuck queue and record a POSITIVE
-                    // diagnostic (orphanedDrops) — a break surfaces as a non-zero counter, not just a
-                    // missing write. We do NOT emit a masking cover write that would hide the loss.
-                    dropHead(pid, q)
-                    orphanedDrops += 1
-              case _ =>
-                // Either nothing is queued, OR the only queued message is for a responder that cannot
-                // send yet (no sending chain until it has received) — in both cases this round is a
-                // carrier and any queued message simply waits. A 256-byte random-looking wire frame is
-                // byte-indistinguishable from a real one, so holding a message looks like any idle round.
-                coverCounter += 1
-                t.submit(RetrievalToken.derive(coverKey, "cover", "", coverCounter), coverFrame())
+            def confirmedSendable(pid: String): Option[(BuddyRuntime, BuddyRelationship)] =
+              for
+                rt <- runtime.get(pid)
+                rel <- book.get(pid) if rel.state == BuddyState.Confirmed && rt.ratchet.canSend
+              yield (rt, rel)
+            val txTarget = outbox.iterator
+              .flatMap {
+                case (pid, q) if q.nonEmpty =>
+                  confirmedSendable(pid).map((rt, rel) => (pid, rt, rel, q))
+                case _ => None
+              }
+              .nextOption()
+            val ackTarget = runtime.keysIterator
+              .flatMap { pid =>
+                if outbox.get(pid).exists(_.nonEmpty) then
+                  None // a real frame to them carries the ack
+                else
+                  confirmedSendable(pid).collect { case (rt, rel) if rt.ackOwed => (pid, rt, rel) }
+              }
+              .nextOption()
+            def sendTo(rt: BuddyRuntime, rel: BuddyRelationship, inner: Array[Byte]): Unit =
+              // `encrypt` advances the ratchet per transmit (fresh key each time) so every frame the
+              // receiver gets is decryptable and de-duped by msgSeq; round-derived token ⇒ no recurrence.
+              val wire = rt.ratchet.encrypt(inner)
+              if t.submit(dirToken(rel.addrKey, rt.role, peerRole(rt.role), roundId), wire) then
+                rt.ackOwed = false // our outgoing frame carried our ack
+                realSubmitted = true
+                if rel.peerNotifyLabel.nonEmpty then
+                  realSignal = Some((rel.peerNotifyLabel, rel.addrKey))
+            txTarget match
+              case Some((_, rt, rel, q)) =>
+                if rt.headSeq == ArqFrame.NoSeq then
+                  rt.headSeq = rt.nextSendSeq
+                  rt.nextSendSeq += 1
+                sendTo(rt, rel, ArqFrame.encode(rt.highRecv, rt.headSeq, q.head))
+              case None =>
+                ackTarget match
+                  case Some((_, rt, rel)) =>
+                    sendTo(rt, rel, ArqFrame.encode(rt.highRecv, ArqFrame.NoSeq, emptyPayload))
+                  case None =>
+                    coverCounter += 1
+                    t.submit(
+                      RetrievalToken.derive(coverKey, "cover", "", coverCounter),
+                      coverFrame()
+                    )
             // Exactly ONE notify signal per round (FR-012 cover traffic at the NOTIFY layer, mirroring
             // the single store write above): notify the PEER we just sent a real frame to, else emit a
             // DECOY to this client's void label that nobody fetches. Either way the untrusted host sees
@@ -371,7 +377,7 @@ final class Engine(
               book
                 .get(pid)
                 .filter(_.state == BuddyState.Confirmed)
-                .map(rel => (pid, rt, rel, NotifyDigest.bit(rel.addrKey, roundId)))
+                .map(rel => (pid, rt, rel, NotifyDigest.bit(rel.addrKey, readRound)))
             }
             // How many of THIS client's ACTIVE relationships (Pending ∪ Confirmed — bounded by the 512
             // cap) map to each bit this round. Pending is included because a peer that confirmed first
@@ -385,7 +391,7 @@ final class Engine(
               book.relationships.iterator
                 .filter(_.state != BuddyState.Removed)
                 .foldLeft(Map.empty[Int, Int]) { (m, rel) =>
-                  val b = NotifyDigest.bit(rel.addrKey, roundId);
+                  val b = NotifyDigest.bit(rel.addrKey, readRound);
                   m.updated(b, m.getOrElse(b, 0) + 1)
                 }
             val candidates = confirmed.filter { case (_, _, _, b) => NotifyDigest.isSet(digest, b) }
@@ -399,33 +405,39 @@ final class Engine(
               val (pid, rt, rel, _) =
                 signaled((Math.floorMod(recvCursor, signaled.size.toLong)).toInt)
               recvCursor += 1
-              // Guaranteed hit (unambiguous set bit ⇒ that buddy signaled ⇒ its frame is present) ⇒
-              // recvCounter advances ⇒ the next read token is fresh. No recurrence is possible.
-              val c = rt.recvCounter
-              t.retrieve(dirToken(rel.addrKey, peerRole(rt.role), rt.role, c)).foreach { wire =>
-                rt.recvCounter += 1 // consumed (single-use) ⇒ advance regardless of decode outcome
-                // Run the frame through the DH double ratchet: it trial-decrypts the encrypted header,
-                // performs a DH step + skipped-key handling as needed (PCS), and returns the inner block
-                // — or None for a carrier / non-matching frame, WITHOUT advancing the ratchet.
-                rt.ratchet.decrypt(wire).foreach { inner =>
-                  // ARQ inner block: [ackSeq][msgSeq][padded message]. De-duplicate + deliver this
-                  // message by its sequence (a retransmit re-presents an already-seen msgSeq). Advance
-                  // `highRecv` ONLY after a successful unpad+deliver — otherwise a malformed-pad frame
-                  // would mark the sequence received without surfacing it, which (once Stage 2 consumes
-                  // the ack) would let the sender stop retransmitting a message we never delivered.
-                  // (The PEER's ackSeq at inner[0:8] is carried on the wire but only consumed in Stage 2,
-                  // with round-derived addressing — retransmitting under the current counter token would
-                  // itself recur.)
-                  val msgSeq = ArqFrame.msgSeqOf(inner)
-                  if ArqFrame.isNewMessage(msgSeq, rt.highRecv) then
-                    Frame
-                      .unpad(ArqFrame.payloadOf(inner), MsgPayloadInner)
-                      .toOption
-                      .foreach { p =>
-                        rt.highRecv = msgSeq // advance only on successful delivery
-                        emit(EngineEvent.MessageReceived(pid, new String(p, UTF_8), roundId))
-                      }
-                }
+              // Read this buddy's ROUND-DERIVED token (retry-safe addressing): a false notify or a
+              // collision serves a token used at most once this round, so a miss can never recur it.
+              t.retrieve(dirToken(rel.addrKey, peerRole(rt.role), rt.role, readRound)).foreach {
+                wire =>
+                  // Run the frame through the DH double ratchet: it trial-decrypts the encrypted header,
+                  // performs a DH step + skipped-key handling as needed (PCS), and returns the inner block
+                  // — or None for a carrier / non-matching frame, WITHOUT advancing the ratchet.
+                  rt.ratchet.decrypt(wire).foreach { inner =>
+                    // ARQ inner block: [ackSeq][msgSeq][padded message].
+                    // 1) Consume the PEER's ack: it reports the peer's highest received sequence FROM US,
+                    //    so once it covers our in-flight head, that head is delivered+acked — advance our
+                    //    ratchet past it and drop it (advance-on-ack; stops our retransmits).
+                    val ackSeq = ArqFrame.ackSeqOf(inner)
+                    if ackSeq > rt.peerAcked then rt.peerAcked = ackSeq
+                    if rt.headSeq != ArqFrame.NoSeq && rt.peerAcked >= rt.headSeq then
+                      outbox.get(pid).filter(_.nonEmpty).foreach(q => dropHead(pid, q))
+                      rt.headSeq = ArqFrame.NoSeq
+                    // 2) De-duplicate + deliver this message by its sequence (a retransmit re-presents an
+                    //    already-seen msgSeq; an ack-only frame carries NoSeq). Owe an ack ONLY for a
+                    //    content frame (msgSeq != NoSeq) — never for an ack-only, so acks don't ping-pong.
+                    val msgSeq = ArqFrame.msgSeqOf(inner)
+                    if msgSeq != ArqFrame.NoSeq then
+                      rt.ackOwed =
+                        true // received content ⇒ owe the peer an ack (notify-driven re-ack)
+                      if ArqFrame.isNewMessage(msgSeq, rt.highRecv) then
+                        Frame
+                          .unpad(ArqFrame.payloadOf(inner), MsgPayloadInner)
+                          .toOption
+                          .foreach { p =>
+                            rt.highRecv = msgSeq // advance only on successful delivery
+                            emit(EngineEvent.MessageReceived(pid, new String(p, UTF_8), roundId))
+                          }
+                  }
               }
             else
               // No unambiguously-signaled buddy (idle OR an ambiguous collision round): a cover read
@@ -448,7 +460,3 @@ final class Engine(
   /** Active (non-removed) buddy count — presentation helper; carries no key material. */
   def buddyCount: Int = book.size
   def confirmedCount: Int = book.confirmedCount
-
-  /** Count of internal invariant breaks hit in `tick` (orphaned outbox entries). Always 0 in
-    * correct operation — a non-zero value is a positive diagnostic that something is wrong. */
-  def internalAnomalyCount: Long = orphanedDrops
