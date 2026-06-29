@@ -3,22 +3,29 @@ package engine
 import org.scalatest.funsuite.AnyFunSuite
 import scala.collection.mutable
 
-/** CHARACTERIZATION TESTS for two metadata-privacy concerns in the addressing / notify layer. Neither
-  * is a content-crypto or attestation flaw (those paths reviewed clean); both are in the addressing /
+/** CHARACTERIZATION TESTS for three metadata-privacy concerns in the addressing / notify layer. None
+  * is a content-crypto or attestation flaw (those paths reviewed clean); all are in the addressing /
   * notify scheme the metadata-privacy claim rests on:
   *
   *   #1 notify-bit collision — FIXED by T041c. `NotifyDigest.bit(pairKey, roundId)` now ROTATES the bit
-  *      per round, and `Engine.tick` serves a buddy only when its set bit is UNAMBIGUOUS that round (a
-  *      guaranteed hit) — a colliding round defers to a cover read. So the loser's read token no longer
-  *      recurs; this test asserts that fix (it FAILS if the rotation/ambiguity handling regresses).
+  *      per round, and `Engine.tick` serves a buddy only when its set bit is UNAMBIGUOUS among the
+  *      client's ACTIVE relationships that round (a guaranteed hit) — a colliding round defers to a
+  *      cover read. So the loser's read token no longer recurs; the tests assert that fix (incl. a
+  *      pending colliding peer) and FAIL if the rotation/ambiguity handling regresses.
   *
-  *   #2 rejected-submit recurrence — STILL OPEN. `sendCounter` advances only on a SUCCESSFUL submit (to
-  *      keep sender/receiver tokens in lockstep), so an untrusted store that REJECTS a write makes the
-  *      next round retry under the SAME outgoing token. An idle client always writes a fresh cover
-  *      token, so the recurrence is both an FR-014 token recurrence and an active-vs-idle tell. This
-  *      test asserts the present (leaky) behaviour ON PURPOSE so the gap is not silently forgotten and
-  *      flips the day retry-safe addressing (round-id-derived addressing or a receiver-side skip
-  *      window) lands. */
+  * #2 and #3 are the WRITE-side and READ-side of the SAME counter-frozen-on-miss class; both are STILL
+  * OPEN and closed by the same retry-safe / round-id-derived addressing. Each asserts the present
+  * (leaky) behaviour ON PURPOSE so the gap is not silently forgotten, and flips when that lands:
+  *
+  *   #2 rejected-submit recurrence (write-side, `sendCounter`) — `sendCounter` advances only on a
+  *      SUCCESSFUL submit (to keep sender/receiver tokens in lockstep), so an untrusted store that
+  *      REJECTS a write makes the next round retry under the SAME outgoing token — an FR-014 recurrence
+  *      and an active-vs-idle tell.
+  *
+  *   #3 removed-peer read recurrence (read-side, `recvCounter`) — removed relationships are excluded
+  *      from the bounded T041c ambiguity set, so a peer still signaling after we removed it can collide
+  *      with a confirmed idle buddy, get it served, MISS (no frame), freeze its `recvCounter`, and recur
+  *      its read token. */
 class RecurrenceGapsSpec extends AnyFunSuite:
 
   private def secret(s: String): Array[Byte] = s.getBytes("UTF-8")
@@ -180,4 +187,44 @@ class RecurrenceGapsSpec extends AnyFunSuite:
     assert(
       recvHost.reads.distinct.size == recvHost.reads.size,
       "no recurrence: a pending/colliding peer must not force a confirmed idle buddy to be served"
+    )
+
+  test(
+    "GAP #3 (read-side, still open): a REMOVED peer still signaling can recur a confirmed idle buddy's read token"
+  ):
+    // Counterpart to the pending-peer test: a peer X we REMOVED (kept in the book for duplicate-add
+    // detection but EXCLUDED from the bounded ambiguity set) whose peer keeps signaling. On rounds where
+    // X's rotated bit collides with a confirmed idle buddy C's bit, C looks UNAMBIGUOUS (X is excluded),
+    // so the engine serves C, MISSES (C is idle), C's recvCounter stays frozen, and C's read token
+    // RECURS. This is the READ-side (recvCounter) analogue of GAP #2's WRITE-side (sendCounter)
+    // recurrence — the SAME CLASS of retry-safe / round-id-derived addressing closes both. Removed
+    // peers are excluded on purpose to keep the ambiguity set bounded (else it grows forever ⇒
+    // starvation); the residual is pinned here ON PURPOSE and this assertion flips when read-side
+    // retry-safe addressing lands.
+    val sIdleC = secret("confirmed-idle-3")
+    val sRemX = secret("removed-peer-3")
+    val cols =
+      collisionRounds(sIdleC, sRemX, 2) // 2 collisions ⇒ C served twice at the same frozen token
+
+    val store = mutable.Map.empty[String, Array[Byte]]
+    val recvHost = RecvHost(store)
+    val bob = Engine(Some(recvHost), clientLabel = secret("bob"))
+    val rcC = bob.addBuddy(sIdleC, BuddyRole.Responder).toOption.get
+    bob.confirmBuddy(rcC.pairId, matched = true) // C: confirmed, idle
+    val rX = bob.addBuddy(sRemX, BuddyRole.Responder).toOption.get
+    bob.confirmBuddy(rX.pairId, matched = true)
+    bob.removeBuddy(
+      rX.pairId
+    ) // X: removed (kept in book for dup-add detection, excluded from ambiguity)
+    bob.drainEvents()
+
+    for r <- cols do
+      recvHost.signalMail(sRemX) // the removed peer keeps signaling its (now-uncounted) bit
+      bob.tick(r)
+      bob.drainEvents()
+
+    assert(recvHost.reads.size == cols.size, "one read per round")
+    assert(
+      recvHost.reads.distinct.size < recvHost.reads.size,
+      "KNOWN GAP #3: a removed-but-signaling peer's collision recurs a confirmed idle buddy's read token"
     )

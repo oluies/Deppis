@@ -134,8 +134,10 @@ attestation). Both are pinned as characterization tests in `engine.RecurrenceGap
    collisions among active relationships** (no distinct-bit assumption). Cost: a bounded ~1-round
    delivery delay under collision, never a leak. (A peer that keeps signaling long *after* we removed it
    is excluded from the count to keep it bounded — retained removed relationships would grow without
-   limit — so it can sporadically collide with a live buddy; that is the same counter-frozen-on-miss
-   residual as #2 and is resolved by the same retry-safe addressing.)
+   limit — so it can sporadically collide with a confirmed idle buddy, get it served, miss, freeze its
+   `recvCounter`, and recur its **read** token. That is a read-side recurrence — the same *class* as #2's
+   write-side recurrence, on the opposite counter — closed by the same retry-safe addressing; pinned as
+   GAP #3 in `RecurrenceGapsSpec`.)
    Design: `design/notify-bit-lease.md` (per-round rotation realizes T041c's goal without a static
    pairing-time lease, which the lease-less architecture cannot carry).
 
@@ -145,10 +147,14 @@ attestation). Both are pinned as characterization tests in `engine.RecurrenceGap
    outgoing token**. An idle client always writes a fresh cover token, so this is both an FR-014 token
    recurrence and an active-vs-idle tell. The fix is round-id-derived addressing or a bounded
    receiver-side skip window so every wire write — real, cover, or retry — uses a fresh token.
-   `AnonymitySpec` models a non-rejecting store (its `submit` always succeeds).
+   `AnonymitySpec` models a non-rejecting store (its `submit` always succeeds). Its read-side twin is
+   the removed-peer `recvCounter` recurrence noted under #1 (pinned as GAP #3); the same retry-safe
+   addressing closes both counters.
 
-Until #2 lands, the unconditional SC-003 active-vs-idle wording above is scoped to a store that does not
-selectively reject writes. The dev store learns access patterns and is therefore labeled non-private.
+Until retry-safe addressing lands (#2 write-side `sendCounter`, #3 read-side `recvCounter`), the
+unconditional SC-003 active-vs-idle wording above is scoped to a store that does not selectively reject
+writes and to peers that stop signaling once removed. The dev store learns access patterns and is
+therefore labeled non-private.
 
 ### 3.3 PING notify operator (notification service)
 

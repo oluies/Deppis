@@ -117,9 +117,11 @@ the bound; no silent cap.)
 - Removed relationships are **excluded** from the count (they are retained forever for duplicate-add
   detection, so counting them would grow the ambiguity set without bound → delivery starvation —
   [roborev Medium #2]). The trade: a peer that keeps signaling long after we removed it can sporadically
-  (~1/512 per round) collide with a live buddy and, because that buddy's read counter is frozen on the
-  resulting miss, recur its read token. This is the **same counter-frozen-on-miss residual as GAP #2**
-  (rejected-submit) and is resolved by the same retry-safe / round-id-derived addressing — tracked there.
+  (~1/512 per round) collide with a confirmed idle buddy and, because that buddy's `recvCounter` is
+  frozen on the resulting miss, recur its **read** token. This is the **read-side (`recvCounter`)
+  analogue of GAP #2's write-side (`sendCounter`) recurrence** — the same *class* of counter-frozen-on-miss
+  bug on the opposite counter, closed by the same retry-safe / round-id-derived addressing. Pinned as
+  **GAP #3** in `RecurrenceGapsSpec` (asserts the present leaky behaviour, flips when the fix lands).
 
 ---
 
