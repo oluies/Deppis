@@ -442,11 +442,16 @@ final class Engine(
                   // block — or None for a carrier / a CACHED content retransmit we already consumed.
                   rt.ratchet.decrypt(wire) match
                     case None =>
-                      // A frame WAS present but didn't decrypt: a cached CONTENT retransmit whose ratchet
-                      // key we consumed on first delivery (ack-only frames are encrypted fresh and always
-                      // decode, so they never land here). The peer is still retransmitting ⇒ we owe it a
-                      // (re-)ack so it stops. (A genuine carrier here is harmless to re-ack.)
-                      rt.ackOwed = true
+                      // A frame WAS present at THIS pair's read token but didn't decrypt. Invariant: only
+                      // this pair's writer can produce a frame here — cover writes use cover-derived
+                      // tokens, ack-only frames are encrypted fresh (always decode), and a cross-pair
+                      // frame is under a different addrKey's token — so a None here is a cached CONTENT
+                      // retransmit whose ratchet key we consumed on first delivery. We therefore owe a
+                      // (re-)ack so the peer stops retransmitting. Gate on `highRecv != NoSeq` so the
+                      // re-ack is keyed to "we have delivered content from this buddy" (the retransmit
+                      // case) rather than to any decrypt failure: a None before any delivery (which the
+                      // invariant says shouldn't occur) does not spuriously activate an idle engine.
+                      if rt.highRecv != ArqFrame.NoSeq then rt.ackOwed = true
                     case Some(inner) =>
                       // ARQ inner block: [ackSeq][msgSeq][padded message].
                       // 1) Consume the PEER's ack: it reports the peer's highest received sequence FROM

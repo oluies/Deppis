@@ -511,3 +511,15 @@ class RoundTransportSpec extends AnyFunSuite:
       g2 ++= b2.drainEvents().collect { case EngineEvent.MessageReceived(_, t, _) => t }
     assert(g1 == Seq("to-b1"), s"b1 starved? got $g1")
     assert(g2 == Seq("to-b2"), s"b2 starved? got $g2")
+
+  test(
+    "RE-ENCRYPT ON ACK ADVANCE: a heavy bidirectional exchange delivers both ways (path-b coverage)"
+  ):
+    // Each side holds an unacked head while RECEIVING the other's messages, so its highRecv advances and
+    // the cached head wire is re-encrypted (the second bounded-Ns path, not exercised by the one-way
+    // offline test). Both full streams must still deliver in order — i.e. the gap stayed within MaxSkip.
+    val (alice, bob, pid, _) = connectedPair()
+    for i <- 1 to 5 do { alice.sendMessage(pid, s"a$i"); bob.sendMessage(pid, s"b$i") }
+    val (aGot, bGot) = converse(alice, bob, 1, 80)
+    assert(bGot == Seq("a1", "a2", "a3", "a4", "a5"), s"bob got $bGot")
+    assert(aGot == Seq("b1", "b2", "b3", "b4", "b5"), s"alice got $aGot")
