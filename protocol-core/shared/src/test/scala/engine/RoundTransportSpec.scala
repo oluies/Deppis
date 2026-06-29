@@ -187,6 +187,22 @@ class RoundTransportSpec extends AnyFunSuite:
     bob.tick(1); bob.tick(2)
     assert(t.signals.size == 2 && t.signals.forall(_._2.nonEmpty), "one decoy signal per round")
 
+  test(
+    "ARQ inner header reserves 16 bytes: a message at the reduced cap round-trips; over it is rejected"
+  ):
+    // The sealed inner block is now [ackSeq(8)][msgSeq(8)][padded message], so the per-message payload
+    // shrank by 16 bytes vs. the raw ratchet inner. A message at the new cap delivers intact; one that
+    // would have fit the raw inner but not the ARQ-reduced cap is rejected at sendMessage.
+    val (alice, bob, pairId, _, tb) = sharedPair()
+    val maxMsg = "x" * (DoubleRatchet.InnerSize - 16 - 2) // ARQ header(16) + Frame length prefix(2)
+    assert(alice.sendMessage(pairId, maxMsg).isRight)
+    alice.tick(1); tb.signalMail(pairKeyOf("shared")); bob.tick(2)
+    assert(msgs(bob) == Seq(maxMsg), "a max-length message round-trips through the ARQ inner block")
+    assert(
+      alice.sendMessage(pairId, "y" * (DoubleRatchet.InnerSize - 2)).isLeft,
+      "a message over the ARQ-reduced cap (but within the raw inner) is rejected"
+    )
+
   test("a message submitted by the sender is retrieved + surfaced by the receiver"):
     val (alice, bob, pairId, _, tb) = sharedPair()
     assert(alice.sendMessage(pairId, "meet at noon") == Right(1))
