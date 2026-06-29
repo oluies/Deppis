@@ -1,7 +1,11 @@
-# Retry-safe addressing (design, not yet built) — closing GAP #2 + GAP #3
+# Retry-safe addressing — closing GAP #2 + GAP #3
 
-Status: **DESIGN / decision pending.** Closes the two remaining addressing-layer recurrence residuals
-pinned in `engine.RecurrenceGapsSpec`:
+Status: **IMPLEMENTED** (Option A — round-derived addressing + stop-and-wait ARQ). Stage 1 (#61) landed
+the ARQ inner-block framing + ack carriage; Stage 2 flipped addressing to round-derived and made the
+ARQ load-bearing (retransmit-until-acked, advance-on-ack, ack-only frames, de-dup). `Engine.tick`
+writes this round's token and reads the **previous** round's writes (`readRound = roundId - 1`), a
+one-round latency needing no write/read barrier. `RecurrenceGapsSpec` now asserts NON-recurrence for
+all three concerns. Closes the addressing-layer recurrence residuals:
 
 - **GAP #2 (write-side, `sendCounter`)** — a rejected `submit` doesn't advance `sendCounter`, so the
   retry next round reuses the same outgoing token → FR-014 recurrence + active-vs-idle tell.

@@ -52,10 +52,14 @@ class EngineBackendE2ESpec extends AnyFunSuite with ObsdHarness:
         alice.addBuddy(secret, BuddyRole.Initiator, peerNotifyLabel = bobLabel).toOption.get.pairId
       alice.confirmBuddy(aPid, matched = true); alice.drainEvents()
       alice.sendMessage(aPid, "see you at the bridge")
-      alice.tick(1L) // engine writes the ARQ frame under Alice's token + signals Bob's notify
+      alice.tick(
+        1L
+      ) // engine writes the ARQ frame under Alice's round-1 token + signals Bob's notify
 
       // --- Bob ticks: notify-before-retrieval ---
-      bob.tick(1L)
+      // Round-derived addressing reads the PREVIOUS round's writes, so Bob reads Alice's round-1 frame
+      // when he ticks round 2 (readRound = 1).
+      bob.tick(2L)
       val events = bob.drainEvents()
       val ni = events.indexWhere(_.isInstanceOf[EngineEvent.Notified])
       val mi = events.indexWhere(_.isInstanceOf[EngineEvent.MessageReceived])
@@ -65,7 +69,7 @@ class EngineBackendE2ESpec extends AnyFunSuite with ObsdHarness:
       val msg = events.collectFirst { case EngineEvent.MessageReceived(p, txt, _) => (p, txt) }
       assert(msg.contains((pair.pairId, "see you at the bridge")))
 
-      // Single-use: a second tick (no new mail) delivers nothing.
-      bob.tick(2L)
+      // Single-use: a later tick (no new write in that round) delivers nothing.
+      bob.tick(3L)
       assert(!bob.drainEvents().exists(_.isInstanceOf[EngineEvent.MessageReceived]))
     }

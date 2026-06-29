@@ -50,14 +50,14 @@ class AnonymitySpec extends AnyFunSuite:
       retrieves += t.toVector; store.remove(t.toVector.toString)
 
   private val N = 4
-  private val K = 6 // messages the active buddy sends
-  // Rounds run per world. A buffer over K because under T041c a round where the active buddy's
-  // ROTATED bit collides with another confirmed buddy's bit is ambiguous and defers one delivery to
-  // the next round — the buffer lets all K arrive within a FIXED-length trace (so the per-world
-  // observables stay comparable for the indistinguishability assertions). For the fixed secrets and
-  // rounds below this is DETERMINISTIC, not statistical (~3/512 per round for N=4 is just the prior),
-  // so 2 spare rounds are ample; if a derivation change ever exceeds the buffer the `delivered == K`
-  // assertion fails loudly with the world index, not as a flake.
+  // The active buddy sends ONE message, held in flight (retry-safe addressing retransmits it each
+  // round under a fresh round-derived token). One in-flight message suffices to pin the anonymity
+  // observable; stop-and-wait ARQ would only advance to a second message after an ack round-trip,
+  // which this manual HostView (no ack path back to the sender) does not model.
+  private val K = 1
+  // Rounds run per world — a FIXED length so the per-world observables stay comparable for the
+  // indistinguishability assertions. The active buddy retransmits + signals every round; the receiver
+  // reads one (round-derived, always-distinct) token per round.
   private val R = 8
   private val buddySecrets = (0 until N).map(i => secret(s"buddy-$i"))
 
