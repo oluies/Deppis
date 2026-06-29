@@ -31,6 +31,13 @@ object Buddy:
     def confirmedCount: Int = rels.valuesIterator.count(_.state == BuddyState.Confirmed)
     def get(pairId: String): Option[BuddyRelationship] = rels.get(pairId)
 
+    /** Every relationship in ANY state (Pending/Confirmed/Removed). The engine uses these — FILTERED to
+      * the ACTIVE set (non-Removed) — to compute notify-bit ambiguity (T041c): a confirmed buddy's set
+      * bit is a guaranteed hit only if no other ACTIVE relationship (Pending included, for the confirm
+      * window) shares its rotated bit that round. Removed entries are kept here only for duplicate-add
+      * detection and are excluded from that count, so the ambiguity set stays bounded by the 512 cap. */
+    def relationships: Iterable[BuddyRelationship] = rels.values
+
     def add(rel: BuddyRelationship): Either[String, BuddyBook] =
       if rels.get(rel.pairId).exists(_.state != BuddyState.Removed) then Left("duplicate buddy")
       else if size >= MaxBuddies then Left(s"buddy cap $MaxBuddies reached")

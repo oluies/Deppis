@@ -22,28 +22,30 @@ class JsRoundTransportSpec extends AnyFunSuite:
 
   private def u8(s: String): Uint8Array = Uint8.toJs(s.getBytes("UTF-8"))
 
-  // The single pair's per-buddy notify bit (secret "shared"). The engine derives it from the
-  // addressing root (the forward-secrecy root split), so the signaller must too.
-  private val sharedBit: Int =
+  // The single pair's per-buddy notify bit (secret "shared"), ROTATED per round (T041c). The engine
+  // derives it from the addressing root (the forward-secrecy root split), so the signaller must too.
+  private def sharedBit(roundId: Long): Int =
     NotifyDigest.bit(
-      KeySchedule.addrKey(handshake.Handshake.init("shared".getBytes("UTF-8")).pairKey)
+      KeySchedule.addrKey(handshake.Handshake.init("shared".getBytes("UTF-8")).pairKey),
+      roundId
     )
 
   /** A synchronous in-memory JS transport (a real JS object with the methods the host supplies). */
   private final class FakeJsTransport(store: mutable.Map[String, Uint8Array]) extends js.Object:
     var acceptSubmit: Boolean = true // false ⇒ simulate a transient backend failure on send
-    private val digest = new Uint8Array(64)
+    private var pendingMail = false
 
-    /** Signal the (single) buddy has mail this round. */
-    def signalMail(): Unit =
-      digest(sharedBit >> 3) = (digest(sharedBit >> 3).toInt | (1 << (sharedBit & 7))).toShort
+    /** Signal the (single) buddy has mail this round (bit set at the next, round-aware fetch). */
+    def signalMail(): Unit = pendingMail = true
     def submit(token: Uint8Array, frame: Uint8Array): Boolean =
       if acceptSubmit then store(hexU8(token)) = frame
       acceptSubmit
     def fetchDigest(roundId: Double, clientLabel: Uint8Array): Uint8Array =
       val out = new Uint8Array(64)
-      var i = 0
-      while i < 64 do { out(i) = digest(i); digest(i) = 0; i += 1 } // copy + per-round reset
+      if pendingMail then
+        val b = sharedBit(roundId.toLong)
+        out(b >> 3) = (out(b >> 3).toInt | (1 << (b & 7))).toShort
+      pendingMail = false // per-round reset
       out
     def retrieve(token: Uint8Array): Uint8Array = store.remove(hexU8(token)).orNull
 

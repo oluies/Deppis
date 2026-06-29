@@ -108,8 +108,9 @@ object DeppisDemo:
     val sealer = DevNotificationServer(notifyKey)
     val pingSignal = new EnclaveNotificationClient(notifyStub, attested = false)
     val pairKey = Handshake.init(secret).pairKey
-    // Bob's engine derives the notify bit from the addressing root (the forward-secrecy root split).
-    val bobBit = NotifyDigest.bit(KeySchedule.addrKey(pairKey))
+    // Bob's engine derives the notify bit from the addressing root (the forward-secrecy root split),
+    // ROTATED per round (T041c) — so the signaller recomputes it for each round it signals.
+    val bobAddrKey = KeySchedule.addrKey(pairKey)
 
     // 2) Alice queues a message.
     val message = "see you at dusk"
@@ -130,7 +131,11 @@ object DeppisDemo:
       // own store traffic is already uniform; the REAL PONG/PING front MUST likewise decouple signal
       // timing/volume from real-message presence (aggregation + cover signalling). Safe here only
       // because the whole run is DEV, NO METADATA PRIVACY.
-      if aliceReal then pingSignal.signal(round, sealer.issueToken(round, bobBit, bobLabel))
+      if aliceReal then
+        pingSignal.signal(
+          round,
+          sealer.issueToken(round, NotifyDigest.bit(bobAddrKey, round), bobLabel)
+        )
       log(
         "alice",
         f"round $round: wrote ${if aliceReal then "REAL  frame" else "cover frame"} (256B, indistinguishable)"

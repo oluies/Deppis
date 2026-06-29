@@ -301,33 +301,50 @@ final class Engine(
                 coverCounter += 1
                 t.submit(RetrievalToken.derive(coverKey, "cover", "", coverCounter), coverFrame())
             // Exactly ONE retrieve per round (the schedule's one-retrieve invariant, FR-012 fetch
-            // path), NOTIFY-GUIDED per-buddy (FR-004): read EXACTLY the buddy whose digest bit is set
-            // this round. Because that buddy's message is actually present, the read is a hit and its
-            // counter advances — so the per-round read-token stream is non-recurrent (FR-014), PROVIDED
-            // notify bits do not collide. Collision-freedom is the still-unimplemented T041c bit-lease;
-            // under a birthday-rate collision a signaled bit can target the wrong buddy, miss, and
-            // re-issue the same read token next round (KNOWN GAP, pinned in RecurrenceGapsSpec; see the
-            // non-recurrence note at the cursor below). When no buddy's bit is set, a cover read under a
-            // fresh token keeps the fetch trace one-read-per-round.
-            val signaled = runtime.toSeq
-              .flatMap { case (pid, rt) =>
-                book.get(pid).filter(_.state == BuddyState.Confirmed).map(rel => (pid, rt, rel))
-              }
-              .filter { case (_, _, rel) =>
-                NotifyDigest.isSet(digest, NotifyDigest.bit(rel.addrKey))
-              }
-              .sortBy(_._1) // stable order; the cursor below rotates fairly within it
+            // path), NOTIFY-GUIDED per-buddy (FR-004). T041c (collision-free notify): each buddy's
+            // notify bit is ROTATED per round (NotifyDigest.bit(addrKey, roundId)), so a collision
+            // between two of this receiver's buddies is transient, not permanent. We serve a buddy ONLY
+            // when its set bit is UNAMBIGUOUS this round — no OTHER active relationship of this client
+            // maps to that bit — which makes the read a GUARANTEED hit (only the holder of the pair key could
+            // have sealed that bit), so the read counter always advances and the read-token stream is
+            // non-recurrent (FR-014) UNCONDITIONALLY over collisions. On an ambiguous round we cannot
+            // tell which party signaled, so we serve none and issue a fresh cover read; the colliding
+            // buddies re-signal next round, where rotation almost surely separates them (a bounded
+            // ~1-round delivery delay under collision, never a token recurrence / leak).
+            val confirmed = runtime.toSeq.flatMap { case (pid, rt) =>
+              book
+                .get(pid)
+                .filter(_.state == BuddyState.Confirmed)
+                .map(rel => (pid, rt, rel, NotifyDigest.bit(rel.addrKey, roundId)))
+            }
+            // How many of THIS client's ACTIVE relationships (Pending ∪ Confirmed — bounded by the 512
+            // cap) map to each bit this round. Pending is included because a peer that confirmed first
+            // signals during our confirm window. A confirmed candidate is safe to serve only if its bit
+            // is unique across this set (else the set bit might be another party's, so serving the
+            // confirmed buddy would miss and recur its token). Removed relationships are EXCLUDED so the
+            // set stays bounded — they are retained forever for duplicate-add detection, and a peer that
+            // keeps signaling long AFTER we removed it is the same counter-frozen-on-miss residual as the
+            // rejected-submit gap, resolved by the same retry-safe addressing (see RecurrenceGapsSpec #2).
+            val bitCount: Map[Int, Int] =
+              book.relationships.iterator
+                .filter(_.state != BuddyState.Removed)
+                .foldLeft(Map.empty[Int, Int]) { (m, rel) =>
+                  val b = NotifyDigest.bit(rel.addrKey, roundId);
+                  m.updated(b, m.getOrElse(b, 0) + 1)
+                }
+            val candidates = confirmed.filter { case (_, _, _, b) => NotifyDigest.isSet(digest, b) }
+            // Mail is waiting iff some buddy's bit is set (FR-004), even on an ambiguous round.
+            if candidates.nonEmpty then emit(EngineEvent.Notified(roundId))
+            val signaled =
+              candidates.filter { case (_, _, _, b) => bitCount.getOrElse(b, 0) == 1 }.sortBy(_._1)
             if signaled.nonEmpty then
-              emit(EngineEvent.Notified(roundId)) // some buddy has mail (FR-004)
-            if signaled.nonEmpty then
-              // Serve one signaled buddy per round, ROTATING the start so co-signaling buddies are
-              // not starved (the rest re-signal next round — T041c covers the multi-sender edge).
-              val (pid, rt, rel) = signaled((Math.floorMod(recvCursor, signaled.size.toLong)).toInt)
+              // Serve one UNAMBIGUOUSLY-signaled buddy per round, ROTATING the start so co-signaling
+              // buddies are not starved (the rest re-signal next round).
+              val (pid, rt, rel, _) =
+                signaled((Math.floorMod(recvCursor, signaled.size.toLong)).toInt)
               recvCursor += 1
-              // Non-recurrence note: a signaled buddy normally HAS its message present (hit ⇒
-              // recvCounter advances ⇒ next read token is fresh). It only fails to advance on a
-              // birthday-rate bit COLLISION (a wrong buddy signaled) — so non-recurrence is
-              // conditional on collision-freedom, which the T041c bit-lease makes unconditional.
+              // Guaranteed hit (unambiguous set bit ⇒ that buddy signaled ⇒ its frame is present) ⇒
+              // recvCounter advances ⇒ the next read token is fresh. No recurrence is possible.
               val c = rt.recvCounter
               t.retrieve(dirToken(rel.addrKey, peerRole(rt.role), rt.role, c)).foreach { wire =>
                 rt.recvCounter += 1 // consumed (single-use) ⇒ advance regardless of decode outcome
@@ -342,7 +359,8 @@ final class Engine(
                   )
               }
             else
-              // No buddy signaled: a cover read under a fresh token (one-read-per-round, fresh).
+              // No unambiguously-signaled buddy (idle OR an ambiguous collision round): a cover read
+              // under a fresh token (one-read-per-round, fresh) — never a buddy's frozen read token.
               coverReadCounter += 1
               t.retrieve(RetrievalToken.derive(coverKey, "cover-read", "", coverReadCounter)): Unit
             // Report the round as a carrier unless a real frame was ACTUALLY submitted — a failed or

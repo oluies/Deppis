@@ -115,33 +115,46 @@ The store **never learns sender or receiver** in Phase C — that is the core of
 > store adding no distinguisher is obsd's oblivious selftest (T050/T052); the notify host's anonymity is
 > obsd's oblivious aggregation (T053).
 
-#### Known gaps — conditional non-recurrence (addressing/notify layer)
+#### Notify/addressing layer — one fixed, one remaining (FR-014 non-recurrence)
 
-A holistic crypto review (content-ratchet and attestation paths reviewed clean) found that the SC-002
-which-buddy anonymity and the FR-014 non-recurrent-token claims hold today only under two assumptions
-that the engine does not yet enforce unconditionally. Both are in the addressing/notify layer, not in
-content crypto or attestation, and both are pinned as characterization tests in
-`engine.RecurrenceGapsSpec` (the tests fail the day either is fixed, forcing these claims to be
-restored to unconditional):
+A holistic crypto review (content-ratchet and attestation paths reviewed clean) found two FR-014
+read/write-token recurrence concerns in the addressing/notify layer (not in content crypto or
+attestation). Both are pinned as characterization tests in `engine.RecurrenceGapsSpec`:
 
-1. **Notify-bit collisions (T041c).** `NotifyDigest.bit` is `HMAC mod 512` with no collision avoidance,
-   so two buddies share a bit at birthday rate. A set shared bit signals both; the buddy without mail
-   misses its `retrieve`, its read counter does not advance, and the **same read token recurs** next
-   round — a clustering handle for the store. The fix is the pairing-time **bit-lease** (T041c, noted in
-   `tasks.md`) that assigns each buddy a collision-free bit. `AnonymitySpec` models the collision-free
-   case (it asserts distinct bits as a precondition).
+1. **Notify-bit collisions — FIXED (T041c).** `NotifyDigest.bit` previously hashed the pair key to a
+   static `mod 512` bit, so two of a receiver's buddies collided at birthday rate; a set shared bit was
+   ambiguous, the receiver could mis-target the idle buddy, its `retrieve` missed, and the **same read
+   token recurred**. T041c now derives the bit from the pair key **and the round id**
+   (`NotifyDigest.bit(pairKey, roundId)`), so collisions are *transient*, and `Engine.tick` serves a
+   buddy only when its set bit is **unambiguous among this client's ACTIVE relationships** that round —
+   confirmed *and* pending (pending is included because a peer that confirmed first signals during our
+   confirm window). This set is bounded by the 512-buddy cap. An unambiguous set bit is therefore a
+   guaranteed hit; an ambiguous round defers to a fresh cover read and the buddies re-signal next round.
+   So the SC-002 which-buddy anonymity and FR-014 read-token non-recurrence hold **unconditionally over
+   collisions among active relationships** (no distinct-bit assumption). Cost: a bounded ~1-round
+   delivery delay under collision, never a leak. (A peer that keeps signaling long *after* we removed it
+   is excluded from the count to keep it bounded — retained removed relationships would grow without
+   limit — so it can sporadically collide with a confirmed idle buddy, get it served, miss, freeze its
+   `recvCounter`, and recur its **read** token. That is a read-side recurrence — the same *class* as #2's
+   write-side recurrence, on the opposite counter — closed by the same retry-safe addressing; pinned as
+   GAP #3 in `RecurrenceGapsSpec`.)
+   Design: `design/notify-bit-lease.md` (per-round rotation realizes T041c's goal without a static
+   pairing-time lease, which the lease-less architecture cannot carry).
 
-2. **Rejected-submit recurrence (retry-safe addressing).** The outgoing addressing counter advances
-   **only on a successful submit** (to keep sender/receiver tokens in lockstep), so an untrusted store
-   that selectively **rejects** a write makes the next round retry under the **same outgoing token**. An
-   idle client always writes a fresh cover token, so this is both an FR-014 token recurrence and an
-   active-vs-idle tell. The fix is round-id-derived addressing or a bounded receiver-side skip window so
-   every wire write — real, cover, or retry — uses a fresh token. `AnonymitySpec` models a non-rejecting
-   store (its `submit` always succeeds).
+2. **Rejected-submit recurrence — STILL OPEN (retry-safe addressing).** The outgoing addressing counter
+   advances **only on a successful submit** (to keep sender/receiver tokens in lockstep), so an
+   untrusted store that selectively **rejects** a write makes the next round retry under the **same
+   outgoing token**. An idle client always writes a fresh cover token, so this is both an FR-014 token
+   recurrence and an active-vs-idle tell. The fix is round-id-derived addressing or a bounded
+   receiver-side skip window so every wire write — real, cover, or retry — uses a fresh token.
+   `AnonymitySpec` models a non-rejecting store (its `submit` always succeeds). Its read-side twin is
+   the removed-peer `recvCounter` recurrence noted under #1 (pinned as GAP #3); the same retry-safe
+   addressing closes both counters.
 
-Until both land, the unconditional SC-002/FR-014/SC-003 wording above is scoped to: collision-free
-notify bits **and** a store that does not selectively reject writes.
-The dev store learns access patterns and is therefore labeled non-private.
+Until retry-safe addressing lands (#2 write-side `sendCounter`, #3 read-side `recvCounter`), the
+unconditional SC-003 active-vs-idle wording above is scoped to a store that does not selectively reject
+writes and to peers that stop signaling once removed. The dev store learns access patterns and is
+therefore labeled non-private.
 
 ### 3.3 PING notify operator (notification service)
 
