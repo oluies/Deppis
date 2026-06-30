@@ -32,9 +32,9 @@ class ReproducibleMeasurementSpec extends AnyFunSuite:
     assert(mrEnclave.size == 32, "MRENCLAVE must be a 32-byte measurement")
 
   test("the pinned MRENCLAVE matches deploy/enclave/measurement.txt (no silent divergence)"):
-    // Single source of truth: the constant above and the published measurement file must agree, so a
-    // re-pin after a rebuild updates both. Locate the file by walking up from the test's working dir.
-    val mrHex = "45296a439f2db45b48eec1f4611699f740be707ef5b979f52be7b1a177c6e64f"
+    // Single source of truth: the `mrEnclave` constant above and the published measurement file must
+    // agree, so a re-pin after a rebuild updates both. Locate the file by walking up from the test dir.
+    val pinned = mrEnclave.map(b => f"${b & 0xff}%02x").mkString // rendered from the one constant
     var dir = java.nio.file.Paths.get("").toAbsolutePath
     var found = Option.empty[java.nio.file.Path]
     while found.isEmpty && dir != null do
@@ -48,10 +48,9 @@ class ReproducibleMeasurementSpec extends AnyFunSuite:
       txt.linesIterator.find(_.trim.startsWith("MRENCLAVE")).getOrElse(fail("no MRENCLAVE line"))
     val recorded = line.split("=", 2)(1).trim
     assert(
-      recorded == mrHex,
-      s"measurement.txt MRENCLAVE ($recorded) must match the pinned constant"
+      recorded == pinned,
+      s"measurement.txt MRENCLAVE ($recorded) must match the pinned constant ($pinned)"
     )
-    assert(mrEnclave == hex(mrHex)) // and the constant in this spec is exactly that value
 
   test(
     "published to the ReferenceLog, the measurement is trusted via inclusion proof to the pinned root"
