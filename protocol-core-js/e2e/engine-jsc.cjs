@@ -33,11 +33,20 @@ function fail(m) { console.error('JSC-ENGINE-FAIL:', m); process.exit(1); }
 // changed its entropy source and the polyfill assumption needs re-checking.
 {
   const bare = { console, TextEncoder, TextDecoder };
-  bare.globalThis = bare; vm.createContext(bare); vm.runInContext(code, bare);
-  let threw = false;
-  try { new bare.ProtocolEngine(); } catch (_) { threw = true; }
+  bare.globalThis = bare; vm.createContext(bare);
+  try { vm.runInContext(code, bare); }
+  catch (e) { fail('bundle failed to LOAD in a bare (no-crypto) context: ' + e.message); }
+  // The bundle must still DEFINE the constructor without crypto — module evaluation needs no entropy,
+  // only construction does. Assert that first, so a missing/renamed export cannot masquerade as the
+  // expected crypto-required throw (a bare `new undefined()` would also throw "not a constructor").
+  if (typeof bare.ProtocolEngine !== 'function') {
+    fail('bundle loaded but did not define globalThis.ProtocolEngine in a bare context');
+  }
+  let threw = false, why = '';
+  try { new bare.ProtocolEngine(); } catch (e) { threw = true; why = e.message || String(e); }
   if (!threw) fail('engine constructed WITHOUT a crypto global — the getRandomValues polyfill is no longer required; re-check the iOS RNG bridge');
-  console.log('no-crypto: construction throws as expected (RNG polyfill required)');
+  if (/not a constructor/i.test(why)) fail('construction threw "not a constructor" — the bundle did not expose ProtocolEngine, not the expected crypto-required failure');
+  console.log('no-crypto: construction throws as expected (RNG polyfill required) —', why.slice(0, 70));
 }
 
 const PE = sandbox.ProtocolEngine;

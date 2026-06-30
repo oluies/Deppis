@@ -23,6 +23,9 @@ MAIN="$(find target -path '*protocol-core-js/protocol-core-js-opt/main.js' | hea
 
 OUT=protocol-core-js/dist
 mkdir -p "$OUT"
+# Always clean up the temp entry wrapper, even if esbuild fails under `set -e` (it embeds a
+# machine-specific absolute require path; a stale copy can confuse a later debugging run).
+trap 'rm -f "$OUT/.entry.js"' EXIT
 # Entry wrapper: lift the Scala.js CJS export onto globalThis (what the host references after eval).
 cat > "$OUT/.entry.js" <<EOF
 const m = require("$(cd "$(dirname "$MAIN")" && pwd)/$(basename "$MAIN")");
