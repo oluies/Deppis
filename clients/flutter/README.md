@@ -117,11 +117,20 @@ bundle, backed by Dart's secure random across the bridge:
 globalThis.crypto = { getRandomValues: (a) => { /* fill a from a Dart-bridged CSPRNG */ return a; } };
 ```
 
-This was verified by running the exact `protocol-engine.js` bundle in a
-JavaScriptCore-equivalent sandbox (no `crypto`): without the polyfill the engine
-fails to construct; with **only** `getRandomValues` it runs the full
-add-buddy/send flow. Everything else (the ratchet, the JSON boundary, `@noble`)
-runs unmodified.
+This is now a **committed, runnable proof**: `protocol-core-js/build-jsc-bundle.sh`
+links the engine and esbuild-bundles it into a self-contained
+`globalThis.ProtocolEngine` (the JavaScriptCore-loadable form — the web bundle
+exposes an internal `__mm` global instead), then runs
+`protocol-core-js/e2e/engine-jsc.cjs`, which loads it in a **bare** JS context
+(no Node, no browser — only the injected `crypto.getRandomValues`) and asserts
+both halves: **without** `crypto`, `new ProtocolEngine()` throws at construction
+(the polyfill is required); **with only** `getRandomValues`, the full
+privacy-status + add-buddy (X25519 keygen + KDF) flow runs. Everything else (the
+ratchet, the JSON boundary, `@noble`) runs unmodified.
+
+The remaining native wiring (the `flutter_js`-backed `engine_factory_io.dart`
+with the Dart-`Random.secure()` → `getRandomValues` bridge, the bundled asset,
+and the `ios/` scaffold) is gated on the prerequisites below.
 
 **Prerequisites (not installable everywhere).** Building/running native needs a
 **full Xcode** + **CocoaPods** + an iOS **simulator** (iOS), or the Android SDK
