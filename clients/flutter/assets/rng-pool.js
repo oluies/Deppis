@@ -34,13 +34,23 @@ globalThis.__installSecureRandomPool = function (b64, refill) {
       var n = arr.length;
       if (off + n > pool.length) {
         if (!refill) throw new Error('ENTROPY_POOL_EXHAUSTED');
-        // Top up: keep the unconsumed tail, append a fresh OS-entropy chunk (>= what we still need).
-        var rem = pool.length - off;
-        var fresh = decode(refill(Math.max(n - rem, 32768)));
-        if (fresh.length < n - rem) throw new Error('ENTROPY_POOL_EXHAUSTED'); // refill under-delivered
-        var np = new Uint8Array(rem + fresh.length);
-        np.set(pool.subarray(off), 0);
-        np.set(fresh, rem);
+        // Top up: keep the unconsumed tail, then pull fresh OS-entropy chunks until we have enough.
+        // Looping in chunks means an arbitrarily large single draw is satisfied even if the host caps
+        // bytes-per-refill. ANY delivery failure (non-string, or no progress) surfaces the distinct
+        // ENTROPY_POOL_EXHAUSTED rather than a TypeError / infinite loop.
+        var chunks = [pool.subarray(off)];
+        var have = pool.length - off;
+        while (have < n) {
+          var raw = refill(Math.max(n - have, 32768));
+          if (typeof raw !== 'string') throw new Error('ENTROPY_POOL_EXHAUSTED');
+          var fresh = decode(raw);
+          if (fresh.length === 0) throw new Error('ENTROPY_POOL_EXHAUSTED');
+          chunks.push(fresh);
+          have += fresh.length;
+        }
+        var np = new Uint8Array(have);
+        var p = 0;
+        for (var c = 0; c < chunks.length; c++) { np.set(chunks[c], p); p += chunks[c].length; }
         pool = np;
         off = 0;
       }

@@ -56,11 +56,30 @@ for (let i = 0; i < 50; i++) { // 50 draws of 1000 bytes = 50000 >> the 4-byte s
 if (total !== 50000) fail(`refill: served ${total}, want 50000`);
 if (refillCalls === 0) fail('refill: pool never refilled (sync bridge not exercised)');
 
-// A refill that under-delivers must surface exhaustion rather than serving short/zero bytes.
-sb.__installSecureRandomPool('', () => Buffer.alloc(2).toString('base64')); // 2 bytes for any request
-let under = '';
-try { sb.globalThis.crypto.getRandomValues(new Uint8Array(8)); } catch (e) { under = e.message; }
-if (!/ENTROPY_POOL_EXHAUSTED/.test(under)) fail(`under-delivering refill must throw, got "${under}"`);
+// A refill that always returns EMPTY (no progress) must surface exhaustion, not loop forever.
+sb.__installSecureRandomPool('', () => '');
+let empty = '';
+try { sb.globalThis.crypto.getRandomValues(new Uint8Array(8)); } catch (e) { empty = e.message; }
+if (!/ENTROPY_POOL_EXHAUSTED/.test(empty)) fail(`empty refill must throw, got "${empty}"`);
+
+// A channel that fails to deliver a STRING (null/undefined — the real no-sync-bridge failure) must
+// surface the SAME distinct error, not a TypeError from decoding undefined.
+for (const bad of [() => null, () => undefined, () => 42]) {
+  sb.__installSecureRandomPool('', bad);
+  let why = '';
+  try { sb.globalThis.crypto.getRandomValues(new Uint8Array(4)); } catch (e) { why = e.message; }
+  if (!/ENTROPY_POOL_EXHAUSTED/.test(why)) fail(`non-string refill must throw ENTROPY_POOL_EXHAUSTED, got "${why}"`);
+}
+
+// An OVERSIZED single draw (far larger than one refill chunk) must be satisfied by looping the refill,
+// not capped/thrown — proving "effectively unbounded" for a single call.
+let big = 0;
+const cap = 1000; // host delivers at most 1000 bytes per refill
+sb.__installSecureRandomPool('', (n) => { big++; return Buffer.alloc(Math.min(n, cap)).toString('base64'); });
+const huge = new Uint8Array(7777); // >> cap → needs ~8 refill loops in ONE getRandomValues call
+sb.globalThis.crypto.getRandomValues(huge);
+if (huge.length !== 7777) fail('oversized single draw not fully served');
+if (big < 7) fail(`oversized draw should loop the refill (~8x), only ${big}`);
 
 console.log('RNG-POOL-OK: decoder correct for all base64 paddings; no-refill exhausts distinctly; ' +
-  `sync refill serves unbounded (${refillCalls} refills over 50000 bytes)`);
+  `sync refill serves unbounded incl. oversized single draws; channel-failure surfaces ENTROPY_POOL_EXHAUSTED`);
