@@ -1,0 +1,39 @@
+# gRPC-web transport smoke (T032c) — browser → Envoy (gRPC-web ⇄ gRPC) → Scala ObliviousStore.
+#
+# Run via ./run.sh (it stages the JVM server first). Three services on one network:
+#   messenger-server  h2c gRPC ObliviousStore on :9090   (Envoy upstream; the envoy.yaml cluster
+#                                                          `scala_grpc` resolves this DNS name)
+#   envoy             gRPC-web listener on :8080          (translates HTTP/1.1 gRPC-web ⇄ HTTP/2 gRPC)
+#   grpcweb-client    a raw gRPC-web client that asserts a WriteBatch round-trip, then exits 0/1
+#
+# DEV (Constitution IV): the dev ObliviousStore provides NO metadata privacy and the server logs that
+# label. This harness proves the transport wiring only, not privacy.
+name: deppis-grpcweb
+services:
+  messenger-server:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    expose:
+      - "9090"
+
+  envoy:
+    image: envoyproxy/envoy:v1.31.2
+    command: ["-c", "/etc/envoy/envoy.yaml", "--log-level", "warning"]
+    volumes:
+      - ../envoy/envoy.yaml:/etc/envoy/envoy.yaml:ro
+    ports:
+      - "8080:8080"
+    depends_on:
+      - messenger-server
+
+  grpcweb-client:
+    image: node:22-bookworm-slim
+    working_dir: /app
+    volumes:
+      - ./client.js:/app/client.js:ro
+    environment:
+      ENVOY: "http://envoy:8080"
+    command: ["node", "/app/client.js"]
+    depends_on:
+      - envoy

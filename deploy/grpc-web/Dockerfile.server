@@ -1,0 +1,13 @@
+# The h2c gRPC ObliviousStore backend (Envoy's gRPC-web upstream) — T032c.
+#
+# Built from the staged classpath produced by `sbt transport/stageServer` (sbt-native-packager has no
+# sbt-2 build yet, so the server is staged as a plain lib/ of jars; see build.sbt). Run `run.sh`, which
+# stages into ./server-lib before building this image. JDK 26 to match the project toolchain.
+FROM eclipse-temurin:26-jre
+WORKDIR /app
+COPY server-lib/ /app/lib/
+ENV PORT=9090
+EXPOSE 9090
+# --enable-native-access is harmless here (the store path loads no native libs) but mirrors the
+# project's run options for parity.
+ENTRYPOINT ["java", "--enable-native-access=ALL-UNNAMED", "-cp", "/app/lib/*", "transport.round.GrpcWebBackendServer"]
