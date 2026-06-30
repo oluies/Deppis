@@ -49,6 +49,50 @@ object Dcap:
     // `NonFatal` lets fatal/control throwables (OOM, interrupt) propagate rather than be masked.
     catch case NonFatal(_) => false
 
+  /** Wire serialization of a FULL quote (signed body ‖ length-prefixed signature) for transport as
+    * the DCAP `evidence` blob. `parseQuote` is the inverse and returns `None` on any malformed/short
+    * input (fail closed — a relying party must not appraise a quote it couldn't parse). In production
+    * `evidence` is the Intel SGX quote-v3 binary; this length-prefixed form stands in for it on the
+    * dev path while preserving the exact `(measurement ‖ key ‖ nonce ‖ signature)` binding. */
+  def serializeQuote(q: Quote): Array[Byte] = quoteBody(q) ++ lp(q.signature.toArray)
+
+  /** Wire serialization of a `Measurement` (`mrEnclave ‖ mrSigner`, length-prefixed) — the transparency
+    * reference values a relying party pins; `parseMeasurement` is the inverse (None on malformed). */
+  def serializeMeasurement(m: Measurement): Array[Byte] =
+    lp(m.mrEnclave.toArray) ++ lp(m.mrSigner.toArray)
+
+  def parseMeasurement(bytes: Array[Byte]): Option[Measurement] =
+    readLps(bytes, 2) match
+      case Some(Seq(me, ms)) => Some(Measurement(me.toVector, ms.toVector))
+      case _ => None
+
+  def parseQuote(bytes: Array[Byte]): Option[Quote] =
+    readLps(bytes, 5) match
+      case Some(Seq(me, ms, key, nonce, sig)) =>
+        Some(
+          Quote(Measurement(me.toVector, ms.toVector), key.toVector, nonce.toVector, sig.toVector)
+        )
+      case _ => None
+
+  /** Read exactly `n` length-prefixed (4-byte big-endian length ‖ bytes) fields, requiring the input
+    * to be consumed exactly. Bounds-checked at every step; any overflow/underflow ⇒ `None`. */
+  private def readLps(b: Array[Byte], n: Int): Option[Seq[Array[Byte]]] =
+    val out = scala.collection.mutable.ArrayBuffer.empty[Array[Byte]]
+    var off = 0
+    var ok = true
+    var i = 0
+    while ok && i < n do
+      if off + 4 > b.length then ok = false
+      else
+        val len =
+          ((b(off) & 0xff) << 24) | ((b(off + 1) & 0xff) << 16) |
+            ((b(off + 2) & 0xff) << 8) | (b(off + 3) & 0xff)
+        off += 4
+        if len < 0 || off + len > b.length then ok = false
+        else { out += b.slice(off, off + len); off += len }
+      i += 1
+    if ok && off == b.length then Some(out.toSeq) else None
+
   private def lp(b: Array[Byte]): Array[Byte] = intBytes(b.length) ++ b
   private def intBytes(v: Int): Array[Byte] =
     Array(
