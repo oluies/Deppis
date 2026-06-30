@@ -144,3 +144,28 @@ land without it.
 - Re-check T041c: round-derived addressing changes the collision-deferral story (deferral no longer
   "waits under the persistent counter token"); this is the source of the strand in A/B.
 - Update `RecurrenceGapsSpec` (#2/#3 flip to assert non-recurrence), `threat-model.md`, and this doc.
+
+## Post-implementation review (robustness)
+
+A holistic three-reviewer pass over the merged implementation found **no correctness or privacy bug**
+(content delivery, dedup, token non-recurrence, active-vs-idle uniformity, forward-secrecy/PCS,
+atomic-receive, and key wipes all verified sound). Two robustness notes, both verified bounded:
+
+1. **`Ns` coupling on ack refresh (verified bounded; `engine.ArqStressSpec`).** To refresh the
+   piggybacked ack, the head is re-encrypted when our `highRecv` advances — and `encrypt` advances the
+   sending ratchet `Ns`. So `Ns` grows with *messages received from the peer*, and with round-derived
+   stranding a returning-from-skip receiver can stash orphan skipped keys; in principle a sustained
+   asymmetric flood plus a long-lived DH epoch could push one epoch's `Ns − nr` gap past `MaxSkip`
+   (1000) and stall. In the real protocol this is **not reachable**: stop-and-wait bounds the peer to
+   ~one in-flight message (it can only advance as *we* ack), and any sustained bidirectional traffic
+   turns over DH epochs (each DH step resets `nr` and the gap). `ArqStressSpec` confirms a sustained
+   50-each-way bidirectional run and an 80-message one-directional stream both deliver fully with no
+   stall — these are regression guards for the bound. If a future change ever needs to remove the
+   coupling outright, the clean fix is to carry the 8-byte `ackSeq` in the **HK-sealed header** instead
+   of the MK-sealed body, so the receiver reads (and the sender refreshes) the ack *without* consuming a
+   message key / advancing `Ns` — at the cost of an 8-byte-wider header.
+2. **Owed-ack latency under multi-buddy contention (latency, not loss).** A buddy with a queued head is
+   excluded from `ackTarget` (its ack rides its own head transmit), and with one write/round the head
+   ships only when the `sendCursor` rotation selects it. So an owed ack can wait extra rounds when many
+   buddies contend; meanwhile the peer keeps retransmitting (and we keep re-acking), so **nothing is
+   dropped** — only round-count latency. Acceptable for a one-op-per-round private channel.
