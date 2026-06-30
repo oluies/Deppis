@@ -128,13 +128,26 @@ both halves: **without** `crypto`, `new ProtocolEngine()` throws at construction
 privacy-status + add-buddy (X25519 keygen + KDF) flow runs. Everything else (the
 ratchet, the JSON boundary, `@noble`) runs unmodified.
 
-The remaining native wiring (the `flutter_js`-backed `engine_factory_io.dart`
-with the Dart-`Random.secure()` → `getRandomValues` bridge, the bundled asset,
-and the `ios/` scaffold) is gated on the prerequisites below.
+**This is now wired and built (iOS).** `engine_factory_io.dart` loads
+`assets/protocol-engine.bundle.js` into a `flutter_js` runtime, injects
+`crypto.getRandomValues` from a `Random.secure()`-seeded pool, and constructs the
+same `ScalaJsEngine` the web client uses. `createEngine()` is `async` (native
+loads the bundle from an asset); on any failure — or on the Dart VM under
+`flutter test` — it falls back to the labeled `DevEngine`. Verified on the iOS
+simulator: the app logs `Native ScalaJsEngine initialized (flutter_js) — real
+protocol-core engine.` (i.e. the real engine, not the stub). `flutter analyze` +
+`flutter test` (30) stay green; `flutter build ios --simulator` succeeds.
 
-**Prerequisites (not installable everywhere).** Building/running native needs a
-**full Xcode** + **CocoaPods** + an iOS **simulator** (iOS), or the Android SDK
-+ an emulator (Android), plus `flutter create --platforms=ios,android .` to
-scaffold the platform folders. `flutter_js` is a plugin with native code, so it
-cannot be unit-tested on the Dart VM (`flutter test`) or built for web — guard
-its import to the native factory so it does not affect those builds.
+**RNG bound (honest).** JavaScriptCore exposes no synchronous path back to Dart,
+so `getRandomValues` is served from a pre-seeded 256 KB pool of OS entropy
+(`Random.secure()`). Every byte is OS CSPRNG (no weakened/seeded PRNG); the only
+limit is pool *size* — it throws on exhaustion rather than degrading. A
+production build refills the pool from a synchronous native bridge.
+
+**Prerequisites.** Building native needs a **full Xcode** + **CocoaPods** + the
+iOS platform/simulator (`xcodebuild -downloadPlatform iOS`), plus
+`flutter create --platforms=ios .`. Build the asset first with
+`protocol-core-js/build-jsc-bundle.sh`. `flutter_js` is a native plugin, so it is
+imported ONLY by `engine_factory_io.dart` (web + `flutter test` never load it).
+Android is the same shape (QuickJS) but its `ios/`-equivalent scaffold + SDK are
+not set up here.

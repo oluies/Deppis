@@ -34,7 +34,17 @@ EOF
 echo "[bundle] bundling self-contained IIFE (esbuild) ..."
 npx --no-install esbuild "$OUT/.entry.js" --bundle --format=iife --platform=browser \
   --legal-comments=none --outfile="$OUT/engine.bundle.js"
-rm -f "$OUT/.entry.js"
 echo "[bundle] wrote $OUT/engine.bundle.js ($(wc -c < "$OUT/engine.bundle.js") bytes)"
 echo "[bundle] verifying it runs standalone ..."
 node protocol-core-js/e2e/engine-jsc.cjs "$OUT/engine.bundle.js"
+
+# Also emit the MINIFIED bundle that the Flutter native client ships as an asset (loaded into the
+# flutter_js runtime by clients/flutter/lib/engine/engine_factory_io.dart). Committed, like the web
+# bundle, so the app builds from a fresh checkout.
+ASSET=clients/flutter/assets/protocol-engine.bundle.js
+mkdir -p "$(dirname "$ASSET")"
+npx --no-install esbuild "$OUT/.entry.js" --bundle --minify --format=iife --platform=browser \
+  --legal-comments=none --outfile="$ASSET"
+rm -f "$OUT/.entry.js"
+echo "[bundle] wrote $ASSET ($(wc -c < "$ASSET") bytes, minified)"
+node protocol-core-js/e2e/engine-jsc.cjs "$ASSET"
