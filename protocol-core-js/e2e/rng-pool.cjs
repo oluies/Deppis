@@ -13,28 +13,27 @@ vm.runInContext(code, sb);
 
 function fail(m) { console.error('RNG-POOL-FAIL:', m); process.exit(1); }
 
-// A known pool: bytes 0..63. Its base64 round-trips to exactly those bytes.
-const known = Buffer.from(Array.from({ length: 64 }, (_, i) => i));
-const b64 = known.toString('base64');
-
-const len = sb.__installSecureRandomPool(b64);
-if (len !== 64) fail(`decoder mis-sized the pool: got ${len}, want 64 (the (len*6)>>3 math drifted)`);
-
-// Serve in order, across multiple draws.
-const a = new Uint8Array(40);
-sb.globalThis.crypto.getRandomValues(a);
-if (!a.every((v, i) => v === i)) fail(`first draw wrong bytes: ${a}`);
-const b = new Uint8Array(24);
-sb.globalThis.crypto.getRandomValues(b);
-if (!b.every((v, i) => v === i + 40)) fail(`second draw wrong bytes: ${b}`);
-
-// Exhaustion: the pool is now empty (64 served) — the next byte must throw DISTINCTLY.
-let threw = '';
-try { sb.globalThis.crypto.getRandomValues(new Uint8Array(1)); } catch (e) { threw = e.message; }
-if (!/ENTROPY_POOL_EXHAUSTED/.test(threw)) fail(`exhaustion not surfaced distinctly: "${threw}"`);
+// Cover ALL THREE base64 remainder classes so the decoder's partial-group handling can't drift:
+//   len % 3 == 0 → no padding, 1 → "==" (2 pad), 2 → "=" (1 pad). For each, the decoded pool must be
+// byte-identical to the input and must serve those exact bytes in order, then exhaust distinctly.
+for (const len of [63, 64, 65]) {
+  const known = Buffer.from(Array.from({ length: len }, (_, i) => (i * 7 + 3) & 0xff));
+  const decoded = sb.__installSecureRandomPool(known.toString('base64'));
+  if (decoded !== len) fail(`len=${len}: decoder mis-sized the pool: got ${decoded} (size/padding math drifted)`);
+  // Serve the whole pool across two draws and check every byte round-tripped.
+  const out = new Uint8Array(len);
+  sb.globalThis.crypto.getRandomValues(out.subarray(0, len - 5));
+  sb.globalThis.crypto.getRandomValues(out.subarray(len - 5));
+  if (!out.every((v, i) => v === known[i])) fail(`len=${len}: served bytes != pool (padding/remainder bug)`);
+  // Now exhausted — the next byte must throw DISTINCTLY.
+  let threw = '';
+  try { sb.globalThis.crypto.getRandomValues(new Uint8Array(1)); } catch (e) { threw = e.message; }
+  if (!/ENTROPY_POOL_EXHAUSTED/.test(threw)) fail(`len=${len}: exhaustion not surfaced distinctly: "${threw}"`);
+}
 
 // getRandomValues returns the same array it was given (Web Crypto contract noble relies on).
+sb.__installSecureRandomPool(Buffer.from([1, 2, 3, 4]).toString('base64'));
 const arr = new Uint8Array(0);
 if (sb.globalThis.crypto.getRandomValues(arr) !== arr) fail('getRandomValues must return its argument');
 
-console.log('RNG-POOL-OK: decoder sizes correctly, serves OS bytes in order, exhaustion throws ENTROPY_POOL_EXHAUSTED');
+console.log('RNG-POOL-OK: decoder correct for all base64 paddings (0/1/2), serves OS bytes in order, exhaustion throws ENTROPY_POOL_EXHAUSTED');
