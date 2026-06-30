@@ -54,9 +54,11 @@ RUN set -eu; \
     for d in a b; do mkdir -p $d; \
       gramine-manifest obsd.manifest.template $d/obsd.manifest; \
       gramine-sgx-sign --manifest $d/obsd.manifest --output $d/obsd.manifest.sgx >$d/sign.log 2>&1; \
-      grep -oiE '[0-9a-f]{64}' $d/sign.log | head -1 > $d/mr.hex; \
+      # Anchor extraction to the `Measurement:` section (the hex is on the line AFTER the label), so a
+      # trusted-file SHA-256 or other digest elsewhere in the log can never be mistaken for MRENCLAVE.
+      grep -iA1 'Measurement:' $d/sign.log | grep -oiE '[0-9a-f]{64}' | head -1 > $d/mr.hex; \
     done; \
-    test -s a/mr.hex; \
+    test -s a/mr.hex && test "$(wc -c < a/mr.hex)" -eq 65; \
     echo "MRENCLAVE_A=$(cat a/mr.hex)"; echo "MRENCLAVE_B=$(cat b/mr.hex)"; \
     test "$(cat a/mr.hex)" = "$(cat b/mr.hex)" || { echo "ERROR: MRENCLAVE not reproducible"; exit 1; }; \
     echo "MRENCLAVE-REPRODUCIBLE-OK"; \

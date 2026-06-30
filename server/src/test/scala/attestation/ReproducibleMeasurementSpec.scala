@@ -5,9 +5,11 @@ import org.scalatest.funsuite.AnyFunSuite
 /** T057 end-to-end: the `MRENCLAVE` produced by the reproducible Docker + Gramine build
   * (`deploy/enclave/Dockerfile` — a static-musl `obsd`, signed twice with an identical measurement)
   * flows through the transparency [[ReferenceLog]] and is trusted ONLY via an inclusion proof to a
-  * pinned root. This pins the recorded reproducible measurement (`deploy/enclave/measurement.txt`), so a
-  * drift in the build that changes `MRENCLAVE` is caught here, and exercises the publish → prove →
-  * pinned-root trust chain with the REAL produced value (not a synthetic one).
+  * pinned root. The value below is a **manually-pinned snapshot** of the reproducible build's output
+  * (re-pinned by running `deploy/enclave/reproduce.sh` and updating `measurement.txt` + this constant —
+  * the CI build is not run here); a guard test asserts the two copies stay in lockstep. The point is to
+  * exercise the publish → prove → pinned-root trust chain with the REAL produced value, not a synthetic
+  * one.
   *
   * `MRENCLAVE` is the SHA-256 measurement of the enclave code/data pages; it is independent of the
   * signing key and is verified reproducible by the build itself (two independent signings must agree).
@@ -28,6 +30,28 @@ class ReproducibleMeasurementSpec extends AnyFunSuite:
 
   test("the reproducible MRENCLAVE is a 32-byte SHA-256 measurement"):
     assert(mrEnclave.size == 32, "MRENCLAVE must be a 32-byte measurement")
+
+  test("the pinned MRENCLAVE matches deploy/enclave/measurement.txt (no silent divergence)"):
+    // Single source of truth: the constant above and the published measurement file must agree, so a
+    // re-pin after a rebuild updates both. Locate the file by walking up from the test's working dir.
+    val mrHex = "45296a439f2db45b48eec1f4611699f740be707ef5b979f52be7b1a177c6e64f"
+    var dir = java.nio.file.Paths.get("").toAbsolutePath
+    var found = Option.empty[java.nio.file.Path]
+    while found.isEmpty && dir != null do
+      val cand = dir.resolve("deploy/enclave/measurement.txt")
+      if java.nio.file.Files.exists(cand) then found = Some(cand)
+      dir = dir.getParent
+    val path =
+      found.getOrElse(fail("deploy/enclave/measurement.txt not found from the test working dir"))
+    val txt = new String(java.nio.file.Files.readAllBytes(path), "UTF-8")
+    val line =
+      txt.linesIterator.find(_.trim.startsWith("MRENCLAVE")).getOrElse(fail("no MRENCLAVE line"))
+    val recorded = line.split("=", 2)(1).trim
+    assert(
+      recorded == mrHex,
+      s"measurement.txt MRENCLAVE ($recorded) must match the pinned constant"
+    )
+    assert(mrEnclave == hex(mrHex)) // and the constant in this spec is exactly that value
 
   test(
     "published to the ReferenceLog, the measurement is trusted via inclusion proof to the pinned root"
