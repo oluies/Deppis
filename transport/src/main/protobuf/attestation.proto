@@ -1,0 +1,24 @@
+syntax = "proto3";
+package metadatamessenger.attestation.v1;
+
+// RATS (RFC 9334) background-check attestation contract for the PING/PONG path.
+// INVARIANTS (Constitution IX/X, NON-NEGOTIABLE):
+//   - The enclave public key is delivered ONLY inside a verifier-signed result that the client
+//     appraises against transparency-logged CoRIM reference values, with a fresh nonce.
+//   - A SPIFFE SVID / mesh cert / service identity MUST NOT substitute for this result.
+service AttestationService {
+  // Client sends a freshness nonce; gets back evidence + a verifier-signed appraisal result.
+  rpc Attest(AttestRequest) returns (AttestResponse);
+}
+
+message AttestRequest {
+  bytes client_nonce = 1;       // freshness; result MUST echo it or be rejected
+}
+message AttestResponse {
+  bytes evidence = 1;           // SGX DCAP quote or TEE-agnostic token from the enclave
+  bytes verifier_result = 2;    // Veraison-signed attestation result (appraised vs CoRIM log)
+  bytes verifier_signature = 3; // signature over verifier_result
+  bytes echoed_nonce = 4;       // MUST equal client_nonce
+  bytes enclave_public_key = 5; // ACCEPTED BY CLIENT ONLY AFTER passing appraisal + nonce check
+  repeated bytes reference_values = 6; // CoRIM values pinned by policy (transparency log)
+}
