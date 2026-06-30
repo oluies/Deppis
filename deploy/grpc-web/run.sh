@@ -38,6 +38,10 @@ SRV_IP="$(ipof messenger-server)"; [ -n "$SRV_IP" ] || { echo "[run] no server I
 
 echo "[run] starting Envoy (gRPC-web :8080 -> $SRV_IP:9090) ..."
 sed "s/address: messenger-server,/address: $SRV_IP,/" ../envoy/envoy.yaml > /tmp/deppis-envoy.runtime.yaml
+# Fail loudly if the endpoint form in envoy.yaml ever changes and the substitution silently no-ops
+# (otherwise Envoy would start with an unresolvable upstream and the client would just retry-exhaust).
+grep -q "address: $SRV_IP," /tmp/deppis-envoy.runtime.yaml \
+  || { echo "[run] envoy upstream address substitution failed (envoy.yaml endpoint format changed?)" >&2; exit 1; }
 container run -d --name envoy --network "$NET" -p 8080:8080 \
   -v "/tmp/deppis-envoy.runtime.yaml:/etc/envoy/envoy.yaml" \
   envoyproxy/envoy:v1.31.2 -c /etc/envoy/envoy.yaml --log-level warning >/dev/null

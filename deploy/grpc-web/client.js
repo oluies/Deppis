@@ -7,7 +7,7 @@ const http = require('http');
 
 const ENVOY = process.env.ENVOY || 'http://envoy:8080';
 const PATH = '/metadatamessenger.store.v1.ObliviousStore/WriteBatch';
-const ROUND = 42;
+const ROUND = 42; // < 128, so it encodes as a single varint byte (the response check relies on this)
 
 function varint(n) { const o = []; while (n > 127) { o.push((n & 0x7f) | 0x80); n >>>= 7; } o.push(n); return o; }
 function be32(n) { const b = Buffer.alloc(4); b.writeUInt32BE(n >>> 0); return b; }
@@ -52,8 +52,10 @@ function attempt() {
         const statusOk = hdrStatus === '0' || hdrStatus === undefined && (trailerStr.includes('grpc-status:0') || trailerStr.includes('grpc-status: 0'));
         const dataFrame = frames.find((f) => !f.trailer);
         if (!dataFrame) return reject(new Error(`no data frame; status hdr=${hdrStatus} trailer="${trailerStr}" body=${body.toString('hex')}`));
-        const p = dataFrame.data; // WriteBatchResponse { round_id = 1 } → 0x08 <varint>
-        if (p[0] === 0x08 && p[1] === ROUND && statusOk) {
+        const p = dataFrame.data; // WriteBatchResponse { round_id = 1 } → 0x08 <varint(ROUND)>
+        // ROUND < 128 ⇒ field 1 is exactly [0x08, ROUND]; guard the length before indexing so a
+        // truncated/empty frame reports clearly rather than comparing `undefined`.
+        if (p.length >= 2 && p[0] === 0x08 && p[1] === ROUND && statusOk) {
           console.log(`GRPC-WEB-ROUNDTRIP-OK: WriteBatch(round_id=${ROUND}) echoed through Envoy; grpc-status ok`);
           return resolve(true);
         }
