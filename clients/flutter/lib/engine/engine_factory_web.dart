@@ -22,7 +22,7 @@ extension type _JsProtocolEngine._(JSObject _) implements JSObject {
 /// Construction is guarded: an incompatible or malformed bundle (which would throw on the first
 /// `handle` call in the [ScalaJsEngine] constructor) degrades to the clearly-labeled [DevEngine]
 /// rather than crashing the app at startup — the bundle-presence check alone is not enough.
-ProtocolEngine createPlatformEngine() {
+Future<ProtocolEngine> createPlatformEngine() async {
   if (!globalContext.has('ProtocolEngine')) {
     debugPrint('ProtocolEngine bundle not loaded; using DevEngine (no metadata privacy).');
     return DevEngine();

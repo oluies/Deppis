@@ -5,10 +5,12 @@ import 'engine/protocol_engine.dart';
 import 'state/app_state.dart';
 import 'ui/home_screen.dart';
 
-void main() {
-  // Platform-selected engine: the real Scala.js `protocol-core` engine (T019) on web when its
-  // bundle is loaded, the labeled DevEngine otherwise. The UI talks only to [ProtocolEngine].
-  runApp(MetadataMessengerApp(engine: createEngine()));
+Future<void> main() async {
+  // Platform-selected engine: the real Scala.js `protocol-core` engine (T019) on web (bundle via a
+  // script tag) and on iOS/Android (bundle loaded into a flutter_js runtime), the labeled DevEngine
+  // otherwise. The UI talks only to [ProtocolEngine]. Async because native loads the bundle asset.
+  WidgetsFlutterBinding.ensureInitialized();
+  runApp(MetadataMessengerApp(engine: await createEngine()));
 }
 
 class MetadataMessengerApp extends StatefulWidget {
