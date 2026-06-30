@@ -138,11 +138,18 @@ simulator: the app logs `Native ScalaJsEngine initialized (flutter_js) — real
 protocol-core engine.` (i.e. the real engine, not the stub). `flutter analyze` +
 `flutter test` (30) stay green; `flutter build ios --simulator` succeeds.
 
-**RNG bound (honest).** JavaScriptCore exposes no synchronous path back to Dart,
-so `getRandomValues` is served from a pre-seeded 256 KB pool of OS entropy
-(`Random.secure()`). Every byte is OS CSPRNG (no weakened/seeded PRNG); the only
-limit is pool *size* — it throws on exhaustion rather than degrading. A
-production build refills the pool from a synchronous native bridge.
+**RNG (OS entropy, on-demand refill).** `getRandomValues` is served from an
+8 KB seed pool of OS entropy (`Random.secure()`) that **tops up synchronously**:
+when it runs low, `assets/rng-pool.js` calls a flutter_js `sendMessage` channel
+whose Dart handler returns fresh `Random.secure()` bytes — and on JavaScriptCore
+`sendMessage` returns the (non-Future) handler result synchronously
+(`jscore_runtime._sendMessage`), which fits `getRandomValues`'s synchronous
+contract. So the pool is effectively **unbounded**; every byte is OS CSPRNG (no
+PRNG anywhere). `ENTROPY_POOL_EXHAUSTED` (surfaced as the `ENTROPY_EXHAUSTED`
+engine error) now only fires if the channel itself fails to deliver — e.g. a
+runtime without a synchronous bridge. Validated on the iOS simulator by seeding a
+4-byte pool: `new ProtocolEngine()` still constructs, which is only possible if
+the refill bridge delivered entropy synchronously during construction.
 
 **Prerequisites.** Building native needs a **full Xcode** + **CocoaPods** + the
 iOS platform/simulator (`xcodebuild -downloadPlatform iOS`), plus

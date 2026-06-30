@@ -66,26 +66,43 @@ Future<ProtocolEngine> createPlatformEngine() async {
   }
 }
 
-/// Inject `crypto.getRandomValues` backed by the OS CSPRNG.
+/// Inject `crypto.getRandomValues` backed by the OS CSPRNG, with **on-demand refill**.
 ///
-/// RNG approach (and its honest bound): JavaScriptCore exposes no synchronous path back to Dart, so
-/// rather than a (possibly async) per-call bridge we **pre-seed a pool** of bytes from
-/// [Random.secure] (the platform CSPRNG — `SecRandomCopyBytes` on iOS) and serve `getRandomValues`
-/// from it. Every byte is OS entropy (no weakened/seeded PRNG — Constitution I/II); the only limit is
-/// the pool *size* — exhausting it throws `ENTROPY_POOL_EXHAUSTED` (surfaced as the `ENTROPY_EXHAUSTED`
-/// engine error) rather than returning low-quality bytes. The pool is sized for a long session; a
-/// production build would refill it from a synchronous native bridge.
+/// Every byte comes from [Random.secure] (the platform CSPRNG — `SecRandomCopyBytes` on iOS) — there
+/// is no PRNG anywhere (Constitution I/II). A small seed pool covers the first construction without a
+/// round-trip; thereafter `getRandomValues` tops the pool up **synchronously** through a flutter_js
+/// `sendMessage` channel: on JavaScriptCore, `sendMessage` returns the Dart handler's (non-Future)
+/// String result synchronously (`jscore_runtime._sendMessage`), so the bridge fits `getRandomValues`'s
+/// synchronous contract. The pool is therefore effectively unbounded — no `ENTROPY_POOL_EXHAUSTED` in
+/// normal operation (that error only fires if the channel ever fails to deliver, e.g. on a runtime
+/// without a synchronous bridge).
 ///
-/// The decoder + serve/exhaust logic live in `assets/rng-pool.js` (a single source of truth, tested by
-/// `protocol-core-js/e2e/rng-pool.cjs`); here we just generate the OS bytes and hand them in as base64.
+/// The decoder + serve/refill/exhaust logic live in `assets/rng-pool.js` (single source of truth,
+/// tested by `protocol-core-js/e2e/rng-pool.cjs`); here we generate the OS bytes and register the
+/// channel that delivers more.
 Future<void> _installSecureRandom(JavascriptRuntime rt) async {
-  const poolBytes = 256 * 1024; // ~thousands of keygens/nonces per session
   final rng = Random.secure();
-  final pool = Uint8List(poolBytes);
-  for (var i = 0; i < poolBytes; i++) {
-    pool[i] = rng.nextInt(256);
+  Uint8List osBytes(int n) {
+    final b = Uint8List(n);
+    for (var i = 0; i < n; i++) {
+      b[i] = rng.nextInt(256);
+    }
+    return b;
   }
+
+  // The synchronous refill channel: JS `sendMessage('deppisEntropy', JSON.stringify(n))` -> this
+  // handler -> base64 of n fresh OS-CSPRNG bytes, returned synchronously to JS (JSC).
+  rt.onMessage('deppisEntropy', (dynamic args) {
+    final n = (args is num) ? args.toInt() : int.parse(args.toString());
+    return base64Encode(osBytes(n.clamp(1, 1 << 20)));
+  });
+
+  const seedBytes =
+      8 * 1024; // covers the first construction before any refill round-trip
   final installer = await rootBundle.loadString('assets/rng-pool.js');
   rt.evaluate(installer); // defines globalThis.__installSecureRandomPool
-  rt.evaluate('__installSecureRandomPool(${jsonEncode(base64Encode(pool))});');
+  rt.evaluate(
+    '__installSecureRandomPool(${jsonEncode(base64Encode(osBytes(seedBytes)))}, '
+    'function (n) { return sendMessage("deppisEntropy", JSON.stringify(n)); });',
+  );
 }
