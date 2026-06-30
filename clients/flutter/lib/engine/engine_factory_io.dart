@@ -26,22 +26,42 @@ import 'scalajs_engine.dart';
 /// its real backing, and the reason is logged.
 Future<ProtocolEngine> createPlatformEngine() async {
   try {
-    final bundle = await rootBundle.loadString('assets/protocol-engine.bundle.js');
+    final bundle = await rootBundle.loadString(
+      'assets/protocol-engine.bundle.js',
+    );
     final rt = getJavascriptRuntime();
-    _installSecureRandom(rt);
+    await _installSecureRandom(
+      rt,
+    ); // BEFORE the bundle: construction needs crypto.getRandomValues
     rt.evaluate(bundle); // defines globalThis.ProtocolEngine
     rt.evaluate('globalThis.__engine = new ProtocolEngine();');
     // The engine-api boundary: a synchronous String(request)->String(response) call, exactly the
     // contract ScalaJsEngine speaks. `evaluate` is synchronous in flutter_js.
     String handle(String request) {
       final res = rt.evaluate('__engine.handle(${jsonEncode(request)})');
+      if (res.isError) {
+        // A JS RUNTIME fault (e.g. the entropy pool exhausting, or any internal engine fault) — NOT an
+        // engine-api error envelope. Surface it AS that envelope so ScalaJsEngine handles it like any
+        // engine error (typed EngineException + EngineError event) instead of choking on jsonDecode of
+        // raw JS error text. The code is content-independent (Constitution II); the UI never renders it.
+        final code = res.stringResult.contains('ENTROPY_POOL_EXHAUSTED')
+            ? 'ENTROPY_EXHAUSTED'
+            : 'ENGINE_RUNTIME';
+        return jsonEncode({
+          'error': {'code': code, 'message': code},
+        });
+      }
       return res.stringResult;
     }
 
-    debugPrint('Native ScalaJsEngine initialized (flutter_js) — real protocol-core engine.');
+    debugPrint(
+      'Native ScalaJsEngine initialized (flutter_js) — real protocol-core engine.',
+    );
     return ScalaJsEngine(handle);
   } catch (e) {
-    debugPrint('Native ScalaJsEngine init failed ($e); using DevEngine (no metadata privacy).');
+    debugPrint(
+      'Native ScalaJsEngine init failed ($e); using DevEngine (no metadata privacy).',
+    );
     return DevEngine();
   }
 }
@@ -52,39 +72,20 @@ Future<ProtocolEngine> createPlatformEngine() async {
 /// rather than a (possibly async) per-call bridge we **pre-seed a pool** of bytes from
 /// [Random.secure] (the platform CSPRNG — `SecRandomCopyBytes` on iOS) and serve `getRandomValues`
 /// from it. Every byte is OS entropy (no weakened/seeded PRNG — Constitution I/II); the only limit is
-/// the pool *size* — exhausting it throws rather than returning low-quality bytes. The pool is sized
-/// for a long session; a production build would refill it from a synchronous native bridge.
-void _installSecureRandom(JavascriptRuntime rt) {
+/// the pool *size* — exhausting it throws `ENTROPY_POOL_EXHAUSTED` (surfaced as the `ENTROPY_EXHAUSTED`
+/// engine error) rather than returning low-quality bytes. The pool is sized for a long session; a
+/// production build would refill it from a synchronous native bridge.
+///
+/// The decoder + serve/exhaust logic live in `assets/rng-pool.js` (a single source of truth, tested by
+/// `protocol-core-js/e2e/rng-pool.cjs`); here we just generate the OS bytes and hand them in as base64.
+Future<void> _installSecureRandom(JavascriptRuntime rt) async {
   const poolBytes = 256 * 1024; // ~thousands of keygens/nonces per session
   final rng = Random.secure();
   final pool = Uint8List(poolBytes);
   for (var i = 0; i < poolBytes; i++) {
     pool[i] = rng.nextInt(256);
   }
-  // Pass the pool as base64 + a tiny pure-JS decoder (atob is absent in JSC/QuickJS).
-  final b64 = base64Encode(pool);
-  rt.evaluate('''
-(function () {
-  var B64 = "$b64";
-  var T = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-  var lut = {}; for (var i = 0; i < T.length; i++) lut[T.charAt(i)] = i;
-  var clean = B64.replace(/=+\$/, "");
-  var pool = new Uint8Array((clean.length * 6) >> 3);
-  var acc = 0, bits = 0, o = 0;
-  for (var j = 0; j < clean.length; j++) {
-    acc = (acc << 6) | lut[clean.charAt(j)]; bits += 6;
-    if (bits >= 8) { bits -= 8; pool[o++] = (acc >> bits) & 0xff; }
-  }
-  var off = 0;
-  globalThis.crypto = {
-    getRandomValues: function (arr) {
-      var n = arr.length;
-      if (off + n > pool.length) throw new Error("entropy pool exhausted");
-      for (var k = 0; k < n; k++) arr[k] = pool[off + k];
-      off += n;
-      return arr;
-    }
-  };
-})();
-''');
+  final installer = await rootBundle.loadString('assets/rng-pool.js');
+  rt.evaluate(installer); // defines globalThis.__installSecureRandomPool
+  rt.evaluate('__installSecureRandomPool(${jsonEncode(base64Encode(pool))});');
 }

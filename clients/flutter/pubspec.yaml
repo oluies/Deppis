@@ -66,6 +66,9 @@ flutter:
   # `protocol-core-js/build-jsc-bundle.sh` (committed, minified — like web/protocol-engine.js).
   assets:
     - assets/protocol-engine.bundle.js
+    # The secure-RNG pool installer (decoder + crypto.getRandomValues) the native engine evaluates
+    # before the bundle. Single source, tested by protocol-core-js/e2e/rng-pool.cjs.
+    - assets/rng-pool.js
 
   # An image asset can refer to one or more resolution-specific "variants", see
   # https://flutter.dev/to/resolution-aware-images
