@@ -135,6 +135,21 @@ lazy val transport = (project in file("transport"))
     run / fork := true,
     run / javaOptions += "--enable-native-access=ALL-UNNAMED",
     run / connectInput := true,
+    // Stage the gRPC-web backend server as a plain `lib/` of jars for containerization (T032c,
+    // deploy/grpc-web/). sbt-native-packager has no sbt-2 build yet, so we stage by hand:
+    // `fullClasspathAsJars` packages the project class dirs + all deps as jars, which we copy into
+    // target/grpc-web-server/lib/. Run with `java -cp 'lib/*' transport.round.GrpcWebBackendServer`.
+    TaskKey[Unit]("stageServer") := {
+      val conv = fileConverter.value // sbt 2 virtual files -> real paths
+      val refs = (Runtime / fullClasspathAsJars).value.map(_.data)
+      val out = target.value / "grpc-web-server" / "lib"
+      IO.delete(out); IO.createDirectory(out)
+      refs.foreach { ref =>
+        val f = conv.toPath(ref).toFile
+        IO.copyFile(f, out / f.getName)
+      }
+      streams.value.log.info(s"staged ${refs.length} jars to $out")
+    },
     // Run the ScalaPB generator SANDBOXED: protoc-bridge loads compilerplugin_2.13 (+ its own
     // protoc-bridge_2.13) in an isolated classloader, so it never clashes with sbt-protoc's
     // protoc-bridge_3 (see project/plugins.sbt). `scalapb.gen(grpc = true)` is unavailable here
