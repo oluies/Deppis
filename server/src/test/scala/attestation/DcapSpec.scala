@@ -77,6 +77,29 @@ class DcapSpec extends AnyFunSuite:
     assert(Dcap.quoteBody(q.copy(enclavePublicKey = bytes(1))).toVector != base)
     assert(Dcap.quoteBody(q.copy(measurement = Measurement(bytes(0), mrSigner))).toVector != base)
 
+  // ---- Quote/Measurement wire codec (evidence blob) ----
+
+  test("serializeQuote/parseQuote round-trips a signed quote exactly"):
+    val (_, quote) = signedQuote()
+    assert(Dcap.parseQuote(Dcap.serializeQuote(quote)).contains(quote))
+
+  test("serializeMeasurement/parseMeasurement round-trips"):
+    val m = Measurement(mrEnclave, mrSigner)
+    assert(Dcap.parseMeasurement(Dcap.serializeMeasurement(m)).contains(m))
+
+  test(
+    "parse fails CLOSED (None, never throws) on truncated, trailing-garbage, and overflow input"
+  ):
+    val good = Dcap.serializeQuote(signedQuote()._2)
+    assert(Dcap.parseQuote(good.dropRight(1)).isEmpty, "truncated ⇒ None")
+    assert(Dcap.parseQuote(good :+ 0.toByte).isEmpty, "trailing byte (not consumed exactly) ⇒ None")
+    assert(Dcap.parseQuote(Array.emptyByteArray).isEmpty, "empty ⇒ None")
+    // A crafted maximal length prefix (0x7FFFFFFF) must NOT overflow the bounds check into a negative
+    // index / exception — it must fail closed to None (the documented contract; roborev #181 Medium).
+    val overflow = Array[Byte](0x7f, 0xff.toByte, 0xff.toByte, 0xff.toByte)
+    assert(Dcap.parseQuote(overflow).isEmpty, "overflow length prefix ⇒ None, no throw")
+    assert(Dcap.parseMeasurement(overflow).isEmpty, "overflow length prefix ⇒ None, no throw")
+
   // ---- Fixed known-answer vectors (independent of the round trip) ----
 
   private def hex(s: String): Array[Byte] = s.grouped(2).map(Integer.parseInt(_, 16).toByte).toArray

@@ -1,11 +1,13 @@
 package transport
 
 import metadatamessenger.attestation.v1.attestation.*
-import attestation.{AttestationResult, Measurement, ReferenceValues}
+import attestation.{AttestationResult, Dcap, Measurement, Quote, ReferenceValues}
+import com.google.protobuf.ByteString
 import io.grpc.inprocess.{InProcessChannelBuilder, InProcessServerBuilder}
 import io.grpc.{ManagedChannel, Server}
-import java.security.{KeyPair, KeyPairGenerator, SecureRandom}
+import java.security.{KeyPair, KeyPairGenerator, SecureRandom, Signature}
 import java.security.spec.ECGenParameterSpec
+import scala.concurrent.Future
 import scala.concurrent.ExecutionContext.Implicits.global
 import org.scalatest.funsuite.AnyFunSuite
 
@@ -77,6 +79,31 @@ class AttestationServiceSpec extends AnyFunSuite:
       val foreignRefs = ReferenceValues(Set(Measurement(bytes(7, 7, 7), bytes(8, 8))))
       val client = new AttestationProvisioningClient(stub, kp.getPublic.getEncoded, foreignRefs)
       assert(client.provision() == Left(AttestationResult.MeasurementUntrusted))
+    }
+
+  test("anti-replay: evidence bound to a DIFFERENT nonce than minted ⇒ NonceMismatch, NO key"):
+    // A server that echoes the client's nonce (defeating the cheap echo check) but signs a quote that
+    // BINDS a stale/foreign nonce. The replay must still be caught — by the appraisal's constant-time
+    // nonce-binding check over the signed evidence — not by the echo. Proves the guarantee end-to-end.
+    val kp = ecKeyPair()
+    val foreignNonce = (0 until 16).map(_ => 0x11.toByte).toVector
+    val replayImpl = new AttestationServiceGrpc.AttestationService:
+      def attest(req: AttestRequest): Future[AttestResponse] =
+        val unsigned =
+          Quote(measurement, enclaveKey.toVector, foreignNonce, signature = Vector.empty)
+        val sig = Signature.getInstance("SHA256withECDSA")
+        sig.initSign(kp.getPrivate); sig.update(Dcap.quoteBody(unsigned))
+        val q = unsigned.copy(signature = sig.sign.toVector)
+        Future.successful(
+          AttestResponse(
+            evidence = ByteString.copyFrom(Dcap.serializeQuote(q)),
+            echoedNonce = req.clientNonce, // echo matches ⇒ mismatch must be caught by the binding
+            enclavePublicKey = ByteString.copyFrom(enclaveKey)
+          )
+        )
+    withClient(replayImpl) { stub =>
+      val client = new AttestationProvisioningClient(stub, kp.getPublic.getEncoded, refs)
+      assert(client.provision() == Left(AttestationResult.NonceMismatch))
     }
 
   test("each provision mints a fresh nonce that the evidence binds (freshness, no replay)"):

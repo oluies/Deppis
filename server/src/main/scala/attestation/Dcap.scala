@@ -82,13 +82,16 @@ object Dcap:
     var ok = true
     var i = 0
     while ok && i < n do
-      if off + 4 > b.length then ok = false
+      // Overflow-safe bounds: subtract from `b.length` (never overflows, since 0 <= off <= b.length)
+      // rather than add to `off`. A crafted length prefix (e.g. `7F FF FF FF`) must fail closed to
+      // `None`, never wrap to a negative index and throw — the documented fail-closed contract.
+      if off > b.length - 4 then ok = false
       else
         val len =
           ((b(off) & 0xff) << 24) | ((b(off + 1) & 0xff) << 16) |
             ((b(off + 2) & 0xff) << 8) | (b(off + 3) & 0xff)
         off += 4
-        if len < 0 || off + len > b.length then ok = false
+        if len < 0 || len > b.length - off then ok = false
         else { out += b.slice(off, off + len); off += len }
       i += 1
     if ok && off == b.length then Some(out.toSeq) else None
