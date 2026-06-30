@@ -1,0 +1,26 @@
+# Gramine manifest for the obsd oblivious sidecar — the enclave workload measured by this build.
+#
+# obsd is built as a fully STATIC (musl) PIE, so the enclave TCB is exactly one trusted file (the obsd
+# binary) plus the Gramine LibOS — no system shared libraries enter the measurement, which keeps
+# MRENCLAVE a clean, reproducible function of (obsd bytes ‖ manifest ‖ pinned Gramine loader).
+#
+# This manifest is used for SIGNING/measurement (computing MRENCLAVE). Actually RUNNING obsd inside SGX
+# additionally needs the network/event-loop syscall surface tuned and real SGX hardware — gated.
+
+libos.entrypoint = "/obsd"
+loader.argv = ["obsd"]
+loader.log_level = "none"
+
+# The LibOS needs a /lib mount for its own runtime; obsd itself is static and pulls in nothing here.
+fs.mounts = [
+  { path = "/lib", uri = "file:{{ gramine.runtimedir() }}" },
+]
+
+sgx.debug = false
+sgx.enclave_size = "512M"
+sgx.max_threads = 16
+
+# The whole application TCB: just the static obsd binary (its hash is pinned into MRENCLAVE).
+sgx.trusted_files = [
+  "file:/obsd",
+]

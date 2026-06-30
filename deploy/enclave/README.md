@@ -31,33 +31,55 @@ The **publish-and-prove** half — `server/.../attestation/`:
   from logged entries, and `ReferenceLogTrust.trusts(...)` accepts a measurement only with an inclusion
   proof to the **pinned** root. `ReferenceLogSpec`: logged ⇒ trusted, unlogged ⇒ not, wrong root ⇒ not.
 
-Run: `sbt "server/testOnly attestation.TransparencyLogSpec attestation.ReferenceLogSpec"`.
+Run: `sbt "server/testOnly attestation.TransparencyLogSpec attestation.ReferenceLogSpec attestation.ReproducibleMeasurementSpec"`
+(the last drives the **real** reproducible `MRENCLAVE` from `deploy/enclave/` through this trust chain).
 
-## What is toolchain/hardware-gated (NOT exercisable here)
+## Reproducible build + measurement — Docker + Gramine SGX-sim (DONE, no hardware)
 
-Producing the measurement that gets logged — the **reproducible build** itself — needs the SGX SDK and,
-to verify the result, SGX hardware. It is documented here, not run in CI:
+The reproducible-build → deterministic-measurement half of the chain is now exercisable **with Docker
+alone, no SGX hardware** (`gramine-sgx-sign` computes `MRENCLAVE` on any machine; only *running* the
+enclave needs SGX). Files in this directory:
 
-1. **Deterministic build.** Pin the toolchain (compiler, SGX SDK, linker) by digest; build inside a
-   pinned container; set `SOURCE_DATE_EPOCH`, strip non-deterministic timestamps/paths
-   (`-ffile-prefix-map`), disable parallel-link nondeterminism, and produce `enclave.signed.so`.
-   Two independent builds of the same source MUST yield byte-identical output (verify by diffing the
-   `mrEnclave` from `sgx_sign dump`).
-2. **Extract the measurement.** `sgx_sign dump -enclave enclave.signed.so -dumpfile m.txt` →
-   `mrEnclave` (the SHA-256 measurement of code+data pages) and `mrSigner` (the signer key hash).
-3. **Publish.** Append `Measurement(mrEnclave, mrSigner)` to the `ReferenceLog`, publish the new root as
-   a signed **checkpoint** to the public append-only log (e.g. a Sigstore/Rekor- or Trillian-backed
+- `Dockerfile` — two stages, each with an internal reproducibility gate that **fails the build** unless
+  the result is deterministic:
+  1. **Reproducible obsd.** Builds the `obsd` sidecar as a fully **static (musl) PIE** with pinned
+     toolchain (`rust:1.88.0-bookworm`, digest-pinnable), `--locked` deps, `SOURCE_DATE_EPOCH`,
+     `-C codegen-units=1` (kills parallel-codegen ordering nondeterminism), `-C debuginfo=0`, and
+     `--remap-path-prefix`. It builds **twice** in an identical path and aborts unless the two stripped
+     binaries are byte-identical.
+  2. **Reproducible measurement.** Generates the Gramine manifest (`obsd.manifest.template`) for that
+     binary and signs it **twice**, aborting unless both signings yield the same `MRENCLAVE`. Static
+     linking makes the application TCB exactly one trusted file, so `MRENCLAVE` is a clean function of
+     `(obsd bytes ‖ manifest ‖ pinned Gramine loader)`.
+- `obsd.manifest.template` — the Gramine manifest (entrypoint `/obsd`, single trusted file).
+- `reproduce.sh` — host runner: `./reproduce.sh` prints the measurement; `./reproduce.sh --twice` does a
+  second from-scratch image build and diffs the exported `MRENCLAVE` for cross-invocation determinism.
+- `measurement.txt` — the recorded reproducible values from a reference run (the obsd sha256 + the
+  `MRENCLAVE`). `attestation.ReproducibleMeasurementSpec` pins this `MRENCLAVE` and drives it through the
+  `ReferenceLog` publish → inclusion-proof → pinned-root trust chain end to end.
+
+Run: `docker build -f deploy/enclave/Dockerfile -o type=local,dest=out .` (or `./reproduce.sh`). On an
+arm64 host the amd64 image runs under emulation (slower); on a native x86 CI runner it is fast.
+
+## What is still hardware/collateral-gated
+
+1. **A genuine SGX-signed enclave.** The build above signs with a **throwaway dev key**, not a
+   PCK-endorsed platform key, so `MRSIGNER` is a dev value and `hardwareBacked = false`. A real
+   `enclave.signed.so` measured + quoted by genuine SGX hardware (and verifying the quote) needs SGX.
+   `MRENCLAVE` is key-independent and reproducible here; full `(mrEnclave, mrSigner)` reproducibility
+   additionally requires pinning the signing key — the operator's PCK-endorsed signer in production.
+2. **Publish.** Append `Measurement(mrEnclave, mrSigner)` to the `ReferenceLog`, publish the new root as
+   a signed **checkpoint** to a public append-only log (e.g. a Sigstore/Rekor- or Trillian-backed
    transparency service), and record the consistency proof from the previous checkpoint.
-4. **Pin.** Relying parties (clients) pin a checkpoint root out of band; thereafter a measurement is
-   trusted only via an inclusion proof to a pinned root — the mechanism `ReferenceLogTrust.trusts`
-   implements and tests. NOTE: wiring this pinned-root inclusion check INTO the attestation appraisal
-   path (so the verifier consults a pinned root rather than the full live log) is part of the
-   still-open T056/T058 live-attestation integration; today the verifier appraises against the
-   logged reference set without the pinned-root gate.
+3. **Pin.** Relying parties pin a checkpoint root out of band; thereafter a measurement is trusted only
+   via an inclusion proof to that pinned root — the mechanism `ReferenceLogTrust.trusts` implements and
+   `ReproducibleMeasurementSpec` exercises with the real produced `MRENCLAVE`. Wiring this pinned-root
+   inclusion check INTO the attestation appraisal path (so the verifier consults a pinned root rather
+   than the full live log) is part of the still-open T056/T058 live-attestation integration.
 
-Until steps 1–4 run on real hardware with a real SGX toolchain, no build advertises privacy: the label
-stays `DEV, NO METADATA PRIVACY` (Constitution IV). This directory + the tested log mechanism are the
-honest, reviewable scaffolding that a real attested deployment slots into.
+Until a measurement is produced on real SGX with a PCK-endorsed key AND published to the public log, no
+build advertises privacy: the label stays `DEV, NO METADATA PRIVACY` (Constitution IV). This directory
++ the tested log mechanism are the honest, reviewable scaffolding a real attested deployment slots into.
 
 ## CoRIM note
 
