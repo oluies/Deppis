@@ -83,3 +83,40 @@ class HybridKemSpec extends AnyFunSuite:
     kp.secret.destroy()
     assert(kp.secret.x25519Private.forall(_ == 0.toByte))
     assert(kp.secret.mlkemSecret.forall(_ == 0.toByte))
+
+  test("combiner KAT: fixed inputs pin the exact 32-byte SHA-256 output"):
+    // Pins Label, field order (label ++ ssX ++ ssMl ++ eph ++ peer ++ ct), and the digest alg.
+    // A silent change to any of these would break interop with the future JS @noble/post-quantum
+    // side while still passing every self-consistency/tamper test above. Regenerate ONLY if the
+    // wire construction is INTENTIONALLY changed (and bump the Label/version if so).
+    def fill(n: Int, v: Int): Array[Byte] = Array.fill(n)(v.toByte)
+    val out = HybridKem.combine(
+      ssX25519 = fill(32, 0x11),
+      ssMlKem = fill(32, 0x22),
+      ephemeralX25519Raw = fill(32, 0x33),
+      peerX25519Raw = fill(32, 0x44),
+      mlkemCiphertext = fill(1088, 0x55)
+    )
+    val expectedHex = "fd00ed12313e19b3c4241905c9904c4e7678df58de7f39d2a77e4a6a1f0769d8"
+    val gotHex = out.map(b => "%02x".format(b)).mkString
+    assert(gotHex == expectedHex, s"combiner output drifted: $gotHex")
+
+  test("hybridDecaps rejects a wrong-length ciphertext"):
+    val kp = HybridKem.hybridKeypair()
+    assertThrows[IllegalArgumentException](HybridKem.hybridDecaps(Array.emptyByteArray, kp.secret))
+    assertThrows[IllegalArgumentException](
+      HybridKem.hybridDecaps(new Array[Byte](HybridKem.CiphertextBytes - 1), kp.secret)
+    )
+
+  test("hybridEncaps rejects a wrong-length peer public key"):
+    assertThrows[IllegalArgumentException](HybridKem.hybridEncaps(Array.emptyByteArray))
+    assertThrows[IllegalArgumentException](
+      HybridKem.hybridEncaps(new Array[Byte](HybridKem.PublicKeyBytes + 1))
+    )
+
+  test("hybridEncaps rejects a low-order X25519 peer point (classical leg validation)"):
+    // Splice an all-zero (order-1) X25519 u-coordinate into an otherwise valid peer public key.
+    val kp = HybridKem.hybridKeypair()
+    val bad = kp.publicKey.clone()
+    java.util.Arrays.fill(bad, 0, HybridKem.X25519PublicKeyBytes, 0.toByte)
+    assertThrows[IllegalArgumentException](HybridKem.hybridEncaps(bad))

@@ -48,6 +48,13 @@ import javax.crypto.KeyAgreement
   *   - II: no secret-dependent branches; secrets compared constant-time ([[constantTimeEquals]]) and
   *     heap secret arrays best-effort zeroed. NOTE (as in [[Oqs]]): a copying GC may leave un-zeroed
   *     copies of the heap arrays this API returns — those are the caller's to manage.
+  *
+  * ==Peer-key validation (classical leg)==
+  * The X25519 leg validates the PUBLIC peer u-coordinate before agreement: it rejects the known
+  * low-order / small-subgroup points, rejects an out-of-range encoding (u >= p, which peers could
+  * reduce differently), and rejects an all-zero shared secret as defence in depth. This keeps the
+  * classical leg's "secure if either leg holds" contribution honest even against a malicious peer
+  * key. (A spec-exact X-Wing follow-up would fold this into the standard's own decode rules.)
   */
 object HybridKem:
 
@@ -70,6 +77,65 @@ object HybridKem:
 
   private val X25519 = NamedParameterSpec.X25519
   private def x25519KeyFactory: KeyFactory = KeyFactory.getInstance("XDH")
+
+  // Curve25519 field prime p = 2^255 - 19 (RFC 7748). A well-formed u-coordinate satisfies u < p
+  // after the top bit is masked; an out-of-range p <= u < 2^255 encoding could otherwise be reduced
+  // differently by different peers, silently disagreeing on the classical leg.
+  private val P25519: BigInteger = BigInteger.TWO.pow(255).subtract(BigInteger.valueOf(19))
+
+  /** The 32-byte little-endian encodings of the low-order Curve25519 u-coordinates (order 1, 2, 4,
+    * and 8 points, plus their "unmasked" twin). A peer point equal to one of these forces the RFC
+    * 7748 X25519 shared secret to all-zero regardless of our scalar, i.e. a non-contributory point.
+    * Values from the standard small-subgroup list (e.g. RFC 7748 §7 / libsodium's blocklist). */
+  private val X25519LowOrderRaw: Array[Array[Byte]] =
+    def le(hex: String): Array[Byte] =
+      val b = new Array[Byte](X25519PublicKeyBytes)
+      var i = 0
+      while i < X25519PublicKeyBytes do
+        b(i) = Integer.parseInt(hex.substring(i * 2, i * 2 + 2), 16).toByte
+        i += 1
+      b
+    Array(
+      // 0 (order 1) and 1 (order 2)
+      le("0000000000000000000000000000000000000000000000000000000000000000"),
+      le("0100000000000000000000000000000000000000000000000000000000000000"),
+      // order-8 points
+      le("e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b800"),
+      le("5f9c95bca3508c24b1d0b1559c83ef5b04445cc4581c8e86d8224eddd09f1157"),
+      // p-1, p, p+1 (the field-boundary encodings that reduce to the above)
+      le("ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"),
+      le("edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"),
+      le("eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"),
+      le("cdeb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b880"),
+      le("4c9c95bca3508c24b1d0b1559c83ef5b04445cc4581c8e86d8224eddd09f11d7"),
+      le("d9ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"),
+      le("daffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"),
+      le("dbffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")
+    )
+
+  /** Reject non-contributory / malformed peer u-coordinates (Finding 2): a low-order point drives
+    * the RFC 7748 shared secret to all-zero, and an out-of-range encoding (u >= p) can be reduced
+    * differently by different implementations. This validates the PUBLIC peer key only, so the
+    * branch is not on secret data (Constitution II). Comparison of the (public) raw bytes uses a
+    * constant-time check for uniformity. */
+  private def validatePeerX25519(raw: Array[Byte]): Unit =
+    require(raw.length == X25519PublicKeyBytes, "X25519 raw public key must be 32 bytes")
+    // Reject the known small-subgroup / low-order encodings before masking.
+    val isLowOrder = X25519LowOrderRaw.exists(MessageDigest.isEqual(_, raw))
+    require(!isLowOrder, "X25519 peer key is a low-order point (non-contributory)")
+    // Masked (bit 255 cleared) u must be a canonical field element: u < p.
+    require(x25519RawToBigInteger(raw).compareTo(P25519) < 0, "X25519 peer u-coordinate is >= p")
+
+  /** Masked little-endian raw -> the u-coordinate BigInteger (bit 255 cleared per RFC 7748). */
+  private def x25519RawToBigInteger(raw: Array[Byte]): BigInteger =
+    val le = raw.clone()
+    le(X25519PublicKeyBytes - 1) = (le(X25519PublicKeyBytes - 1) & 0x7f).toByte
+    val be = new Array[Byte](X25519PublicKeyBytes)
+    var i = 0
+    while i < X25519PublicKeyBytes do
+      be(i) = le(X25519PublicKeyBytes - 1 - i)
+      i += 1
+    new BigInteger(1, be)
 
   /** Secret holder: the X25519 raw private scalar, our own X25519 raw public key (public, retained
     * so decaps can reproduce the transcript without a base-point mul JCA does not expose), and the
@@ -109,32 +175,39 @@ object HybridKem:
     require(raw.length == X25519PublicKeyBytes, "X25519 raw public key must be 32 bytes")
     // little-endian -> unsigned BigInteger; clear the unused top bit (RFC 7748 masks bit 255 on
     // decode) so we reconstruct exactly what a peer computes.
-    val le = raw.clone()
-    le(X25519PublicKeyBytes - 1) = (le(X25519PublicKeyBytes - 1) & 0x7f).toByte
-    val be = new Array[Byte](X25519PublicKeyBytes)
-    var i = 0
-    while i < X25519PublicKeyBytes do
-      be(i) = le(X25519PublicKeyBytes - 1 - i)
-      i += 1
-    val u = new BigInteger(1, be)
+    val u = x25519RawToBigInteger(raw)
     x25519KeyFactory.generatePublic(new XECPublicKeySpec(X25519, u)).asInstanceOf[XECPublicKey]
 
   private def x25519ScalarOf(priv: XECPrivateKey): Array[Byte] =
     priv.getScalar.orElseThrow(() => new RuntimeException("X25519 private scalar unavailable"))
 
   /** X25519 ECDH producing the raw 32-byte shared secret from a raw private scalar + a peer raw
-    * public key, via JCA `KeyAgreement`. No branch on the secret. */
+    * public key, via JCA `KeyAgreement`. Validates the (public) peer key first — rejects low-order
+    * points and out-of-range u — and rejects an all-zero shared secret as a defence in depth against
+    * a non-contributory point SunEC does not itself reject (Finding 2). No branch on the secret; the
+    * all-zero check compares the derived secret against a fixed zero buffer in constant time. */
   private def x25519Agree(privateScalar: Array[Byte], peerRaw: Array[Byte]): Array[Byte] =
+    validatePeerX25519(peerRaw)
     val priv =
       x25519KeyFactory.generatePrivate(new XECPrivateKeySpec(X25519, privateScalar.clone()))
     val ka = KeyAgreement.getInstance("XDH")
     ka.init(priv)
     ka.doPhase(x25519RawToPub(peerRaw), true)
-    ka.generateSecret()
+    val ss = ka.generateSecret()
+    // RFC 7748: an all-zero output means a non-contributory (low-order) peer point slipped through.
+    if MessageDigest.isEqual(ss, new Array[Byte](ss.length)) then
+      java.util.Arrays.fill(ss, 0.toByte)
+      throw new IllegalArgumentException(
+        "X25519 shared secret is all-zero (non-contributory point)"
+      )
+    ss
 
   // ---- The combiner --------------------------------------------------------------------------
 
-  private def combine(
+  // package-private (not `private`) so the pinned combiner KAT in HybridKemSpec can drive it with
+  // fixed inputs — pinning the byte output guards Label, field order, and the digest alg against a
+  // silent change that would break interop with the JS `@noble/post-quantum` side (Finding 1).
+  private[crypto] def combine(
       ssX25519: Array[Byte],
       ssMlKem: Array[Byte],
       ephemeralX25519Raw: Array[Byte],
