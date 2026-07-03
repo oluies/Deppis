@@ -20,6 +20,17 @@ jobs:
       - uses: actions/checkout@v7
       - name: Install libsodium (crypto FFM tests)
         run: sudo apt-get update && sudo apt-get install -y libsodium-dev
+      - name: Build liboqs shared (post-quantum FFM tests — FIPS 203/204)
+        run: |
+          # liboqs isn't in apt; build the shared lib from the pinned OQS release (the same vetted
+          # source Homebrew's bottle uses). BUILD_ONLY_LIB keeps it to just the library.
+          sudo apt-get install -y cmake ninja-build libssl-dev
+          git clone --depth 1 --branch 0.15.0 https://github.com/open-quantum-safe/liboqs
+          cmake -S liboqs -B liboqs/build -GNinja -DBUILD_SHARED_LIBS=ON -DOQS_BUILD_ONLY_LIB=ON
+          cmake --build liboqs/build --parallel
+          sudo cmake --install liboqs/build
+          sudo ldconfig
+          echo "OQS_PATH=/usr/local/lib/liboqs.so" >> "$GITHUB_ENV"
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
