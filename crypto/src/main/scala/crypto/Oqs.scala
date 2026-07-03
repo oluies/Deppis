@@ -122,11 +122,12 @@ object Oqs:
   def kemKeypair(): KemKeyPair = withKem { (a, kem) =>
     val pk = seg(a, MlKem768.PublicKeyBytes)
     val sk = seg(a, MlKem768.SecretKeyBytes)
-    val rc = hKemKeypair.invoke(kem, pk, sk).asInstanceOf[Int]
-    if rc != OqsSuccess then throw new RuntimeException(s"OQS_KEM_keypair rc=$rc")
-    val out = KemKeyPair(get(pk, MlKem768.PublicKeyBytes), get(sk, MlKem768.SecretKeyBytes))
-    cleanse(sk, MlKem768.SecretKeyBytes) // zero the native secret key before the arena frees it
-    out
+    // `finally` so the native secret key is zeroed even if keypair fails (Arena.close frees, not clears)
+    try
+      val rc = hKemKeypair.invoke(kem, pk, sk).asInstanceOf[Int]
+      if rc != OqsSuccess then throw new RuntimeException(s"OQS_KEM_keypair rc=$rc")
+      KemKeyPair(get(pk, MlKem768.PublicKeyBytes), get(sk, MlKem768.SecretKeyBytes))
+    finally cleanse(sk, MlKem768.SecretKeyBytes)
   }
 
   final case class Encapsulation(ciphertext: Array[Byte], sharedSecret: Array[Byte])
@@ -136,12 +137,11 @@ object Oqs:
     withKem { (a, kem) =>
       val ct = seg(a, MlKem768.CiphertextBytes)
       val ss = seg(a, MlKem768.SharedSecretBytes)
-      val rc = hKemEncaps.invoke(kem, ct, ss, put(a, publicKey)).asInstanceOf[Int]
-      if rc != OqsSuccess then throw new RuntimeException(s"OQS_KEM_encaps rc=$rc")
-      val out =
+      try
+        val rc = hKemEncaps.invoke(kem, ct, ss, put(a, publicKey)).asInstanceOf[Int]
+        if rc != OqsSuccess then throw new RuntimeException(s"OQS_KEM_encaps rc=$rc")
         Encapsulation(get(ct, MlKem768.CiphertextBytes), get(ss, MlKem768.SharedSecretBytes))
-      cleanse(ss, MlKem768.SharedSecretBytes) // the shared secret is secret material
-      out
+      finally cleanse(ss, MlKem768.SharedSecretBytes) // the shared secret is secret material
     }
 
   def kemDecaps(ciphertext: Array[Byte], secretKey: Array[Byte]): Array[Byte] =
@@ -150,11 +150,11 @@ object Oqs:
     withKem { (a, kem) =>
       val ss = seg(a, MlKem768.SharedSecretBytes)
       val skSeg = put(a, secretKey)
-      val rc = hKemDecaps.invoke(kem, ss, put(a, ciphertext), skSeg).asInstanceOf[Int]
-      if rc != OqsSuccess then throw new RuntimeException(s"OQS_KEM_decaps rc=$rc")
-      val out = get(ss, MlKem768.SharedSecretBytes)
-      cleanse(ss, MlKem768.SharedSecretBytes); cleanse(skSeg, secretKey.length)
-      out
+      try
+        val rc = hKemDecaps.invoke(kem, ss, put(a, ciphertext), skSeg).asInstanceOf[Int]
+        if rc != OqsSuccess then throw new RuntimeException(s"OQS_KEM_decaps rc=$rc")
+        get(ss, MlKem768.SharedSecretBytes)
+      finally { cleanse(ss, MlKem768.SharedSecretBytes); cleanse(skSeg, secretKey.length) }
     }
 
   // ---- ML-DSA-65 ----
@@ -173,11 +173,11 @@ object Oqs:
   def sigKeypair(): SigKeyPair = withSig { (a, sig) =>
     val pk = seg(a, MlDsa65.PublicKeyBytes)
     val sk = seg(a, MlDsa65.SecretKeyBytes)
-    val rc = hSigKeypair.invoke(sig, pk, sk).asInstanceOf[Int]
-    if rc != OqsSuccess then throw new RuntimeException(s"OQS_SIG_keypair rc=$rc")
-    val out = SigKeyPair(get(pk, MlDsa65.PublicKeyBytes), get(sk, MlDsa65.SecretKeyBytes))
-    cleanse(sk, MlDsa65.SecretKeyBytes) // zero the native signing key before the arena frees it
-    out
+    try
+      val rc = hSigKeypair.invoke(sig, pk, sk).asInstanceOf[Int]
+      if rc != OqsSuccess then throw new RuntimeException(s"OQS_SIG_keypair rc=$rc")
+      SigKeyPair(get(pk, MlDsa65.PublicKeyBytes), get(sk, MlDsa65.SecretKeyBytes))
+    finally cleanse(sk, MlDsa65.SecretKeyBytes) // zero the native signing key regardless of outcome
   }
 
   def sign(message: Array[Byte], secretKey: Array[Byte]): Array[Byte] =
@@ -188,13 +188,14 @@ object Oqs:
       lenP.set(JAVA_LONG, 0L, MlDsa65.SignatureMaxBytes.toLong)
       val msg = put(a, message)
       val skSeg = put(a, secretKey)
-      val rc = hSigSign
-        .invoke(sig, out, lenP, msg, message.length.toLong, skSeg)
-        .asInstanceOf[Int]
-      if rc != OqsSuccess then throw new RuntimeException(s"OQS_SIG_sign rc=$rc")
-      val result = get(out, lenP.get(JAVA_LONG, 0L).toInt)
-      cleanse(skSeg, secretKey.length) // zero the native signing-key copy (the signature is public)
-      result
+      try
+        val rc = hSigSign
+          .invoke(sig, out, lenP, msg, message.length.toLong, skSeg)
+          .asInstanceOf[Int]
+        if rc != OqsSuccess then throw new RuntimeException(s"OQS_SIG_sign rc=$rc")
+        get(out, lenP.get(JAVA_LONG, 0L).toInt)
+      finally
+        cleanse(skSeg, secretKey.length) // zero the native signing-key copy regardless of outcome
     }
 
   /** Verify — returns `true` only on `OQS_SUCCESS`; any other status (bad signature, wrong key) is
