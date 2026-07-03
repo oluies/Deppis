@@ -21,6 +21,10 @@ import scala.scalajs.js.typedarray.Uint8Array
   * Interoperability with the JVM (liboqs) side is proven in `KemJsSpec` by reproducing the exact
   * NIST ACVP decapsulation known-answer vector that the JVM pins in `crypto.OqsKatSpec`: if both
   * implementations match the same FIPS 203 vector, they interoperate. */
+// NOTE: the `.js` suffix is REQUIRED. @noble/post-quantum 0.6.1's package `exports` map exposes only
+// `.js`-suffixed subpath keys (`"./ml-kem.js"`, `"./ml-dsa.js"`, …) with NO bare `"./ml-kem"` key —
+// unlike @noble/hashes (see kdf.Kdf's bare `@noble/hashes/hmac`). Dropping the suffix breaks module
+// resolution; a future "consistency cleanup" must NOT remove it.
 @js.native
 @JSImport("@noble/post-quantum/ml-kem.js", JSImport.Namespace)
 private object MlKemModule extends js.Object:
