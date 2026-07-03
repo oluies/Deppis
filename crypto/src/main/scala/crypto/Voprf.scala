@@ -34,7 +34,8 @@ package crypto
   * here. Proof comparison is constant-time (`Sodium.memcmp`). On erasure (Constitution II): the
   * NATIVE segments holding secret scalars are zeroed deterministically inside `Sodium` before their
   * arena is freed; the transient secret HEAP arrays that never leave a method (the DLEQ nonce `t`,
-  * `c·k`, and the inverse blind `r⁻¹`) are best-effort wiped via `Sodium.wipe` when consumed. Heap
+  * `c·k`, the inverse blind `r⁻¹`, and the unblinded pre-output `n = k·H1(x)`) are best-effort wiped
+  * via `Sodium.wipe` when consumed. Heap
   * arrays that are RETURNED (the OPRF key, the epoch key) are the caller's to manage, and a copying
   * GC can still leave stale copies — so this reduces, not eliminates, the plaintext-secret window.
   *
@@ -171,7 +172,8 @@ object Voprf:
     * Returns `Right(output)` with the PRF output `H2(x, k·H1(x))` iff the proof is valid; otherwise
     * `Left(reason)` — a malicious/misconfigured server (wrong key, tampered proof, tampered
     * evaluation) is REJECTED, never yielding a key. Verification comparison is constant-time. The
-    * transient inverse blind `r⁻¹` is wiped before returning. */
+    * transient per-request secrets that never leave this method — the inverse blind `r⁻¹` and the
+    * unblinded pre-output `n = k·H1(x)` — are wiped before returning. */
   def finalizeEval(
       serverPublicKey: Array[Byte],
       state: BlindState,
@@ -189,7 +191,12 @@ object Voprf:
           try
             Sodium.r255ScalarMult(rInv, eval.evaluated) match
               case None => Left("unblind failed")
-              case Some(n) => Right(finalizeOutput(state.input, n))
+              case Some(n) =>
+                // n = k·H1(x) is the raw OPRF pre-output, a per-request secret that never leaves
+                // this method; compute H2(x, n) first, then wipe n (best-effort) so it doesn't
+                // linger — consistent with the erasure policy for transient heap secrets.
+                try Right(finalizeOutput(state.input, n))
+                finally Sodium.wipe(n)
           finally Sodium.wipe(rInv)
 
   /** Recompute the final PRF output `H2(x, n)` where `n = k·H1(x)`. 32-byte output. */
