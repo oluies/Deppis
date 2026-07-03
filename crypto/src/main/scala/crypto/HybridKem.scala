@@ -50,11 +50,16 @@ import javax.crypto.KeyAgreement
   *     copies of the heap arrays this API returns — those are the caller's to manage.
   *
   * ==Peer-key validation (classical leg)==
-  * The X25519 leg validates the PUBLIC peer u-coordinate before agreement: it rejects the known
-  * low-order / small-subgroup points, rejects an out-of-range encoding (u >= p, which peers could
-  * reduce differently), and rejects an all-zero shared secret as defence in depth. This keeps the
-  * classical leg's "secure if either leg holds" contribution honest even against a malicious peer
-  * key. (A spec-exact X-Wing follow-up would fold this into the standard's own decode rules.)
+  * The X25519 leg rejects a non-contributory / malformed PUBLIC peer u-coordinate through three
+  * layers (all raising a uniform `IllegalArgumentException`): (1) a fast blocklist of the known
+  * small-subgroup encodings (bit-255-masked so top-bit twins collapse) plus a `u < p` range check;
+  * (2) SunEC's own "Point has small order" rejection in the key agreement — the PRIMARY, exhaustive
+  * small-order guard on the JDK provider, which catches low-order encodings absent from layer 1; and
+  * (3) an all-zero shared-secret backstop for any provider that does NOT reject low-order points
+  * (SunEC does, so on the JDK it throws before layer 3 — the layer stays for portability). Do not
+  * remove the SunEC/all-zero layers on the assumption the blocklist is exhaustive. This keeps the
+  * classical leg's "secure if either leg holds" contribution honest against a malicious peer key.
+  * (A spec-exact X-Wing follow-up would fold this into the standard's own decode rules.)
   */
 object HybridKem:
 
@@ -84,44 +89,52 @@ object HybridKem:
   private val P25519: BigInteger = BigInteger.TWO.pow(255).subtract(BigInteger.valueOf(19))
 
   /** The 32-byte little-endian encodings of the low-order Curve25519 u-coordinates (order 1, 2, 4,
-    * and 8 points, plus their "unmasked" twin). A peer point equal to one of these forces the RFC
-    * 7748 X25519 shared secret to all-zero regardless of our scalar, i.e. a non-contributory point.
-    * Values from the standard small-subgroup list (e.g. RFC 7748 §7 / libsodium's blocklist). */
-  private val X25519LowOrderRaw: Array[Array[Byte]] =
+    * and 8 points, plus the field-boundary encodings that reduce to them). A peer point equal to one
+    * of these forces the RFC 7748 X25519 shared secret to all-zero regardless of our scalar, i.e. a
+    * non-contributory point. Values from the standard small-subgroup list (RFC 7748 §7 / libsodium's
+    * blocklist). Entries are stored bit-255-MASKED (top bit cleared) so the comparison in
+    * [[validatePeerX25519]] matches an encoding whether or not the sender set the unused top bit
+    * (X25519 masks bit 255 on decode, so `xxxx…b800` and `xxxx…b880` are the same point). */
+  private val X25519LowOrderMasked: Array[Array[Byte]] =
     def le(hex: String): Array[Byte] =
       val b = new Array[Byte](X25519PublicKeyBytes)
       var i = 0
       while i < X25519PublicKeyBytes do
         b(i) = Integer.parseInt(hex.substring(i * 2, i * 2 + 2), 16).toByte
         i += 1
+      // mask bit 255 (top bit of the last little-endian byte) so top-bit-set twins collapse.
+      b(X25519PublicKeyBytes - 1) = (b(X25519PublicKeyBytes - 1) & 0x7f).toByte
       b
     Array(
       // 0 (order 1) and 1 (order 2)
       le("0000000000000000000000000000000000000000000000000000000000000000"),
       le("0100000000000000000000000000000000000000000000000000000000000000"),
-      // order-8 points
+      // order-4 / order-8 points
       le("e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b800"),
       le("5f9c95bca3508c24b1d0b1559c83ef5b04445cc4581c8e86d8224eddd09f1157"),
       // p-1, p, p+1 (the field-boundary encodings that reduce to the above)
       le("ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"),
       le("edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"),
-      le("eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"),
-      le("cdeb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b880"),
-      le("4c9c95bca3508c24b1d0b1559c83ef5b04445cc4581c8e86d8224eddd09f11d7"),
-      le("d9ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"),
-      le("daffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"),
-      le("dbffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")
+      le("eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f")
     )
 
   /** Reject non-contributory / malformed peer u-coordinates (Finding 2): a low-order point drives
     * the RFC 7748 shared secret to all-zero, and an out-of-range encoding (u >= p) can be reduced
     * differently by different implementations. This validates the PUBLIC peer key only, so the
-    * branch is not on secret data (Constitution II). Comparison of the (public) raw bytes uses a
-    * constant-time check for uniformity. */
+    * branch is not on secret data (Constitution II). Comparison of the (public) raw bytes is
+    * constant-time.
+    *
+    * The blocklist is a best-effort fast reject; the LOAD-BEARING invariant is the all-zero
+    * shared-secret check in [[x25519Agree]] — it catches EVERY non-contributory point (any encoding
+    * whose masked value lies in the small subgroup) regardless of whether it appears here. Do not
+    * remove that check on the assumption this list is exhaustive. */
   private def validatePeerX25519(raw: Array[Byte]): Unit =
     require(raw.length == X25519PublicKeyBytes, "X25519 raw public key must be 32 bytes")
-    // Reject the known small-subgroup / low-order encodings before masking.
-    val isLowOrder = X25519LowOrderRaw.exists(MessageDigest.isEqual(_, raw))
+    // Mask bit 255 on the peer bytes too, so the comparison matches the canonical encodings
+    // regardless of the (ignored) top bit the sender may have set.
+    val masked = raw.clone()
+    masked(X25519PublicKeyBytes - 1) = (masked(X25519PublicKeyBytes - 1) & 0x7f).toByte
+    val isLowOrder = X25519LowOrderMasked.exists(MessageDigest.isEqual(_, masked))
     require(!isLowOrder, "X25519 peer key is a low-order point (non-contributory)")
     // Masked (bit 255 cleared) u must be a canonical field element: u < p.
     require(x25519RawToBigInteger(raw).compareTo(P25519) < 0, "X25519 peer u-coordinate is >= p")
@@ -182,17 +195,29 @@ object HybridKem:
     priv.getScalar.orElseThrow(() => new RuntimeException("X25519 private scalar unavailable"))
 
   /** X25519 ECDH producing the raw 32-byte shared secret from a raw private scalar + a peer raw
-    * public key, via JCA `KeyAgreement`. Validates the (public) peer key first — rejects low-order
-    * points and out-of-range u — and rejects an all-zero shared secret as a defence in depth against
-    * a non-contributory point SunEC does not itself reject (Finding 2). No branch on the secret; the
-    * all-zero check compares the derived secret against a fixed zero buffer in constant time. */
+    * public key, via JCA `KeyAgreement`. Rejects a non-contributory / malformed peer key through
+    * THREE layers, so every one throws a uniform `IllegalArgumentException` (Finding 2):
+    *   1. [[validatePeerX25519]] — fast reject of the known small-subgroup encodings and `u >= p`;
+    *   2. SunEC's own "Point has small order" check in `doPhase` (an `InvalidKeyException` we
+    *      re-wrap) — this is the primary, exhaustive small-order guard on the JDK provider and
+    *      catches low-order encodings absent from the layer-1 blocklist;
+    *   3. an all-zero shared-secret backstop for any provider that does NOT reject a low-order point
+    *      (SunEC does, so it throws before we reach here — this layer must stay for portability).
+    *
+    * No branch on the secret; the all-zero check compares against a fixed zero buffer in constant
+    * time. */
   private def x25519Agree(privateScalar: Array[Byte], peerRaw: Array[Byte]): Array[Byte] =
     validatePeerX25519(peerRaw)
     val priv =
       x25519KeyFactory.generatePrivate(new XECPrivateKeySpec(X25519, privateScalar.clone()))
     val ka = KeyAgreement.getInstance("XDH")
     ka.init(priv)
-    ka.doPhase(x25519RawToPub(peerRaw), true)
+    try ka.doPhase(x25519RawToPub(peerRaw), true)
+    catch
+      // SunEC rejects low-order points here with InvalidKeyException("Point has small order");
+      // surface it as our uniform peer-key rejection rather than a KeyException.
+      case e: java.security.InvalidKeyException =>
+        throw new IllegalArgumentException(s"X25519 peer key rejected: ${e.getMessage}", e)
     val ss = ka.generateSecret()
     // RFC 7748: an all-zero output means a non-contributory (low-order) peer point slipped through.
     if MessageDigest.isEqual(ss, new Array[Byte](ss.length)) then

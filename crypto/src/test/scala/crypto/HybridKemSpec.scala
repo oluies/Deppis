@@ -114,9 +114,50 @@ class HybridKemSpec extends AnyFunSuite:
       HybridKem.hybridEncaps(new Array[Byte](HybridKem.PublicKeyBytes + 1))
     )
 
-  test("hybridEncaps rejects a low-order X25519 peer point (classical leg validation)"):
-    // Splice an all-zero (order-1) X25519 u-coordinate into an otherwise valid peer public key.
+  // ---- Classical-leg peer-key validation (Finding 2 + roborev LOW 1/2) -----------------------
+
+  /** Splice a raw X25519 u-coordinate (LE hex) into the X25519 slot of an otherwise valid hybrid
+    * public key, so hybridEncaps runs its classical-leg validation against a chosen point. */
+  private def peerKeyWithX25519(leHex: String): Array[Byte] =
     val kp = HybridKem.hybridKeypair()
     val bad = kp.publicKey.clone()
-    java.util.Arrays.fill(bad, 0, HybridKem.X25519PublicKeyBytes, 0.toByte)
-    assertThrows[IllegalArgumentException](HybridKem.hybridEncaps(bad))
+    var i = 0
+    while i < HybridKem.X25519PublicKeyBytes do
+      bad(i) = Integer.parseInt(leHex.substring(i * 2, i * 2 + 2), 16).toByte
+      i += 1
+    bad
+
+  test("hybridEncaps rejects a low-order X25519 peer point (blocklist, layer 1)"):
+    // all-zero (order-1) u-coordinate — rejected by the masked blocklist before agreement runs.
+    assertThrows[IllegalArgumentException](
+      HybridKem.hybridEncaps(
+        peerKeyWithX25519("0000000000000000000000000000000000000000000000000000000000000000")
+      )
+    )
+
+  test("hybridEncaps rejects a low-order point whose top bit (255) is SET (roborev LOW 1)"):
+    // The order-8 point 5f9c..1157 with bit 255 set is 5f9c..11d7. X25519 masks bit 255 on decode,
+    // so it is the SAME low-order point; the masked blocklist must catch it (before this fix it
+    // slipped past the raw-byte blocklist and only the deeper layers stopped it).
+    assertThrows[IllegalArgumentException](
+      HybridKem.hybridEncaps(
+        peerKeyWithX25519("5f9c95bca3508c24b1d0b1559c83ef5b04445cc4581c8e86d8224eddd09f11d7")
+      )
+    )
+    // and the canonical (top-bit-clear) encoding is likewise rejected.
+    assertThrows[IllegalArgumentException](
+      HybridKem.hybridEncaps(
+        peerKeyWithX25519("5f9c95bca3508c24b1d0b1559c83ef5b04445cc4581c8e86d8224eddd09f1157")
+      )
+    )
+
+  test("hybridEncaps uniformly rejects the order-8 low-order point (SunEC guard, layer 2/3)"):
+    // The other order-8 base point e0eb..b800 and its top-bit-set twin e0eb..b880 both denote the
+    // same non-contributory point. All three validation layers (blocklist, SunEC's own "small
+    // order" rejection re-wrapped, all-zero backstop) surface a uniform IllegalArgumentException —
+    // never a raw java.security.InvalidKeyException leaking to the caller.
+    for hex <- Seq(
+        "e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b800",
+        "e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b880"
+      )
+    do assertThrows[IllegalArgumentException](HybridKem.hybridEncaps(peerKeyWithX25519(hex)))
