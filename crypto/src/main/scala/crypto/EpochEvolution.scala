@@ -57,12 +57,14 @@ object EpochEvolution:
   private def epochInput(clientContext: Array[Byte], epoch: Long): Array[Byte] =
     Encoding.lengthPrefixed("epoch".getBytes("UTF-8"), epochLabel(epoch), clientContext)
 
-  /** Client state for one evolution round, to be paired with the server's [[Voprf.Evaluation]]. */
+  /** Client state for one evolution round, to be paired with the server's [[Voprf.Evaluation]]. The
+    * blinded element to send is `state.blinded`. */
   final case class EvolveRequest(
       epoch: Long,
-      state: Voprf.BlindState,
-      blinded: Voprf.BlindedElement
-  )
+      state: Voprf.BlindState
+  ):
+    /** The blinded group element to send to the server. */
+    def blinded: Voprf.BlindedElement = state.blinded
 
   /** Server key pair for epoch evolution: the OPRF key + its published commitment. Re-exported so
     * callers derive/verify against exactly this `publicKey`. */
@@ -76,12 +78,15 @@ object EpochEvolution:
   /** '''Client, step 1''': blind the epoch input for `(clientContext, epoch)`. Send
     * `request.blinded` to the server; keep `request` for step 3. */
   def beginEvolve(clientContext: Array[Byte], epoch: Long): EvolveRequest =
-    val (st, be) = Voprf.blind(epochInput(clientContext, epoch))
-    EvolveRequest(epoch, st, be)
+    EvolveRequest(epoch, Voprf.blind(epochInput(clientContext, epoch)))
 
   /** '''Server, step 2''': evaluate the blinded element under the OPRF key and attach a DLEQ proof.
-    * The server learns neither `clientContext` nor `epoch`. */
-  def serverEvolve(secretKey: Array[Byte], blinded: Voprf.BlindedElement): Voprf.Evaluation =
+    * The server learns neither `clientContext` nor `epoch`. `blinded` is attacker-controlled, so an
+    * invalid element yields `Left` rather than throwing (no server-side DoS surface). */
+  def serverEvolve(
+      secretKey: Array[Byte],
+      blinded: Voprf.BlindedElement
+  ): Either[String, Voprf.Evaluation] =
     Voprf.evaluate(secretKey, blinded)
 
   /** '''Client, step 3''': verify the DLEQ proof against `serverPublicKey`, unblind, and derive the
@@ -93,7 +98,7 @@ object EpochEvolution:
       eval: Voprf.Evaluation
   ): Either[String, Array[Byte]] =
     Voprf
-      .finalizeEval(serverPublicKey, request.state, request.blinded, eval)
+      .finalizeEval(serverPublicKey, request.state, eval)
       .map(prf => deriveEpochKey(prf, request.epoch))
 
   /** KDF the VOPRF output into the epoch key, binding the epoch index into `info`. */

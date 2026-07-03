@@ -31,8 +31,12 @@ package crypto
   * Every group/scalar/hash operation is a call into libsodium's vetted ristretto255 + SHA-512
   * ([[Sodium]]). This file only COMPOSES those vetted operations into the RFC 9497 protocol
   * (blinding, the Fiat–Shamir DLEQ transcript, unblinding). No curve, field, or hash is implemented
-  * here. Secret scalars (`k`, `r`, DLEQ nonce) live in `Sodium`'s zero-on-close native segments and
-  * are only handled as opaque byte arrays here; proof comparison is constant-time (`Sodium.memcmp`).
+  * here. Proof comparison is constant-time (`Sodium.memcmp`). On erasure (Constitution II): the
+  * NATIVE segments holding secret scalars are zeroed deterministically inside `Sodium` before their
+  * arena is freed; the transient secret HEAP arrays that never leave a method (the DLEQ nonce `t`,
+  * `c·k`, and the inverse blind `r⁻¹`) are best-effort wiped via `Sodium.wipe` when consumed. Heap
+  * arrays that are RETURNED (the OPRF key, the epoch key) are the caller's to manage, and a copying
+  * GC can still leave stale copies — so this reduces, not eliminates, the plaintext-secret window.
   *
   * NOTE on domain separation: this is a self-consistent instantiation using fixed context strings,
   * not a byte-for-byte reproduction of RFC 9497's ciphersuite test vectors. It gives the same
@@ -81,19 +85,24 @@ object Voprf:
 
   // ---------------------------------- client: blind ----------------------------------
 
-  /** Client blinding state: the secret blind `r` (kept private) and the original input `x` (retained
-    * so finalize can bind it into `H2`). */
-  final case class BlindState(
-      blind: Array[Byte],
-      input: Array[Byte]
-  )
-
   /** The client's message to the server: `blinded = r · H1(x)`. */
   final case class BlindedElement(blinded: Array[Byte])
 
+  /** Client blinding state: the secret blind `r` (kept private), the original input `x` (retained so
+    * finalize can bind it into `H2`), and the `blinded` element that was actually sent. Carrying
+    * `blinded` here means finalize verifies and unblinds the SAME element the state was produced for
+    * — a caller cannot pair a state with a mismatched blinded element (which would otherwise yield a
+    * silently-wrong-but-valid-looking output). */
+  final case class BlindState(
+      blind: Array[Byte],
+      input: Array[Byte],
+      blinded: BlindedElement
+  )
+
   /** Blind `input`: pick random `r`, compute `blinded = r · H1(x)`. Retries the (astronomically
-    * unlikely) case where `r · H1(x)` fails so the caller never sees a spurious error. */
-  def blind(input: Array[Byte]): (BlindState, BlindedElement) =
+    * unlikely) case where `r · H1(x)` fails so the caller never sees a spurious error. Returns the
+    * state (which contains the blinded element to send) — finalize consumes the same state. */
+  def blind(input: Array[Byte]): BlindState =
     val hx = hashToGroup(input)
     // hx is a valid, non-identity point by construction (from_hash), but be defensive on r.
     var attempts = 0
@@ -101,7 +110,7 @@ object Voprf:
       val r = Sodium.r255ScalarRandom()
       Sodium.r255ScalarMult(r, hx) match
         case Some(blinded) =>
-          return (BlindState(r, input.clone()), BlindedElement(blinded))
+          return BlindState(r, input.clone(), BlindedElement(blinded))
         case None => attempts += 1
     throw new RuntimeException("VOPRF blind: scalarmult kept failing (should be impossible)")
 
@@ -114,45 +123,61 @@ object Voprf:
   /** Server evaluates a blinded element under key `k` and produces a DLEQ proof of correct
     * evaluation against its public key `pk = k·B`.
     *
+    * `blinded` is ATTACKER-CONTROLLED at the server boundary, so an invalid / identity element is
+    * rejected with `Left` rather than a thrown exception (no unhandled-exception / DoS surface on
+    * the enclave server; symmetric with the client-side [[finalizeEval]]).
+    *
     * DLEQ (Chaum–Pedersen, Fiat–Shamir non-interactive):
     *   - pick random nonce `t`; commitments `A = t·B`, `Bc = t·blinded`
     *   - challenge `c = Hs( Context ‖ pk ‖ blinded ‖ evaluated ‖ A ‖ Bc )`
     *   - response `s = t − c·k  (mod L)`
     * The client re-derives `A' = s·B + c·pk` and `Bc' = s·blinded + c·evaluated` and checks the
-    * challenge recomputes — which holds iff the server used the `k` committed in `pk`. */
-  def evaluate(secretKey: Array[Byte], blinded: BlindedElement): Evaluation =
-    require(Sodium.r255IsValidPoint(blinded.blinded), "blinded element is not a valid point")
-    val pk = publicKeyOf(secretKey)
-    val evaluated = Sodium
-      .r255ScalarMult(secretKey, blinded.blinded)
-      .getOrElse(throw new RuntimeException("VOPRF evaluate: k·blinded failed"))
-
-    // ---- DLEQ proof ----
-    val t = Sodium.r255ScalarRandom()
-    val bigA =
-      Sodium.r255ScalarMultBase(t).getOrElse(throw new RuntimeException("DLEQ: t·B failed"))
-    val bigB = Sodium
-      .r255ScalarMult(t, blinded.blinded)
-      .getOrElse(throw new RuntimeException("DLEQ: t·blinded failed"))
-    val c = challenge(pk, blinded.blinded, evaluated, bigA, bigB)
-    // s = t - c*k  (mod L): scalar-multiply then scalar-subtract, both via libsodium's field ops.
-    val ck = Sodium.r255ScalarMulScalar(c, secretKey)
-    val s = Sodium.r255ScalarSub(t, ck)
-    Evaluation(evaluated, c, s)
+    * challenge recomputes — which holds iff the server used the `k` committed in `pk`.
+    *
+    * The transient secret heap arrays `t` and `c·k` (each of which, with the public `s`/`c`, would
+    * recover `k`) never leave this method and are wiped before returning. */
+  def evaluate(secretKey: Array[Byte], blinded: BlindedElement): Either[String, Evaluation] =
+    if !Sodium.r255IsValidPoint(blinded.blinded) then Left("blinded element is not a valid point")
+    else
+      val pk = publicKeyOf(secretKey)
+      Sodium.r255ScalarMult(secretKey, blinded.blinded) match
+        case None => Left("k·blinded failed (invalid blinded element)")
+        case Some(evaluated) =>
+          // ---- DLEQ proof ----
+          val t = Sodium.r255ScalarRandom()
+          var ck: Array[Byte] = null
+          try
+            (Sodium.r255ScalarMultBase(t), Sodium.r255ScalarMult(t, blinded.blinded)) match
+              case (Some(bigA), Some(bigB)) =>
+                val c = challenge(pk, blinded.blinded, evaluated, bigA, bigB)
+                // s = t - c*k (mod L): scalar-multiply then scalar-subtract via libsodium field ops.
+                ck = Sodium.r255ScalarMulScalar(c, secretKey)
+                val s = Sodium.r255ScalarSub(t, ck)
+                Right(Evaluation(evaluated, c, s))
+              case _ =>
+                // Only reachable if t reduced to 0 (astronomically unlikely); do not leak k.
+                Left("DLEQ commitment failed")
+          finally
+            Sodium.wipe(t)
+            if ck != null then Sodium.wipe(ck)
 
   // ---------------------------------- client: finalize ----------------------------------
 
-  /** Verify the DLEQ proof against the server's PUBLIC key, then unblind and finalize.
+  /** Verify the DLEQ proof against the server's PUBLIC key, then unblind and finalize. The blinded
+    * element that is verified and unblinded is taken from `state` itself, so it can never diverge
+    * from the input/blind the state was produced for (a mismatched pair would otherwise verify
+    * against one element while binding another into `H2`, yielding a silently-wrong output).
     *
     * Returns `Right(output)` with the PRF output `H2(x, k·H1(x))` iff the proof is valid; otherwise
     * `Left(reason)` — a malicious/misconfigured server (wrong key, tampered proof, tampered
-    * evaluation) is REJECTED, never yielding a key. Verification comparison is constant-time. */
+    * evaluation) is REJECTED, never yielding a key. Verification comparison is constant-time. The
+    * transient inverse blind `r⁻¹` is wiped before returning. */
   def finalizeEval(
       serverPublicKey: Array[Byte],
       state: BlindState,
-      blinded: BlindedElement,
       eval: Evaluation
   ): Either[String, Array[Byte]] =
+    val blinded = state.blinded
     if !Sodium.r255IsValidPoint(serverPublicKey) then Left("invalid server public key")
     else if !Sodium.r255IsValidPoint(eval.evaluated) then Left("invalid evaluated element")
     else if !verifyProof(serverPublicKey, blinded.blinded, eval) then Left("DLEQ proof rejected")
@@ -161,9 +186,11 @@ object Voprf:
       Sodium.r255ScalarInvert(state.blind) match
         case None => Left("blind not invertible")
         case Some(rInv) =>
-          Sodium.r255ScalarMult(rInv, eval.evaluated) match
-            case None => Left("unblind failed")
-            case Some(n) => Right(finalizeOutput(state.input, n))
+          try
+            Sodium.r255ScalarMult(rInv, eval.evaluated) match
+              case None => Left("unblind failed")
+              case Some(n) => Right(finalizeOutput(state.input, n))
+          finally Sodium.wipe(rInv)
 
   /** Recompute the final PRF output `H2(x, n)` where `n = k·H1(x)`. 32-byte output. */
   private def finalizeOutput(input: Array[Byte], unblinded: Array[Byte]): Array[Byte] =

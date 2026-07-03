@@ -240,6 +240,13 @@ object Sodium:
     * away). */
   private def memzero(s: MemorySegment, n: Int): Unit = hMemzero.invoke(s, n.toLong)
 
+  /** Best-effort wipe of a secret-bearing JVM heap array once it is no longer needed. Unlike the
+    * native segments (which `memzero` clears deterministically), a heap `Array[Byte]` is subject to
+    * a copying GC that may leave stale copies elsewhere, so this only reduces — not eliminates — the
+    * window a plaintext secret sits in heap memory. Use it for transient secrets (DLEQ nonce, `c·k`,
+    * inverse blind) that never leave the enclosing method. */
+  def wipe(secret: Array[Byte]): Unit = java.util.Arrays.fill(secret, 0.toByte)
+
   /** Constant-time equality of two equal-length byte arrays (libsodium `sodium_memcmp`). Returns
     * `false` on a length mismatch (a public fact) without touching contents. No secret-dependent
     * branch on the bytes themselves (Constitution II). */
