@@ -25,6 +25,11 @@ lazy val commonScalac = Seq("-deprecation", "-feature", "-unchecked", "-Wunused:
 // from ONE set of `shared/` sources. The ONLY platform-specific file is `kdf/Kdf.scala` (JVM = JCA
 // HMAC; JS = @noble/hashes HMAC) — both vetted, both synchronous, so the two builds are identical.
 lazy val protocolCore = (project in file("protocol-core"))
+  // JVM-only edge: the JVM `kem.HybridKem` delegates to the vetted `crypto.HybridKem` (X25519 via
+  // JCA + ML-KEM-768 via liboqs), so the hybrid KEM has ONE source of truth. `crypto` depends on
+  // nothing internal, so this is a legal DAG edge (no cycle). The Scala.js build (`protocolCoreJS`)
+  // must NOT get this edge — `crypto` is JVM-only (FFM/liboqs); the JS side reimplements over noble.
+  .dependsOn(crypto)
   .settings(
     name := "protocol-core",
     // shared/ (cross-platform) + jvm/ (the JCA Kdf). Same `shared/` dir feeds the JS build below.
@@ -39,6 +44,14 @@ lazy val protocolCore = (project in file("protocol-core"))
     // CLIs read JSON from stdin (Constitution V); fork and connect stdin so `run` forwards it.
     run / fork := true,
     run / connectInput := true,
+    // The JVM `kem.HybridKem` reaches liboqs (ML-KEM-768) via the `crypto` edge (restricted FFM
+    // downcalls), so `kem.HybridKemSpec` exercises native access. Fork the test JVM with native
+    // access enabled — matching every other native-touching module (crypto/server/transport) — so
+    // the run stays warning-free now and does not break once the JDK makes native access deny-by-
+    // default. `run` already touches liboqs transitively, so grant it there too.
+    Test / fork := true,
+    Test / javaOptions += "--enable-native-access=ALL-UNNAMED",
+    run / javaOptions += "--enable-native-access=ALL-UNNAMED",
     libraryDependencies ++= Seq(
       "com.lihaoyi" %% "upickle" % V.upickle,
       "org.scalatest" %% "scalatest" % V.scalatest % Test,

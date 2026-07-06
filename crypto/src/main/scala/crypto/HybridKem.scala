@@ -229,10 +229,13 @@ object HybridKem:
 
   // ---- The combiner --------------------------------------------------------------------------
 
-  // package-private (not `private`) so the pinned combiner KAT in HybridKemSpec can drive it with
-  // fixed inputs — pinning the byte output guards Label, field order, and the digest alg against a
+  // PUBLIC (widened from `private[crypto]`) so both the pinned combiner KAT in HybridKemSpec AND the
+  // cross-platform `kem.HybridKem` (protocol-core JVM) delegate to this ONE combiner — keeping a
+  // single source of truth for the interop-critical byte construction. This is a pure, deterministic,
+  // KAT-pinned function over already-public transcript bytes + the two KEM shared secrets; exposing
+  // it leaks nothing. Pinning the byte output guards Label, field order, and the digest alg against a
   // silent change that would break interop with the JS `@noble/post-quantum` side (Finding 1).
-  private[crypto] def combine(
+  def combine(
       ssX25519: Array[Byte],
       ssMlKem: Array[Byte],
       ephemeralX25519Raw: Array[Byte],
