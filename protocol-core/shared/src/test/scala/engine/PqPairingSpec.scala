@@ -423,20 +423,26 @@ class PqPairingSpec extends AnyFunSuite:
     )
 
   test("removeBuddy on a still-pending PQ responder clears the parked expected initiator tag"):
-    // The responder seeds its ratchet at addBuddy but stays Pending-confirm with a parked /i tag. After
-    // removeBuddy that parked tag must be gone, so a later completion with the GENUINE initiator tag
-    // cannot confirm (the pairing is terminal — parallels the initiator's parked-secret cleanup).
+    // The responder seeds its ratchet at addBuddy but stays Pending-confirm with a parked /i tag. We
+    // make the cleanup OBSERVABLE (not tautological): after removeBuddy, re-add the SAME pair on the
+    // CLASSICAL path (re-adding a Removed pair is allowed; the pairId derives from the OOB secret) and
+    // assert a bare `confirmBuddy(matched = true)` SUCCEEDS. That only holds if the stale
+    // `pendingResponderTag` was cleared — a lingering entry would route this confirm into
+    // `completePqResponder` and refuse it with `pq_prekey_required`.
     val s = pqSetup(FakeBackend())
-    val initTag = completeInitiator(s) // the genuine /i tag the responder would otherwise accept
     assert(s.bob.buddyCount == 1)
     assert(s.bob.removeBuddy(s.pid).isRight)
     assert(s.bob.buddyCount == 0)
+    val reAdd = s.bob.addBuddy(secret("oob"), BuddyRole.Responder) // classical: no KEM material
+    assert(reAdd.isRight)
+    assert(reAdd.toOption.get.pairId == s.pid, "re-add derives the same pairId from the OOB secret")
+    // Bare classical confirm: succeeds iff the parked responder tag is gone (else pq_prekey_required).
     assert(
-      s.bob.confirmBuddy(s.pid, matched = true, initiatorConfirmTag = Some(initTag)).isLeft,
-      "after removeBuddy the parked responder tag is gone — even the genuine tag cannot confirm"
+      s.bob.confirmBuddy(s.pid, matched = true).isRight,
+      "a lingering pendingResponderTag would misroute this classical confirm into pq_prekey_required"
     )
-    assert(s.bob.confirmedCount == 0)
-    assert(s.bob.drainEvents().isEmpty)
+    assert(s.bob.confirmedCount == 1)
+    assert(s.bob.drainEvents().collect { case EngineEvent.BuddyConfirmed(_, _) => 1 }.sum == 1)
 
   test("a malformed KEM public key is rejected without adding the buddy (responder path)"):
     val bob = Engine()
