@@ -58,9 +58,12 @@ private trait Sha256Hash extends js.Object:
   *     `>= p` (p = 2^255-19), BEFORE the ECDH — matching the JVM `crypto.HybridKem` `u < p` range
   *     check. This is pure public-byte validation, not crypto (Constitution I).
   *   - REJECTS low-order / non-contributory (all-zero-result) peer points via `@noble/curves`
-  *     THROWING, normalized to `IllegalArgumentException` — the same exception type the JVM adapter
-  *     and both specs pin — so shared engine code catching `IllegalArgumentException` handles
-  *     rejection uniformly on both platforms.
+  *     THROWING, normalized (in `x25519.X25519.sharedSecret`) to `x25519.PeerKeyRejected` — a
+  *     dedicated subtype of `IllegalArgumentException` pinned by the X25519 rejection parity specs
+  *     (`x25519.X25519RejectionCrossSpec`). The JVM leg (via `crypto.HybridKem`) raises a plain
+  *     `IllegalArgumentException`; both satisfy the `IllegalArgumentException` contract
+  *     `kem.HybridKemCrossSpec` pins, so shared engine code catching `IllegalArgumentException`
+  *     handles rejection uniformly on both platforms.
   * The two platforms therefore agree on which peer keys are accepted and on the thrown exception —
   * no availability / interop divergence (the JVM additionally runs an explicit small-subgroup
   * blocklist as a fast pre-check, but that is subsumed by noble's all-zero throw here). */
@@ -130,7 +133,7 @@ object HybridKem:
     var ssMl: Array[Byte] = null
     try
       // Validates `u < p` then agrees, normalizing noble's low-order/degenerate throw to
-      // IllegalArgumentException — cross-platform-uniform peer-key rejection (matching the JVM). This
+      // x25519.PeerKeyRejected — cross-platform-uniform peer-key rejection (matching the JVM). This
       // rejection now lives in x25519.X25519.sharedSecret itself, so we delegate straight to it.
       ssX = X25519.sharedSecret(ephPriv, peerXStatic)
       val (mlCt, ssMlOut) = Kem.encaps(peerMlkemPub)
@@ -168,7 +171,7 @@ object HybridKem:
     try
       // Classical leg: our static private × the peer's ephemeral public. x25519.X25519.sharedSecret
       // validates `u < p` then agrees, normalizing noble's low-order/degenerate throw to
-      // IllegalArgumentException — cross-platform-uniform peer-key rejection.
+      // x25519.PeerKeyRejected — cross-platform-uniform peer-key rejection.
       ssX = X25519.sharedSecret(x25519Priv, ephX)
       ssMl = Kem.decaps(mlCt, mlkemSk)
       // Same transcript order as encaps: ephemeral (initiator) pub, static (our) pub, PQ ciphertext.
