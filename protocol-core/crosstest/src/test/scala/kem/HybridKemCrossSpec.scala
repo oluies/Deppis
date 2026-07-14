@@ -52,6 +52,43 @@ class HybridKemCrossSpec extends AnyFunSuite:
     val ssDec = HybridKem.decaps(ct, secret)
     assert(ssDec.sameElements(ssEnc), "encaps and decaps must derive the same secret")
 
+  test(
+    "ACCEPTANCE PARITY: a peer static X25519 with bit 255 SET is accepted + masked at the KEM layer"
+  ):
+    // The acceptance-set property this KEM pins, at the HYBRID layer (not just the X25519 primitive):
+    // the JVM `kem.HybridKem` runs its classical leg through `crypto.HybridKem` (its OWN
+    // `validatePeerX25519` + `x25519RawToPub`), while the JS side delegates to
+    // `x25519.X25519.sharedSecret` — DIFFERENT code judging the same peer key. Both must MASK the
+    // unused top bit (bit 255) of the peer static u-coordinate, not REJECT it, or the two platforms
+    // would disagree on which peer keys are accepted (a cross-platform oracle the rejection KATs and
+    // the primitive-level `X25519AcceptCrossSpec` do not catch at THIS layer). A future edit to
+    // `crypto.HybridKem.validatePeerX25519` that rejected a top-bit-set encoding would fail here.
+    //
+    // The combiner binds the RAW peer-static bytes into the transcript, so the top bit is set
+    // CONSISTENTLY: on the peer static in the public key (the encaps ECDH + transcript input) AND on
+    // the stored static-pub half of the secret (bytes 32..63 — the decaps transcript field). encaps
+    // then decaps must SUCCEED (accepted, not rejected) and AGREE — proving both platforms mask bit
+    // 255 identically in the ECDH. (The derived secret differs from the canonical-encoding run by
+    // design: the transcript commits to the exact peer encoding — that is the combiner's binding, not
+    // an oracle, and both platforms produce the SAME such secret.)
+    val (pub, secret) = HybridKem.keypair()
+    val pubTop = pub.clone()
+    pubTop(31) = (pubTop(31) | 0x80.toByte).toByte // set bit 255 on the peer static u-coordinate
+    val secretTop = secret.clone()
+    secretTop(63) =
+      (secretTop(63) | 0x80.toByte).toByte // same, on the stored static pub (idx 32+31)
+    assert(
+      !pubTop.sameElements(pub),
+      "byte 31 top bit must actually differ from the canonical encoding"
+    )
+    val (ct, ssEnc) =
+      HybridKem.encaps(pubTop) // MUST NOT throw ⇒ the top-bit-set peer key is accepted
+    val ssDec = HybridKem.decaps(ct, secretTop)
+    assert(
+      ssDec.sameElements(ssEnc),
+      "top-bit-set peer static round-trips ⇒ both platforms mask bit 255 identically at the KEM layer"
+    )
+
   test("combiner KAT: fixed inputs pin the exact 32-byte SHA-256 output (JVM<->JS interop)"):
     // Byte-identical to crypto.HybridKemSpec's KAT — pins Label, field order
     // (label ++ ssX ++ ssMl ++ eph ++ peer ++ ct), and the digest across all implementations. A
