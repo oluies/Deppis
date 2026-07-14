@@ -8,10 +8,12 @@ import org.scalatest.funsuite.AnyFunSuite
   * pairing prekey (US7) — the initiator generates a hybrid-KEM keypair (X25519 via @noble/curves +
   * ML-KEM-768 via @noble/post-quantum), the responder encapsulates + returns a key-confirmation tag,
   * the initiator decapsulates, verifies the tag, and both seed a byte-identical PQ content root so a
-  * message actually round-trips through the JS ratchet. The JS `kem.HybridKem` interoperates with the
-  * JVM one (KAT-pinned in HybridKemSpec/HybridKemJsSpec); the CROSS-PLATFORM VECTOR test below replays
-  * the JVM-pinned `pqContentRoot`/`pqConfirmTag` values, so a JVM initiator and a JS responder provably
-  * reach the same seed + tag through the engine mixing layer.
+  * message actually round-trips through the JS ratchet. Confirmation is BIDIRECTIONAL — the responder
+  * also verifies the initiator's `/i` tag before it confirms, so both sides fail closed on KEM
+  * tampering. The JS `kem.HybridKem` interoperates with the JVM one (KAT-pinned in
+  * HybridKemSpec/HybridKemJsSpec); the CROSS-PLATFORM VECTOR test below replays the JVM-pinned
+  * `pqContentRoot` + both `pqConfirmTag{Responder,Initiator}` values, so a JVM initiator and a JS
+  * responder provably reach the same seed + tags through the engine mixing layer.
   *
   * HONEST LABELING (Constitution IV): this hardens only the pairing SEED; the ongoing per-message
   * X25519 DH ratchet stays classical. */
@@ -46,17 +48,17 @@ class PqPairingJsSpec extends AnyFunSuite:
     assert(bRes.kemCiphertext.get.length == HybridKem.CiphertextBytes)
     assert(bRes.kemConfirmTag.isDefined, "responder returns a key-confirmation tag")
     assert(aRes.pairId == bRes.pairId, "pairId unchanged by the KEM (symmetric OOB derivation)")
-    assert(
-      alice
-        .confirmBuddy(
-          aRes.pairId,
-          matched = true,
-          kemCiphertext = bRes.kemCiphertext,
-          kemConfirmTag = bRes.kemConfirmTag
-        )
-        .isRight
+    val aConf = alice.confirmBuddy(
+      aRes.pairId,
+      matched = true,
+      kemCiphertext = bRes.kemCiphertext,
+      kemConfirmTag = bRes.kemConfirmTag
     )
-    assert(bob.confirmBuddy(bRes.pairId, matched = true).isRight)
+    assert(aConf.isRight)
+    val initTag = aConf.toOption.get.initiatorConfirmTag
+    assert(initTag.isDefined, "initiator completion returns its /i confirmation tag")
+    // Bidirectional: the responder confirms only after verifying the initiator's /i tag.
+    assert(bob.confirmBuddy(bRes.pairId, matched = true, initiatorConfirmTag = initTag).isRight)
     alice.drainEvents(); bob.drainEvents()
     // A delivered message proves both JS ratchets seeded a byte-identical PQ content root.
     assert(alice.sendMessage(aRes.pairId, "js pq hello") == Right(1))
@@ -107,17 +109,64 @@ class PqPairingJsSpec extends AnyFunSuite:
     )
     assert(!KeySchedule.pqContentRoot(base, ssEnc).sameElements(base))
 
-  test("JS CROSS-PLATFORM VECTOR: pqContentRoot + pqConfirmTag match the JVM-pinned values"):
+  test("JS CROSS-PLATFORM VECTOR: pqContentRoot + both confirm tags match the JVM-pinned values"):
     // Same fixed (base, kemSharedSecret) constants as PqPairingSpec; the pinned hex was generated on
-    // the JVM. Matching here proves the engine mixing layer (HMAC-SHA256) is byte-identical JVM↔JS.
+    // the JVM. Matching here proves the engine mixing layer (HMAC-SHA256) is byte-identical JVM↔JS —
+    // for the seed AND both domain-separated confirmation tags.
     val base = PqTestKit.unhex("11" * 32)
     val ss = PqTestKit.unhex("22" * 32)
     val rootP = KeySchedule.pqContentRoot(base, ss)
-    val tag = KeySchedule.pqConfirmTag(rootP)
     assert(
       PqTestKit.hex(rootP) == "8b44543f08bd807c091521b8de5061ea51da69c3647d0d72c45cf0fdeb2864df"
     )
-    assert(PqTestKit.hex(tag) == "35c5417e1ec686221c670d04f7dfc67e8167184dc504f6b901291bd905f5ff31")
+    assert(
+      PqTestKit.hex(KeySchedule.pqConfirmTagResponder(rootP)) ==
+        "59786206682faeee849f6ee100d1b23c81e605ba1474a3177444a88e1068f865"
+    )
+    assert(
+      PqTestKit.hex(KeySchedule.pqConfirmTagInitiator(rootP)) ==
+        "fb3e13f17475c4e9c9ac712ac82ce4400ec019871d32d479dcb07dc039f76df5"
+    )
+
+  test("JS BIDIRECTIONAL: the RESPONDER fails closed on a tampered initiator confirmation tag"):
+    val alice = new Engine()
+    val bob = new Engine()
+    val aRes =
+      alice.addBuddy(secret("oob"), BuddyRole.Initiator, initiatePqPrekey = true).toOption.get
+    val bRes = bob
+      .addBuddy(secret("oob"), BuddyRole.Responder, initiatorKemPublicKey = aRes.kemPublicKey)
+      .toOption
+      .get
+    val initTag = alice
+      .confirmBuddy(
+        aRes.pairId,
+        matched = true,
+        kemCiphertext = bRes.kemCiphertext,
+        kemConfirmTag = bRes.kemConfirmTag
+      )
+      .toOption
+      .get
+      .initiatorConfirmTag
+      .get
+    val badTag = initTag.clone(); badTag(0) = (badTag(0) ^ 0xff).toByte
+    // A matched confirm WITHOUT the tag is refused; a tampered tag fails closed; the correct tag works.
+    assert(
+      bob
+        .confirmBuddy(aRes.pairId, matched = true)
+        .left
+        .toOption
+        .map(_.code)
+        .contains("pq_prekey_required")
+    )
+    assert(
+      bob.confirmBuddy(aRes.pairId, matched = true, initiatorConfirmTag = Some(badTag))
+        == Left(EngineError("pq_confirm_failed", "KEM key confirmation failed"))
+    )
+    assert(bob.confirmedCount == 0)
+    assert(
+      bob.confirmBuddy(aRes.pairId, matched = true, initiatorConfirmTag = Some(initTag)).isRight
+    )
+    assert(bob.confirmedCount == 1)
 
   test("JS fail-closed: a matched PQ pairing without the ciphertext + tag is refused"):
     val alice = new Engine()
@@ -176,3 +225,12 @@ class PqPairingJsSpec extends AnyFunSuite:
       )
     )
     assert(conf("events").arr.head("event").str == "buddyConfirmed")
+    val initTag = conf("result")("initiatorConfirmTag").str
+    assert(initTag.nonEmpty)
+    // Bidirectional: the responder completes over the wire with the initiator's /i tag.
+    val rConf = ujson.read(
+      cb.handle(
+        s"""{"apiVersion":"1","command":"confirmBuddy","args":{"pairId":"$pairId","matched":true,"initiatorConfirmTag":"$initTag"}}"""
+      )
+    )
+    assert(rConf("events").arr.head("event").str == "buddyConfirmed")

@@ -75,16 +75,26 @@ final class EngineCodec(engine: Engine):
           obj
 
       case "confirmBuddy" =>
-        // An initiator PQ pairing carries the responder's `kemCiphertext` + `kemConfirmTag` (base64)
-        // back here to key-confirm + seed its deferred ratchet; absent/ignored on the classical path.
+        // PQ pairing confirmation is BIDIRECTIONAL (base64 wire fields):
+        //   - INITIATOR: carries the responder's `kemCiphertext` + `kemConfirmTag` (the `/r` tag) back
+        //     here to key-confirm + seed its deferred ratchet, and the result returns its own
+        //     `initiatorConfirmTag` (the `/i` tag) for the app to relay to the responder.
+        //   - RESPONDER: carries the initiator's `initiatorConfirmTag` here; it is constant-time verified
+        //     before the responder confirms (fail closed on a `kemPublicKey` tampered in transit).
+        // All absent/ignored on the classical path (result is then `null`).
         engine
           .confirmBuddy(
             str(args, "pairId"),
             bool(args, "matched"),
             kemCiphertext = optBytes(args, "kemCiphertext"),
-            kemConfirmTag = optBytes(args, "kemConfirmTag")
+            kemConfirmTag = optBytes(args, "kemConfirmTag"),
+            initiatorConfirmTag = optBytes(args, "initiatorConfirmTag")
           )
-          .map(_ => ujson.Null)
+          .map { res =>
+            res.initiatorConfirmTag match
+              case Some(tag) => ujson.Obj("initiatorConfirmTag" -> b64e(tag))
+              case None => ujson.Null
+          }
 
       case "removeBuddy" =>
         engine.removeBuddy(str(args, "pairId")).map(_ => ujson.Null)

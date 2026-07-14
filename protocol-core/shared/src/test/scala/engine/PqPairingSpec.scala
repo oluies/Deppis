@@ -68,20 +68,29 @@ class PqPairingSpec extends AnyFunSuite:
     assert(aRes.safetyNumber == bRes.safetyNumber)
     PqSetup(alice, bob, aRes.pairId, kemPub, ct, tag)
 
-  /** Full PQ pairing: setup + initiator completes with the good ciphertext + tag + both confirm. */
+  /** The initiator completes with the responder's ciphertext + `/r` tag, verifying its own `/i` tag is
+    * returned for the responder to relay. Returns that `initiatorConfirmTag`. */
+  private def completeInitiator(s: PqSetup): Array[Byte] =
+    val res = s.alice.confirmBuddy(
+      s.pid,
+      matched = true,
+      kemCiphertext = Some(s.kemCiphertext),
+      kemConfirmTag = Some(s.kemConfirmTag)
+    )
+    assert(res.isRight, s"initiator completion failed: $res")
+    val tag = res.toOption.get.initiatorConfirmTag
+    assert(tag.isDefined, "initiator completion must return its /i confirmation tag")
+    tag.get
+
+  /** Full BIDIRECTIONAL PQ pairing: setup + initiator completes (returns its `/i` tag) + responder
+    * verifies that tag and confirms. BOTH sides end Confirmed. */
   private def pqPair(be: FakeBackend): (Engine, Engine, String) =
     val s = pqSetup(be)
+    val initTag = completeInitiator(s)
     assert(
-      s.alice
-        .confirmBuddy(
-          s.pid,
-          matched = true,
-          kemCiphertext = Some(s.kemCiphertext),
-          kemConfirmTag = Some(s.kemConfirmTag)
-        )
-        .isRight
+      s.bob.confirmBuddy(s.pid, matched = true, initiatorConfirmTag = Some(initTag)).isRight,
+      "responder must confirm after verifying the initiator's /i tag"
     )
-    assert(s.bob.confirmBuddy(s.pid, matched = true).isRight)
     s.alice.drainEvents(); s.bob.drainEvents()
     (s.alice, s.bob, s.pid)
 
@@ -183,6 +192,117 @@ class PqPairingSpec extends AnyFunSuite:
     )
     assert(s.alice.confirmedCount == 0)
 
+  // ---- Bidirectional confirmation: the RESPONDER also fails closed (US7) ----
+
+  test("BIDIRECTIONAL (b): a SUBSTITUTED initiator public key makes the RESPONDER fail closed"):
+    // The confirmed-but-dead hole this PR closes: an attacker swaps the initiator's `kemPublicKey` in
+    // transit to the responder, so the responder encapsulates to the WRONG key and seeds a dead root.
+    // Because the responder now verifies the initiator's /i tag before confirming, the ONLY tag it
+    // accepts is `pqConfirmTagInitiator(rootP_responder)`. The honest initiator's rootP (shared with the
+    // real responder) differs, so the honest initiator's /i tag NEVER confirms the swapped responder.
+    val s = pqSetup(FakeBackend())
+    val honestInitTag = completeInitiator(s) // bound to the rootP alice shares with the honest bob
+    // A second responder that (as if MITM'd) encapsulated to a DIFFERENT initiator public key.
+    val evilPub = Engine()
+      .addBuddy(secret("oob"), BuddyRole.Initiator, initiatePqPrekey = true)
+      .toOption
+      .get
+      .kemPublicKey
+      .get
+    val swappedBob = Engine()
+    val swappedPid = swappedBob
+      .addBuddy(secret("oob"), BuddyRole.Responder, initiatorKemPublicKey = Some(evilPub))
+      .toOption
+      .get
+      .pairId
+    assert(
+      swappedBob.confirmBuddy(
+        swappedPid,
+        matched = true,
+        initiatorConfirmTag = Some(honestInitTag)
+      ) == Left(EngineError("pq_confirm_failed", "KEM key confirmation failed"))
+    )
+    assert(
+      swappedBob.confirmedCount == 0,
+      "a responder given a swapped initiator key must not confirm"
+    )
+    assert(swappedBob.drainEvents().isEmpty, "no buddyConfirmed on the swapped responder")
+
+  test("BIDIRECTIONAL (d): a TAMPERED initiator confirmation tag makes the RESPONDER fail closed"):
+    val s = pqSetup(FakeBackend())
+    val initTag = completeInitiator(s)
+    val badTag = initTag.clone(); badTag(0) = (badTag(0) ^ 0xff).toByte
+    assert(
+      s.bob.confirmBuddy(
+        s.pid,
+        matched = true,
+        initiatorConfirmTag = Some(badTag)
+      ) == Left(EngineError("pq_confirm_failed", "KEM key confirmation failed"))
+    )
+    assert(s.bob.confirmedCount == 0)
+    assert(s.bob.drainEvents().isEmpty)
+    // The parked expected tag is RETAINED: the correct initiator tag still completes.
+    assert(s.bob.confirmBuddy(s.pid, matched = true, initiatorConfirmTag = Some(initTag)).isRight)
+    assert(s.bob.confirmedCount == 1)
+
+  test("BIDIRECTIONAL regression: the RESPONDER refuses to confirm without a valid initiator tag"):
+    // The core regression for the confirmed-but-dead hole: a matched confirm WITHOUT the initiator tag
+    // is refused (no unconditional responder confirm), seeds/emits nothing, retains state, and a
+    // corrected retry completes.
+    val s = pqSetup(FakeBackend())
+    assert(
+      s.bob.confirmBuddy(s.pid, matched = true) ==
+        Left(EngineError("pq_prekey_required", "initiator confirmation tag required to confirm"))
+    )
+    assert(s.bob.confirmedCount == 0, "no unconditional responder confirm")
+    assert(s.bob.drainEvents().isEmpty, "no buddyConfirmed emitted on refusal")
+    assert(s.bob.sendMessage(s.pid, "x").isLeft, "a still-Pending responder cannot send")
+    // A corrected retry with the real initiator tag completes and emits buddyConfirmed.
+    val initTag = completeInitiator(s)
+    assert(s.bob.confirmBuddy(s.pid, matched = true, initiatorConfirmTag = Some(initTag)).isRight)
+    assert(s.bob.confirmedCount == 1)
+    assert(s.bob.drainEvents().collect { case EngineEvent.BuddyConfirmed(_, _) => 1 }.sum == 1)
+
+  test("BIDIRECTIONAL: a responder safety-number mismatch establishes nothing and clears the tag"):
+    val s = pqSetup(FakeBackend())
+    assert(s.bob.confirmBuddy(s.pid, matched = false).isRight)
+    assert(s.bob.confirmedCount == 0)
+    assert(s.bob.drainEvents().isEmpty)
+    // Parked tag cleared + relationship terminal: a later "complete" cannot confirm.
+    assert(
+      s.bob
+        .confirmBuddy(s.pid, matched = true, initiatorConfirmTag = Some(new Array[Byte](32)))
+        .isLeft
+    )
+
+  test(
+    "BIDIRECTIONAL regression: an initiator confirm refusal seeds no runtime, emits no event, retries"
+  ):
+    val s = pqSetup(FakeBackend())
+    val badTag = s.kemConfirmTag.clone(); badTag(0) = (badTag(0) ^ 0xff).toByte
+    assert(
+      s.alice.confirmBuddy(
+        s.pid,
+        matched = true,
+        kemCiphertext = Some(s.kemCiphertext),
+        kemConfirmTag = Some(badTag)
+      ) == Left(EngineError("pq_confirm_failed", "KEM key confirmation failed"))
+    )
+    assert(s.alice.confirmedCount == 0, "refused ⇒ not confirmed")
+    assert(s.alice.drainEvents().isEmpty, "no buddyConfirmed emitted")
+    assert(
+      s.alice.sendMessage(s.pid, "x").isLeft,
+      "no seeded runtime (Pending initiator cannot send)"
+    )
+    // Parked prekey retained ⇒ the corrected retry completes, emits the event, and becomes sendable.
+    completeInitiator(s)
+    assert(s.alice.confirmedCount == 1)
+    assert(s.alice.drainEvents().collect { case EngineEvent.BuddyConfirmed(_, _) => 1 }.sum == 1)
+    assert(
+      s.alice.sendMessage(s.pid, "hi").isRight,
+      "confirmed ⇒ sendable (runtime seeded on retry)"
+    )
+
   test("FAIL CLOSED: a matched PQ pairing WITHOUT the ciphertext + tag is refused, then retryable"):
     val s = pqSetup(FakeBackend())
     // No ciphertext/tag ⇒ refuse (do not silently downgrade to the classical seed); NOT confirmed.
@@ -217,7 +337,8 @@ class PqPairingSpec extends AnyFunSuite:
         .isRight
     )
     assert(s.alice.confirmedCount == 1)
-    // The parked state is consumed: a second completion finds no pending prekey (already confirmed).
+    // The parked prekey is consumed, but a repeat matched confirm is now IDEMPOTENT: it re-returns the
+    // same /i tag (recoverable if the app lost the first ConfirmResult), not an error.
     assert(
       s.alice
         .confirmBuddy(
@@ -226,8 +347,39 @@ class PqPairingSpec extends AnyFunSuite:
           kemCiphertext = Some(s.kemCiphertext),
           kemConfirmTag = Some(s.kemConfirmTag)
         )
-        .isLeft
+        .isRight
     )
+
+  test(
+    "BIDIRECTIONAL: a repeat initiator confirm idempotently re-returns the same /i tag, no dup event"
+  ):
+    val s = pqSetup(FakeBackend())
+    val firstTag = completeInitiator(s)
+    assert(s.alice.drainEvents().collect { case EngineEvent.BuddyConfirmed(_, _) => 1 }.sum == 1)
+    // A repeat matched confirm — even WITHOUT re-supplying the ciphertext/tag — replays the same /i tag
+    // without re-seeding or re-emitting BuddyConfirmed (the app can recover a lost ConfirmResult).
+    val again = s.alice.confirmBuddy(s.pid, matched = true)
+    assert(again.isRight)
+    assert(
+      again.toOption.get.initiatorConfirmTag.exists(_.sameElements(firstTag)),
+      "the same /i tag is re-returned"
+    )
+    assert(s.alice.drainEvents().isEmpty, "no duplicate BuddyConfirmed on replay")
+    assert(s.alice.confirmedCount == 1, "still exactly one confirmed buddy")
+    // The re-returned tag is a COPY: mutating it does not corrupt the retained value.
+    again.toOption.get.initiatorConfirmTag.foreach(t => t(0) = (t(0) ^ 0xff).toByte)
+    assert(
+      s.alice
+        .confirmBuddy(s.pid, matched = true)
+        .toOption
+        .get
+        .initiatorConfirmTag
+        .exists(_.sameElements(firstTag)),
+      "the retained tag is unchanged after the caller mutated a returned copy"
+    )
+    // After removeBuddy the retained tag is gone: a later replay can no longer recover it.
+    assert(s.alice.removeBuddy(s.pid).isRight)
+    assert(s.alice.confirmBuddy(s.pid, matched = true).isLeft, "no tag to replay after removeBuddy")
 
   test("mismatch on a PQ initiator establishes nothing and clears the parked KEM secret"):
     val alice = Engine()
@@ -269,6 +421,28 @@ class PqPairingSpec extends AnyFunSuite:
         )
         .isLeft
     )
+
+  test("removeBuddy on a still-pending PQ responder clears the parked expected initiator tag"):
+    // The responder seeds its ratchet at addBuddy but stays Pending-confirm with a parked /i tag. We
+    // make the cleanup OBSERVABLE (not tautological): after removeBuddy, re-add the SAME pair on the
+    // CLASSICAL path (re-adding a Removed pair is allowed; the pairId derives from the OOB secret) and
+    // assert a bare `confirmBuddy(matched = true)` SUCCEEDS. That only holds if the stale
+    // `pendingResponderTag` was cleared — a lingering entry would route this confirm into
+    // `completePqResponder` and refuse it with `pq_prekey_required`.
+    val s = pqSetup(FakeBackend())
+    assert(s.bob.buddyCount == 1)
+    assert(s.bob.removeBuddy(s.pid).isRight)
+    assert(s.bob.buddyCount == 0)
+    val reAdd = s.bob.addBuddy(secret("oob"), BuddyRole.Responder) // classical: no KEM material
+    assert(reAdd.isRight)
+    assert(reAdd.toOption.get.pairId == s.pid, "re-add derives the same pairId from the OOB secret")
+    // Bare classical confirm: succeeds iff the parked responder tag is gone (else pq_prekey_required).
+    assert(
+      s.bob.confirmBuddy(s.pid, matched = true).isRight,
+      "a lingering pendingResponderTag would misroute this classical confirm into pq_prekey_required"
+    )
+    assert(s.bob.confirmedCount == 1)
+    assert(s.bob.drainEvents().collect { case EngineEvent.BuddyConfirmed(_, _) => 1 }.sum == 1)
 
   test("a malformed KEM public key is rejected without adding the buddy (responder path)"):
     val bob = Engine()
@@ -315,22 +489,29 @@ class PqPairingSpec extends AnyFunSuite:
     val (_, bobMsgs) = converse(alice, bob, 1, 12)
     assert(bobMsgs == Seq("classical hi"))
 
-  test("CROSS-PLATFORM VECTOR: pqContentRoot + pqConfirmTag are byte-pinned (replayed on JS)"):
-    // A fixed (base, kemSharedSecret) → rootP → confirmTag vector. The SAME constants are asserted in
-    // PqPairingJsSpec, so — combined with the KAT-pinned cross-platform KEM (HybridKemSpec) — a JVM
-    // initiator and a JS responder provably reach the same seed + tag through the engine mixing layer.
+  test("CROSS-PLATFORM VECTOR: pqContentRoot + both confirm tags are byte-pinned (replayed on JS)"):
+    // A fixed (base, kemSharedSecret) → rootP → {responder /r, initiator /i} tag vector. The SAME
+    // constants are asserted in PqPairingJsSpec, so — combined with the KAT-pinned cross-platform KEM
+    // (HybridKemSpec) — a JVM initiator and a JS responder provably reach the same seed + both
+    // domain-separated tags through the engine mixing layer.
     val base = PqTestKit.unhex("11" * 32)
     val ss = PqTestKit.unhex("22" * 32)
     val rootP = KeySchedule.pqContentRoot(base, ss)
-    val tag = KeySchedule.pqConfirmTag(rootP)
+    val rTag = KeySchedule.pqConfirmTagResponder(rootP)
+    val iTag = KeySchedule.pqConfirmTagInitiator(rootP)
     assert(
       PqTestKit.hex(rootP) == "8b44543f08bd807c091521b8de5061ea51da69c3647d0d72c45cf0fdeb2864df",
       s"rootP drifted: ${PqTestKit.hex(rootP)}"
     )
     assert(
-      PqTestKit.hex(tag) == "35c5417e1ec686221c670d04f7dfc67e8167184dc504f6b901291bd905f5ff31",
-      s"confirmTag drifted: ${PqTestKit.hex(tag)}"
+      PqTestKit.hex(rTag) == "59786206682faeee849f6ee100d1b23c81e605ba1474a3177444a88e1068f865",
+      s"responder /r tag drifted: ${PqTestKit.hex(rTag)}"
     )
+    assert(
+      PqTestKit.hex(iTag) == "fb3e13f17475c4e9c9ac712ac82ce4400ec019871d32d479dcb07dc039f76df5",
+      s"initiator /i tag drifted: ${PqTestKit.hex(iTag)}"
+    )
+    assert(!rTag.sameElements(iTag), "the two directions must be domain-separated (no reflection)")
 
   // ---- JSON boundary (the versioned wire contract) with the new base64 PQ fields ----
 
@@ -353,13 +534,27 @@ class PqPairingSpec extends AnyFunSuite:
     val ct = respAdd("result")("kemCiphertext").str // base64, present on the PQ responder result
     val tag = respAdd("result")("kemConfirmTag").str // base64 confirmation tag
     assert(ct.nonEmpty && tag.nonEmpty && !respAdd("result").obj.contains("kemPublicKey"))
-    // Initiator completes over the wire with the ciphertext + tag; buddyConfirmed is emitted.
+    // Initiator completes over the wire with the ciphertext + tag; buddyConfirmed is emitted AND the
+    // result returns the initiator's /i tag (base64) for the app to relay to the responder.
     val conf = ujson.read(
       ca.handle(
         s"""{"apiVersion":"1","command":"confirmBuddy","args":{"pairId":"$pairId","matched":true,"kemCiphertext":"$ct","kemConfirmTag":"$tag"}}"""
       )
     )
     assert(conf("events").arr.head("event").str == "buddyConfirmed")
+    val initTag = conf("result")("initiatorConfirmTag").str
+    assert(
+      initTag.nonEmpty,
+      "the initiator completion returns its /i confirmation tag over the wire"
+    )
+    // Responder completes over the wire with the initiator's /i tag; buddyConfirmed fires on it too
+    // (bidirectional confirmation — the responder also fails closed).
+    val rConf = ujson.read(
+      cb.handle(
+        s"""{"apiVersion":"1","command":"confirmBuddy","args":{"pairId":"$pairId","matched":true,"initiatorConfirmTag":"$initTag"}}"""
+      )
+    )
+    assert(rConf("events").arr.head("event").str == "buddyConfirmed")
     // Fail closed over the wire too: a fresh PQ initiator matched WITHOUT ciphertext/tag is refused.
     val cc = EngineCodec(Engine())
     val add2 = ujson.read(
