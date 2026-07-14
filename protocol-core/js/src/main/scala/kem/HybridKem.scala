@@ -26,6 +26,10 @@ private trait Sha256Fn extends js.Object:
 private trait Sha256Hash extends js.Object:
   def update(data: Uint8Array): Sha256Hash = js.native
   def digest(): Uint8Array = js.native
+  // Zeroes the internal 64-byte block buffer + state. `digest()` calls this itself on the happy path;
+  // we call it explicitly only when the stream is ABANDONED before `digest()` (a mid-stream throw),
+  // so absorbed secret bytes never linger in noble's hash state (Constitution II).
+  def destroy(): Unit = js.native
 
 /** Cross-platform hybrid post-quantum KEM — **Scala.js platform object** (the JVM counterpart is
   * `protocol-core/jvm/src/main/scala/kem/HybridKem.scala`, which delegates to the vetted
@@ -211,10 +215,12 @@ object HybridKem:
     finally
       // Zero every secret-bearing buffer we own regardless of a throw mid-stream (Constitution II):
       // the two KEM-shared-secret copies and the returned digest (itself the hybrid shared secret).
-      // The public label/transcript copies need no wipe; noble's own state is self-zeroed by digest().
+      // The public label/transcript copies need no wipe. On the happy path `digest()` self-zeroes
+      // noble's hash state; if the stream was ABANDONED before `digest()` (digest == null after a
+      // mid-stream throw), zero that state explicitly so absorbed secret bytes don't linger.
       if jsSsX != null then wipeJs(jsSsX)
       if jsSsMl != null then wipeJs(jsSsMl)
-      if digest != null then wipeJs(digest)
+      if digest != null then wipeJs(digest) else h.destroy()
 
   // Curve25519 field prime p = 2^255 - 19 (RFC 7748). A well-formed u-coordinate satisfies u < p
   // after the unused top bit is masked; an out-of-range `p <= u < 2^255` encoding could otherwise be

@@ -37,7 +37,7 @@ class HybridKemCrossSpec extends AnyFunSuite:
   // Any clamped X25519 scalar (a multiple of 8) drives this point to the identity, forcing the ECDH
   // shared secret to all-zero — non-contributory. Both platforms MUST reject it: JVM via its
   // blocklist / SunEC small-order rejection / all-zero backstop, JS via `@noble/curves` throwing.
-  // Pinning a NON-trivial degenerate encoding (beyond the easiest all-zero order-1 point) exercises
+  // Pinning a NON-trivial degenerate encoding (beyond the easiest all-zero order-2 point) exercises
   // those real rejection paths.
   private val smallOrder8LeU: Array[Byte] =
     hex("e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b800")
@@ -218,7 +218,7 @@ class HybridKemCrossSpec extends AnyFunSuite:
     )
 
   test("encaps rejects a hybrid public key whose X25519 prefix is a low-order (all-zero) point"):
-    // The all-zero X25519 u-coordinate is an order-1 point: the ECDH result is all-zero regardless of
+    // The all-zero X25519 u-coordinate is an order-2 point: the ECDH result is all-zero regardless of
     // the ephemeral scalar (non-contributory). The hybrid encaps MUST reject it (IllegalArgumentException),
     // at the hybrid level — not only one layer down in the X25519 leg. Uniform on both platforms.
     val (pub, _) = HybridKem.keypair()
@@ -246,7 +246,7 @@ class HybridKemCrossSpec extends AnyFunSuite:
 
   test("decaps rejects a ciphertext whose eph-X25519 prefix is a low-order (all-zero) point"):
     // The MORE security-relevant direction: a responder decapsulating hostile ciphertext. The
-    // attacker controls the first 32 bytes (the ephemeral X25519 public). An all-zero (order-1)
+    // attacker controls the first 32 bytes (the ephemeral X25519 public). An all-zero (order-2)
     // prefix is non-contributory and MUST be rejected BEFORE ML-KEM decaps, uniformly on both
     // platforms (the remaining ML-KEM ct region is irrelevant — rejection is on the X25519 leg).
     val (_, secret) = HybridKem.keypair()
