@@ -468,8 +468,9 @@ final class Engine(
     * explicit `pq_confirm_failed`, fail closed.
     *
     * ==Failure-before-mutation ordering==
-    * The tag check and `BuddyRuntime` construction (which consumes `rootP`) run BEFORE `book.confirm`
-    * commits, so a failure never leaves a Confirmed relationship with no runtime.
+    * The tag check runs, then the (pure) `book.confirm` is validated BEFORE the `BuddyRuntime` is
+    * constructed and `book` committed — so a failure never leaves a Confirmed relationship with no
+    * runtime, nor a throwaway ratchet holding un-wiped keys.
     *
     * The transient secrets `ss` (KEM shared secret) and `rootP` (seed) are ALWAYS wiped in `finally`.
     * The parked `pending` is wiped + removed ONLY on a successful completion — on ANY failure (bad
@@ -491,11 +492,15 @@ final class Engine(
       if !token.RetrievalToken.equalsCT(KeySchedule.pqConfirmTag(rootP), expectedTag) then
         Left(EngineError("pq_confirm_failed", "KEM key confirmation failed"))
       else
-        // Seed the deferred initiator ratchet BEFORE committing the book (failure-before-mutation):
-        // only an initiator's prekey is ever parked (see PendingPq).
-        val rt = BuddyRuntime(BuddyRole.Initiator, rootP)
+        // `book.confirm` is PURE (returns a new book, no mutation), so validate it BEFORE constructing
+        // the ratchet: on a refusal we never build a throwaway `BuddyRuntime` that would strand live,
+        // un-wiped ratchet keys (root/chain/header + a fresh X25519 private) with no erasure
+        // (Constitution II) — and never leave a Confirmed relationship with no runtime.
         book.confirm(pairId, matched = true) match
           case Right(nb) =>
+            // Seed the deferred initiator ratchet now that confirm is committed-to (only an
+            // initiator's prekey is ever parked — see PendingPq).
+            val rt = BuddyRuntime(BuddyRole.Initiator, rootP)
             book = nb
             runtime(pairId) = rt
             book

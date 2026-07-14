@@ -47,7 +47,15 @@ object KeySchedule:
     * seed. `kemSharedSecret` is a secret — the caller wipes it after this returns. HMAC-SHA256 only
     * (vetted `kdf.Kdf`; cross-platform JVM + JS — Constitution I). */
   def pqContentRoot(contentRoot: Array[Byte], kemSharedSecret: Array[Byte]): Array[Byte] =
-    kdf.Kdf.hmacSha256(contentRoot, "ks/pq-prekey".getBytes(UTF_8) ++ kemSharedSecret)
+    // Build the HMAC info in a local and wipe it in `finally` — a bare `label ++ kemSharedSecret`
+    // would leave an intermediate array holding an un-wiped copy of the KEM shared secret, undermining
+    // the caller's `wipe(ss)` (Constitution II). `System.arraycopy`/`Arrays.fill` are Scala.js-safe.
+    val label = "ks/pq-prekey".getBytes(UTF_8)
+    val info = new Array[Byte](label.length + kemSharedSecret.length)
+    System.arraycopy(label, 0, info, 0, label.length)
+    System.arraycopy(kemSharedSecret, 0, info, label.length, kemSharedSecret.length)
+    try kdf.Kdf.hmacSha256(contentRoot, info)
+    finally java.util.Arrays.fill(info, 0.toByte)
 
   /** Key-confirmation tag over the mixed PQ root — the explicit remedy for ML-KEM's IMPLICIT
     * REJECTION. ML-KEM `decaps` never throws on a tampered same-length ciphertext; it silently returns

@@ -49,13 +49,21 @@ Because a KEM is asymmetric, the two devices exchange real, distinct key materia
 
 - The **safety number / pairId are UNCHANGED** — still derived symmetrically from the out-of-band
   secret; only the content root gains the KEM secret.
-- **Key confirmation (mandatory):** ML-KEM has *implicit rejection* — a **same-length** tampered
+- **Key confirmation (initiator-side):** ML-KEM has *implicit rejection* — a **same-length** tampered
   `kemCiphertext` (or a substituted `kemPublicKey`) does NOT make decapsulation fail; it silently
-  yields a different shared secret. The `kemConfirmTag` closes this: because the tag is derived from
-  the mixed root (which depends on the KEM shared secret), ANY tamper of the KEM material changes the
-  tag, so the initiator's constant-time comparison fails and `confirmBuddy` is refused with
-  `pq_confirm_failed` (fail closed at pairing time) instead of establishing a confirmed-but-dead
-  pairing that has silently lost its PQ hardening.
+  yields a different shared secret. The `kemConfirmTag` closes this **on the initiator**: because the
+  tag is derived from the mixed root (which depends on the KEM shared secret), any tamper of the KEM
+  material changes the tag, so the **initiator's** constant-time comparison fails and its
+  `confirmBuddy` is refused with `pq_confirm_failed` (fail closed at pairing time) instead of
+  establishing a confirmed-but-dead pairing that has silently lost its PQ hardening.
+  - **Directionality caveat (honest labeling, Constitution IV):** confirmation is currently
+    **one-directional**. The **responder** encapsulates and confirms without verifying a tag from the
+    initiator, so if the initiator's `kemPublicKey` is tampered *in transit to the responder*, the
+    responder can still end up `Confirmed` with a dead ratchet — it only learns of the bad pairing by
+    never receiving decryptable traffic. The safety-number comparison (from the OOB secret) still
+    authenticates the *channel*, and the initiator always fails closed; but the responder-side
+    confirmed-but-dead state is NOT yet prevented. **Bidirectional key confirmation** (the initiator
+    returning its own tag for the responder to verify before it confirms) is a tracked follow-up.
 - **Fail closed:** once an initiator opts into `pqPrekey`, `confirmBuddy(matched: true)` WITHOUT both
   `kemCiphertext` and `kemConfirmTag` is refused (`pq_prekey_required`), and a tag mismatch is refused
   (`pq_confirm_failed`) — a PQ pairing never silently downgrades to the classical seed. In both cases
