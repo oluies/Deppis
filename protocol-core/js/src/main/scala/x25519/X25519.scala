@@ -29,9 +29,24 @@ object X25519:
 
   /** The 32-byte X25519 shared secret between our raw private key and a raw peer public key.
     *
-    * Contract (pinned cross-platform by `X25519Spec`'s parity test): a degenerate / low-order peer
-    * key is REJECTED by throwing, matching the JVM JCA build — `@noble/curves` throws on the all-zero
-    * result. Peer keys are attacker-controllable (they arrive in headers), so both builds must agree;
-    * the Stage-2 ratchet treats a throw as an undecryptable / carrier frame, uniformly. */
+    * Peer keys arrive in headers / ciphertexts and are attacker-controllable, so the acceptance set
+    * and the rejection exception are UNIFORM across platforms (pinned by `X25519Spec` /
+    * `X25519JsSpec` + the shared `X25519RejectionCrossSpec`), matching the JVM JCA build byte-for-byte
+    * on valid inputs:
+    *   - a non-canonical encoding whose (bit-255-masked, little-endian) u-coordinate is `>= p` is
+    *     rejected up front by the shared `CanonicalU.requireCanonical` (`PeerKeyRejected`);
+    *   - a degenerate / low-order peer key (all-zero ECDH result) is rejected by `@noble/curves`
+    *     throwing, which we NORMALIZE to `PeerKeyRejected` — the same dedicated
+    *     `IllegalArgumentException` subtype the JVM build raises, so callers (the classical
+    *     `DoubleRatchet`, the hybrid `kem.HybridKem`) treat a rejected peer key uniformly on both
+    *     platforms (an undecryptable / carrier frame).
+    * A wrong-length PRIVATE key is a LOCAL key-management error, not a peer rejection, so it is
+    * validated up front with a plain `IllegalArgumentException` (a distinct message) BEFORE the ECDH —
+    * so noble's throw can only ever mean a peer-key rejection, never a mislabeled local-key bug. */
   def sharedSecret(privateKey: Array[Byte], peerPublic: Array[Byte]): Array[Byte] =
-    Uint8.toBytes(nobleX25519.getSharedSecret(Uint8.toJs(privateKey), Uint8.toJs(peerPublic)))
+    require(privateKey.length == KeyBytes, s"X25519 private key must be $KeyBytes bytes")
+    CanonicalU.requireCanonical(peerPublic)
+    try Uint8.toBytes(nobleX25519.getSharedSecret(Uint8.toJs(privateKey), Uint8.toJs(peerPublic)))
+    catch
+      case e: js.JavaScriptException =>
+        throw new PeerKeyRejected(s"X25519 peer key rejected: ${e.getMessage}", e)

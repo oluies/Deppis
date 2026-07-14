@@ -177,6 +177,10 @@ class DoubleRatchetSpec extends AnyFunSuite:
     assert(bob.decrypt(bad1).isEmpty, "tampered stashed frame ⇒ None")
     assert(bob.decrypt(w1).map(text).contains("m1"), "the genuine stashed frame still decrypts")
 
+  // NOTE: the low-order / non-canonical peer ratchet-header-key rejection test (that a bad DH peer key
+  // is dropped as undecryptable, not a crash) is single-sourced cross-platform in
+  // `engine.DoubleRatchetRejectionCrossSpec` (crosstest/, run on both JVM and JS), not duplicated here.
+
   test("replaying a consumed frame returns None (the message key is gone)"):
     val (alice, bob) = pair()
     val w = alice.encrypt(inner("once"))

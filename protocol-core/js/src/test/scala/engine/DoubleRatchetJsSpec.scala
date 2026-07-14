@@ -75,3 +75,7 @@ class DoubleRatchetJsSpec extends AnyFunSuite:
     bad1(DoubleRatchet.WireSize - 1) = (bad1(DoubleRatchet.WireSize - 1) ^ 0x01).toByte
     assert(bob.decrypt(bad1).isEmpty)
     assert(bob.decrypt(w1).map(text).contains("m1"))
+
+  // NOTE: the low-order / non-canonical peer ratchet-header-key rejection test is single-sourced
+  // cross-platform in `engine.DoubleRatchetRejectionCrossSpec` (crosstest/, run on both JVM and JS),
+  // not duplicated here.

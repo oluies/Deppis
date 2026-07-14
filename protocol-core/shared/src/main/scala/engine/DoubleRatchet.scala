@@ -248,24 +248,38 @@ final class DoubleRatchet private (
               // frame's message key on a SCRATCH copy of the state (no instance mutation) and open the
               // body; only on success do we replay the real mutations. A failure leaves the ratchet
               // untouched (the no-mutation-on-undecryptable invariant, dh-ratchet.md §6/§9).
-              val mk = peekMessageKey(dhPub, headerN, isDhStep)
-              Aead.open(mk, nonce, sealedMsg) match
-                case None =>
-                  wipe(mk)
-                  None
-                case Some(inner) =>
-                  wipe(mk)
-                  if isDhStep then
-                    skipMessageKeys(
-                      headerPn
-                    ) // finish the previous chain (stash, under the OLD HKr)
-                    dhRatchet(dhPub)
-                  skipMessageKeys(headerN) // skip up to this frame in the current chain
-                  val ck = ckr.get
-                  ckr = Some(nextCk(ck))
-                  wipe(ck)
-                  nr += 1
-                  Some(inner)
+              // A DH-step peek runs the ECDH against the header's ratchet key, which is PUBLIC and
+              // attacker-supplied; a low-order / non-canonical peer key makes X25519.sharedSecret
+              // throw `PeerKeyRejected` uniformly on both platforms. Treat that like any other
+              // undecryptable frame — drop it, no state mutation (peekMessageKey mutates nothing). We
+              // catch EXACTLY `PeerKeyRejected` (not any IllegalArgumentException) so an unrelated
+              // IllegalArgumentException from a genuine bug — e.g. corrupted key material reaching the
+              // KDF inside peekMessageKey — is NOT silently swallowed as a carrier. The branch is
+              // governed by the public peer key, not by any secret, so no secret-dependent timing is
+              // introduced (dh-ratchet.md §6/§9).
+              val mkOpt =
+                try Some(peekMessageKey(dhPub, headerN, isDhStep))
+                catch case _: x25519.PeerKeyRejected => None
+              mkOpt match
+                case None => None // rejected peer ratchet key ⇒ carrier / not ours: no state change
+                case Some(mk) =>
+                  Aead.open(mk, nonce, sealedMsg) match
+                    case None =>
+                      wipe(mk)
+                      None
+                    case Some(inner) =>
+                      wipe(mk)
+                      if isDhStep then
+                        skipMessageKeys(
+                          headerPn
+                        ) // finish the previous chain (stash, under the OLD HKr)
+                        dhRatchet(dhPub)
+                      skipMessageKeys(headerN) // skip up to this frame in the current chain
+                      val ck = ckr.get
+                      ckr = Some(nextCk(ck))
+                      wipe(ck)
+                      nr += 1
+                      Some(inner)
 
   /** Derive THIS frame's message key without mutating instance state — used to verify the message
     * AEAD before committing the ratchet mutations (see `decrypt`). Walks a scratch chain key forward;

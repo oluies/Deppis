@@ -25,16 +25,19 @@ import crypto.{HybridKem => CryptoHybridKem}
   *
   * ==Peer-key validation (identical outcome on both platforms)==
   * Peer X25519 material is attacker-controllable, so both platforms accept the SAME set of peer keys
-  * and raise the SAME exception type on rejection — pinned by the cross-platform encaps/decaps
+  * and reject the rest with an `IllegalArgumentException` — pinned by the cross-platform encaps/decaps
   * rejection tests in `kem.HybridKemCrossSpec`. Both:
   *   - REJECT a non-canonical encoding whose (bit-255-masked, little-endian) u-coordinate is `>= p`
   *     (p = 2^255-19), via a `u < p` range check; and
-  *   - REJECT low-order / non-contributory peer points, raising `IllegalArgumentException`.
+  *   - REJECT low-order / non-contributory peer points.
   * This JVM side (via `crypto.HybridKem`) reaches that outcome with an EXPLICIT low-order blocklist
-  * plus the `u < p` check, backed by SunEC's own small-order rejection and an all-zero backstop; the
-  * JS side reaches the SAME outcome via the `u < p` check plus `@noble/curves` throwing on the
-  * low-order / all-zero result (normalized to `IllegalArgumentException`). The blocklist is a JVM-only
-  * fast pre-check — same acceptance set, not a different one. See the JS file's doc for the mirror.
+  * plus the `u < p` check, backed by SunEC's own small-order rejection and an all-zero backstop, and
+  * raises a PLAIN `IllegalArgumentException`. The JS side reaches the SAME acceptance set via the
+  * `u < p` check plus `@noble/curves` throwing on the low-order / all-zero result, normalized to
+  * `x25519.PeerKeyRejected` (a SUBTYPE of `IllegalArgumentException`); the two rejection types are
+  * therefore not identical, but both satisfy the `IllegalArgumentException` contract the crosstest
+  * pins. The blocklist is a JVM-only fast pre-check — same acceptance set, not a different one. See
+  * the JS file's doc for the mirror.
   */
 object HybridKem:
 

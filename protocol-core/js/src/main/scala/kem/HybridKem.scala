@@ -52,15 +52,18 @@ private trait Sha256Hash extends js.Object:
   *
   * ==Peer-key validation (identical outcome on both platforms)==
   * Peer X25519 material is attacker-controllable (it arrives in headers / ciphertexts), so both
-  * platforms must accept the same encodings and raise the same exception type on rejection. This JS
-  * side, via `x25519AgreeChecked`:
+  * platforms must accept the same encodings and raise the same exception type on rejection. Both
+  * legs delegate straight to `x25519.X25519.sharedSecret`, which:
   *   - REJECTS a non-canonical encoding whose (bit-255-masked, little-endian) u-coordinate is
   *     `>= p` (p = 2^255-19), BEFORE the ECDH — matching the JVM `crypto.HybridKem` `u < p` range
   *     check. This is pure public-byte validation, not crypto (Constitution I).
   *   - REJECTS low-order / non-contributory (all-zero-result) peer points via `@noble/curves`
-  *     THROWING (see `x25519.X25519.sharedSecret`), normalized to `IllegalArgumentException` — the
-  *     same exception type the JVM adapter and both specs pin — so shared engine code catching
-  *     `IllegalArgumentException` handles rejection uniformly on both platforms.
+  *     THROWING, normalized (in `x25519.X25519.sharedSecret`) to `x25519.PeerKeyRejected` — a
+  *     dedicated subtype of `IllegalArgumentException` pinned by the X25519 rejection parity specs
+  *     (`x25519.X25519RejectionCrossSpec`). The JVM leg (via `crypto.HybridKem`) raises a plain
+  *     `IllegalArgumentException`; both satisfy the `IllegalArgumentException` contract
+  *     `kem.HybridKemCrossSpec` pins, so shared engine code catching `IllegalArgumentException`
+  *     handles rejection uniformly on both platforms.
   * The two platforms therefore agree on which peer keys are accepted and on the thrown exception —
   * no availability / interop divergence (the JVM additionally runs an explicit small-subgroup
   * blocklist as a fast pre-check, but that is subsumed by noble's all-zero throw here). */
@@ -130,8 +133,9 @@ object HybridKem:
     var ssMl: Array[Byte] = null
     try
       // Validates `u < p` then agrees, normalizing noble's low-order/degenerate throw to
-      // IllegalArgumentException — cross-platform-uniform peer-key rejection (matching the JVM).
-      ssX = x25519AgreeChecked(ephPriv, peerXStatic)
+      // x25519.PeerKeyRejected — cross-platform-uniform peer-key rejection (matching the JVM). This
+      // rejection now lives in x25519.X25519.sharedSecret itself, so we delegate straight to it.
+      ssX = X25519.sharedSecret(ephPriv, peerXStatic)
       val (mlCt, ssMlOut) = Kem.encaps(peerMlkemPub)
       ssMl = ssMlOut
       val ciphertext = ephPub ++ mlCt
@@ -165,9 +169,10 @@ object HybridKem:
     var ssX: Array[Byte] = null
     var ssMl: Array[Byte] = null
     try
-      // Classical leg: our static private × the peer's ephemeral public. Validates `u < p` then
-      // agrees, normalizing noble's low-order/degenerate throw to IllegalArgumentException.
-      ssX = x25519AgreeChecked(x25519Priv, ephX)
+      // Classical leg: our static private × the peer's ephemeral public. x25519.X25519.sharedSecret
+      // validates `u < p` then agrees, normalizing noble's low-order/degenerate throw to
+      // x25519.PeerKeyRejected — cross-platform-uniform peer-key rejection.
+      ssX = X25519.sharedSecret(x25519Priv, ephX)
       ssMl = Kem.decaps(mlCt, mlkemSk)
       // Same transcript order as encaps: ephemeral (initiator) pub, static (our) pub, PQ ciphertext.
       combine(ssX, ssMl, ephX, x25519StaticPub, mlCt)
@@ -221,38 +226,6 @@ object HybridKem:
       if jsSsX != null then wipeJs(jsSsX)
       if jsSsMl != null then wipeJs(jsSsMl)
       if digest != null then wipeJs(digest) else h.destroy()
-
-  // Curve25519 field prime p = 2^255 - 19 (RFC 7748). A well-formed u-coordinate satisfies u < p
-  // after the unused top bit is masked; an out-of-range `p <= u < 2^255` encoding could otherwise be
-  // reduced differently by different peers, silently disagreeing on the classical leg. BigInt (not
-  // java.math.BigInteger) so this stays Scala.js-compatible.
-  private val P25519: BigInt = BigInt(2).pow(255) - 19
-
-  /** Reject a non-canonical peer X25519 u-coordinate (`u >= p` after masking bit 255), matching the
-    * JVM `crypto.HybridKem` `u < p` range check. Pure validation over the PUBLIC peer bytes — no
-    * secret-dependent branch, no crypto (Constitution I/II). Throws `IllegalArgumentException`. */
-  private def requireCanonicalX25519(raw: Array[Byte]): Unit =
-    require(raw.length == X25519KeyBytes, s"X25519 raw public key must be $X25519KeyBytes bytes")
-    // Interpret little-endian with bit 255 cleared (RFC 7748 ignores the top bit on decode).
-    var u = BigInt(0)
-    var i = X25519KeyBytes - 1
-    while i >= 0 do
-      val b = if i == X25519KeyBytes - 1 then raw(i) & 0x7f else raw(i) & 0xff
-      u = (u << 8) | BigInt(b)
-      i -= 1
-    require(u < P25519, "X25519 peer u-coordinate is >= p")
-
-  /** X25519 ECDH with cross-platform-uniform peer-key rejection: validates the peer u-coordinate is
-    * canonical (`u < p`) BEFORE the ECDH, then normalizes `@noble/curves`' low-order / all-zero throw
-    * (raised as `js.JavaScriptException`) to `IllegalArgumentException` — the same exception type the
-    * JVM `crypto.HybridKem` raises for EVERY peer-key rejection, so shared engine code catching
-    * `IllegalArgumentException` treats attacker peer material uniformly on both platforms. */
-  private def x25519AgreeChecked(privateScalar: Array[Byte], peerRaw: Array[Byte]): Array[Byte] =
-    requireCanonicalX25519(peerRaw)
-    try X25519.sharedSecret(privateScalar, peerRaw)
-    catch
-      case e: js.JavaScriptException =>
-        throw new IllegalArgumentException(s"X25519 peer key rejected: ${e.getMessage}", e)
 
   /** Best-effort zero a secret byte array (Constitution II). Best-effort on both platforms: a moving
     * GC may have copied it, and noble's own internal buffers are outside our reach. */

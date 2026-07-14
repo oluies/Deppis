@@ -52,6 +52,72 @@ class HybridKemCrossSpec extends AnyFunSuite:
     val ssDec = HybridKem.decaps(ct, secret)
     assert(ssDec.sameElements(ssEnc), "encaps and decaps must derive the same secret")
 
+  test(
+    "ACCEPTANCE PARITY: a peer static X25519 with bit 255 SET is accepted + masked at the KEM layer"
+  ):
+    // The acceptance-set property this KEM pins, at the HYBRID layer (not just the X25519 primitive):
+    // the JVM `kem.HybridKem` runs its classical leg through `crypto.HybridKem` (its OWN
+    // `validatePeerX25519` + `x25519RawToPub`), while the JS side delegates to
+    // `x25519.X25519.sharedSecret` — DIFFERENT code judging the same peer key. Both must MASK the
+    // unused top bit (bit 255) of the peer static u-coordinate, not REJECT it, or the two platforms
+    // would disagree on which peer keys are accepted (a cross-platform oracle the rejection KATs and
+    // the primitive-level `X25519AcceptCrossSpec` do not catch at THIS layer). A future edit to
+    // `crypto.HybridKem.validatePeerX25519` that rejected a top-bit-set encoding would fail here.
+    //
+    // The combiner binds the RAW peer-static bytes into the transcript, so the top bit is set
+    // CONSISTENTLY: on the peer static in the public key (the encaps ECDH + transcript input) AND on
+    // the stored static-pub half of the secret (bytes 32..63 — the decaps transcript field). encaps
+    // then decaps must SUCCEED (accepted, not rejected) and AGREE — proving both platforms mask bit
+    // 255 identically in the ECDH. (The derived secret differs from the canonical-encoding run by
+    // design: the transcript commits to the exact peer encoding — that is the combiner's binding, not
+    // an oracle. This uses a fresh random keypair per platform, so it proves each platform's internal
+    // encaps/decaps masking agreement; cross-platform EQUALITY of the top-bit-set secret follows
+    // compositionally from the pinned combiner + RFC 7748 primitive KATs, not from this test.)
+    val (pub, secret) = HybridKem.keypair()
+    val pubTop = pub.clone()
+    pubTop(31) = (pubTop(31) | 0x80.toByte).toByte // set bit 255 on the peer static u-coordinate
+    val secretTop = secret.clone()
+    secretTop(63) =
+      (secretTop(63) | 0x80.toByte).toByte // same, on the stored static pub (idx 32+31)
+    assert(
+      !pubTop.sameElements(pub),
+      "byte 31 top bit must actually differ from the canonical encoding"
+    )
+    val (ct, ssEnc) =
+      HybridKem.encaps(pubTop) // MUST NOT throw ⇒ the top-bit-set peer key is accepted
+    val ssDec = HybridKem.decaps(ct, secretTop)
+    assert(
+      ssDec.sameElements(ssEnc),
+      "top-bit-set peer static round-trips ⇒ both platforms mask bit 255 identically at the KEM layer"
+    )
+
+  test(
+    "ACCEPTANCE PARITY (decaps): a ciphertext ephemeral-X25519 with bit 255 SET is accepted + masked"
+  ):
+    // Mirror of the encaps case in the more security-relevant, ATTACKER-CONTROLLED direction: the
+    // decaps ephemeral X25519 (bytes 0..31 of the 1120-byte ciphertext) arrives from the wire. Both
+    // platforms must MASK bit 255 of that u-coordinate, not REJECT it — the decaps rejection KATs pin
+    // all-zero / order-8 / u=p, but no ACCEPTANCE case, so a future tightening that required a
+    // canonical ENCODING on the decaps ephemeral would reopen the acceptance oracle exactly where
+    // hostile bytes arrive, and would fail HERE. decaps must not throw; the secret differs from the
+    // canonical run because the combiner binds the RAW ephemeral bytes (proving the changed encoding
+    // flowed through rather than being silently re-canonicalized), while the masked ECDH point is
+    // unchanged.
+    val (pub, secret) = HybridKem.keypair()
+    val (ct, ssEnc) = HybridKem.encaps(pub)
+    val ctTop = ct.clone()
+    ctTop(31) = (ctTop(31) | 0x80.toByte).toByte // set bit 255 on the ephemeral X25519 u-coordinate
+    assert(
+      !ctTop.sameElements(ct),
+      "byte 31 top bit must actually differ from the canonical encoding"
+    )
+    // decaps MUST NOT throw ⇒ the top-bit-set ephemeral is accepted (masked), not rejected.
+    val ssDec = HybridKem.decaps(ctTop, secret)
+    assert(
+      !ssDec.sameElements(ssEnc),
+      "the changed ephemeral encoding flows through the transcript rather than being re-canonicalized"
+    )
+
   test("combiner KAT: fixed inputs pin the exact 32-byte SHA-256 output (JVM<->JS interop)"):
     // Byte-identical to crypto.HybridKemSpec's KAT — pins Label, field order
     // (label ++ ssX ++ ssMl ++ eph ++ peer ++ ct), and the digest across all implementations. A
