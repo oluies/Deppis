@@ -34,16 +34,27 @@ class X25519Spec extends AnyFunSuite:
     // distinct pairs ⇒ distinct public keys (sanity)
     assert(!aPub.sameElements(bPub))
 
-  test("every canonical small-order peer key is rejected on BOTH platforms"):
+  test("every small-order / non-canonical peer key is rejected with IllegalArgumentException"):
     // Peer public keys arrive in headers and are attacker-controllable. The classic Curve25519
     // small-order points (orders 1/2/4/8 — the libsodium blacklist) all yield the all-zero secret
-    // under the clamped scalar; JCA and @noble/curves must AGREE to reject each (throw) so the
-    // Stage-2 ratchet can treat a bad DH as a carrier frame uniformly. A divergence here (one throws,
-    // one returns zero) would be a cross-platform contract break the RFC-7748 KAT does not catch.
-    // `Throwable` covers JCA's InvalidKeyException and the JS JavaScriptException alike.
+    // under the clamped scalar; the list also contains non-canonical `u >= p` encodings (p, p+1).
+    // JCA and @noble/curves must AGREE to reject EACH with the SAME exception TYPE
+    // (IllegalArgumentException) so the Stage-2 ratchet can treat a bad DH as a carrier frame
+    // uniformly. A divergence here (one throws a different type, or accepts) would be a cross-platform
+    // oracle the RFC-7748 KAT does not catch.
     val priv = hex("77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a")
     X25519Spec.smallOrderPoints.foreach: u =>
-      assertThrows[Throwable](X25519.sharedSecret(priv, hex(u)))
+      assertThrows[IllegalArgumentException](X25519.sharedSecret(priv, hex(u)))
+
+  test("a low-order (all-zero) AND a non-canonical (u = p) peer key both reject identically"):
+    // The two distinct rejection paths, pinned explicitly and to the SAME exception type on JVM & JS:
+    //   - all-zero u (order-2, canonical): passes the u<p range check, rejected by the all-zero ECDH;
+    //   - u = p (edff…7f): rejected up front by the canonical `u < p` range check.
+    val priv = hex("77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a")
+    val lowOrderZero = hex("0000000000000000000000000000000000000000000000000000000000000000")
+    val nonCanonicalP = hex("edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f")
+    assertThrows[IllegalArgumentException](X25519.sharedSecret(priv, lowOrderZero))
+    assertThrows[IllegalArgumentException](X25519.sharedSecret(priv, nonCanonicalP))
 
 object X25519Spec:
   /** Canonical Curve25519 small-order u-coordinates (little-endian), the libsodium blacklist: 0, 1,

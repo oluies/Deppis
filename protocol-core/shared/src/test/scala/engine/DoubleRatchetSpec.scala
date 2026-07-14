@@ -177,6 +177,36 @@ class DoubleRatchetSpec extends AnyFunSuite:
     assert(bob.decrypt(bad1).isEmpty, "tampered stashed frame ⇒ None")
     assert(bob.decrypt(w1).map(text).contains("m1"), "the genuine stashed frame still decrypts")
 
+  test(
+    "a low-order / non-canonical peer ratchet header key is dropped as undecryptable, not a crash"
+  ):
+    // Craft a first frame for a FRESH responder whose sealed header authenticates — it is sealed under
+    // the responder's bootstrap header key `hka`, which both sides derive from the shared content root
+    // — but carries an attacker-chosen low-order / non-canonical ratchet public key. Reaching the DH
+    // step, `X25519.sharedSecret` now throws `IllegalArgumentException` uniformly on both platforms;
+    // `decrypt` must DROP the frame (None) with no state mutation, NOT propagate the throw. This is the
+    // roborev-flagged cross-platform oracle, now closed at the ratchet's own DH primitive.
+    val root = contentRoot(9)
+    val hka = kdf.Kdf.hmacSha256(root, "dr/hdr/a".getBytes(UTF_8)) // == responder's initial nhkr
+    def malicious(dhPub: Array[Byte]): Array[Byte] =
+      val header = dhPub ++ Array.fill[Byte](8)(0) // PN=0, Ns=0
+      val nonce = Array.fill[Byte](12)(0x11.toByte)
+      val sealedHeader = aead.Aead.seal(hka, nonce, header)
+      val body = Array.fill[Byte](DoubleRatchet.WireSize - 12 - sealedHeader.length)(0x5a.toByte)
+      nonce ++ sealedHeader ++ body
+    val lowOrder = new Array[Byte](32) // all-zero u: order-2, canonical, all-zero ECDH
+    val nonCanonical = // u = p (edff…7f) — rejected by the canonical range check
+      val a = Array.fill[Byte](32)(0xff.toByte); a(0) = 0xed.toByte; a(31) = 0x7f.toByte; a
+    val bob = DoubleRatchet.initResponder(root)
+    assert(
+      bob.decrypt(malicious(lowOrder)).isEmpty,
+      "low-order peer ratchet key ⇒ dropped, no crash"
+    )
+    assert(bob.decrypt(malicious(nonCanonical)).isEmpty, "non-canonical peer ratchet key ⇒ dropped")
+    // State intact: the genuine first frame from the matching initiator still decrypts.
+    val alice = DoubleRatchet.initInitiator(root)
+    assert(bob.decrypt(alice.encrypt(inner("real"))).map(text).contains("real"))
+
   test("replaying a consumed frame returns None (the message key is gone)"):
     val (alice, bob) = pair()
     val w = alice.encrypt(inner("once"))

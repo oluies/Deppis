@@ -34,12 +34,25 @@ class X25519JsSpec extends AnyFunSuite:
     assert(aPub.length == X25519.KeyBytes && aPriv.length == X25519.KeyBytes)
     assert(X25519.sharedSecret(aPriv, bPub).sameElements(X25519.sharedSecret(bPriv, aPub)))
 
-  test("every canonical small-order peer key is rejected on JS too"):
-    // Mirror of the JVM parity assertion over the full small-order set: @noble/curves must throw on
-    // each just as JCA does, so the cross-platform "reject low-order keys" contract holds under Node.
+  test(
+    "every small-order / non-canonical peer key is rejected with IllegalArgumentException on JS"
+  ):
+    // Mirror of the JVM parity assertion over the full set: @noble/curves' throw is normalized to
+    // IllegalArgumentException (and `u >= p` encodings are rejected up front), so the cross-platform
+    // "reject bad peer keys with the SAME exception type" contract holds under Node too.
     val priv = hex("77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a")
     smallOrderPoints.foreach: u =>
-      assertThrows[Throwable](X25519.sharedSecret(priv, hex(u)))
+      assertThrows[IllegalArgumentException](X25519.sharedSecret(priv, hex(u)))
+
+  test("a low-order (all-zero) AND a non-canonical (u = p) peer key both reject identically on JS"):
+    // The two distinct rejection paths, pinned explicitly and to the SAME exception type as the JVM:
+    //   - all-zero u (order-2, canonical): passes the u<p range check, rejected by the all-zero ECDH;
+    //   - u = p (edff…7f): rejected up front by the canonical `u < p` range check.
+    val priv = hex("77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a")
+    val lowOrderZero = hex("0000000000000000000000000000000000000000000000000000000000000000")
+    val nonCanonicalP = hex("edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f")
+    assertThrows[IllegalArgumentException](X25519.sharedSecret(priv, lowOrderZero))
+    assertThrows[IllegalArgumentException](X25519.sharedSecret(priv, nonCanonicalP))
 
   // Same canonical small-order u-coordinates as the JVM `X25519Spec` (kept local — shared test sources
   // do not compile into the JS project; see this file's header).
