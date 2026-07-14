@@ -206,3 +206,41 @@ class HybridKemJsSpec extends AnyFunSuite:
     assertThrows[IllegalArgumentException](
       HybridKem.encaps(new Array[Byte](HybridKem.PublicKeyBytes + 1))
     )
+
+  test("encaps rejects a hybrid public key whose X25519 prefix is a low-order (all-zero) point"):
+    // The all-zero X25519 u-coordinate is an order-1 point: the ECDH result is all-zero regardless of
+    // the ephemeral scalar (non-contributory). @noble/curves throws; the JS hybrid encaps normalizes
+    // that to an IllegalArgumentException and MUST reject at the hybrid level — uniform with the JVM.
+    val (pub, _) = HybridKem.keypair()
+    val lowOrderPub = pub.clone()
+    for i <- 0 until 32 do lowOrderPub(i) = 0.toByte
+    assertThrows[IllegalArgumentException](HybridKem.encaps(lowOrderPub))
+
+  test("encaps rejects a non-canonical peer X25519 component (u = p)"):
+    // p = 2^255 - 19 encodes little-endian as ed ff*30 7f. u = p is >= p, so the JS canonicality check
+    // rejects it BEFORE the ECDH (matching the JVM u < p range check) — no cross-platform divergence.
+    val (pub, _) = HybridKem.keypair()
+    val nonCanonical = pub.clone()
+    nonCanonical(0) = 0xed.toByte
+    for i <- 1 until 31 do nonCanonical(i) = 0xff.toByte
+    nonCanonical(31) = 0x7f.toByte
+    assertThrows[IllegalArgumentException](HybridKem.encaps(nonCanonical))
+
+  test("tampering either ciphertext leg changes the decapsulated secret (transcript binding)"):
+    // The combiner binds BOTH the eph-X25519 prefix and the ML-KEM ciphertext into the derived secret,
+    // so a bit flip in EITHER region yields a different shared secret (the two sides then fail to agree
+    // rather than silently sharing a key that reflects only one leg).
+    val (pub, secret) = HybridKem.keypair()
+    val (ct, ss) = HybridKem.encaps(pub)
+    val ctX = ct.clone()
+    ctX(0) = (ctX(0) ^ 0x01).toByte
+    assert(
+      !HybridKem.decaps(ctX, secret).sameElements(ss),
+      "a bit flip in the eph-X25519 prefix must change the derived secret"
+    )
+    val ctMl = ct.clone()
+    ctMl(HybridKem.CiphertextBytes - 1) = (ctMl(HybridKem.CiphertextBytes - 1) ^ 0x01).toByte
+    assert(
+      !HybridKem.decaps(ctMl, secret).sameElements(ss),
+      "a bit flip in the ML-KEM ciphertext must change the derived secret"
+    )

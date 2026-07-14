@@ -34,19 +34,20 @@ private object Sha256Module extends js.Object:
   *     peerX25519Raw(32) ++ mlkemCiphertext(1088) ) = 32, with the EXACT same `Label` string as the
   *     JVM combiner. A shared decaps KAT (generated on the JVM) is pinned in BOTH platforms' specs.
   *
-  * ==Peer-key validation asymmetry (HONEST LABELING — do not paper over)==
-  * The JVM side (via `crypto.HybridKem`) performs an EXPLICIT X25519 low-order blocklist plus a
-  * `u < p` range check (backed by SunEC's small-order rejection and an all-zero backstop). THIS JS
-  * side performs NO explicit blocklist and NO `u < p` range check — it relies on `@noble/curves`
-  * THROWING on a low-order / all-zero X25519 result (see `x25519.X25519.sharedSecret`). Consequences,
-  * stated honestly:
-  *   - Low-order / non-contributory peer points: REJECTED on BOTH platforms (JVM blocklist+backstop;
-  *     JS via noble's all-zero throw) — neither derives a key from such a point.
-  *   - Non-canonical encodings with `p <= u < 2^255`: the JVM REJECTS these (`u < p` check); the JS
-  *     side lets noble reduce `u mod p` and proceeds. So a peer key with a non-canonical X25519
-  *     component is usable from a JS initiator but refused by a JVM initiator — an availability /
-  *     interop divergence (NOT a confidentiality break). This file does NOT claim to run the JVM's
-  *     explicit blocklist or range check. */
+  * ==Peer-key validation (identical outcome on both platforms)==
+  * Peer X25519 material is attacker-controllable (it arrives in headers / ciphertexts), so both
+  * platforms must accept the same encodings and raise the same exception type on rejection. This JS
+  * side, via `x25519AgreeChecked`:
+  *   - REJECTS a non-canonical encoding whose (bit-255-masked, little-endian) u-coordinate is
+  *     `>= p` (p = 2^255-19), BEFORE the ECDH — matching the JVM `crypto.HybridKem` `u < p` range
+  *     check. This is pure public-byte validation, not crypto (Constitution I).
+  *   - REJECTS low-order / non-contributory (all-zero-result) peer points via `@noble/curves`
+  *     THROWING (see `x25519.X25519.sharedSecret`), normalized to `IllegalArgumentException` — the
+  *     same exception type the JVM adapter and both specs pin — so shared engine code catching
+  *     `IllegalArgumentException` handles rejection uniformly on both platforms.
+  * The two platforms therefore agree on which peer keys are accepted and on the thrown exception —
+  * no availability / interop divergence (the JVM additionally runs an explicit small-subgroup
+  * blocklist as a fast pre-check, but that is subsumed by noble's all-zero throw here). */
 object HybridKem:
 
   // FIPS 203 ML-KEM-768 sizes (mirror crypto.Oqs.MlKem768 / the JVM constants).
@@ -79,6 +80,11 @@ object HybridKem:
     val (mlkemPub, mlkemSk) = Kem.keypair()
     val publicKey = xPub ++ mlkemPub
     val secret = xPriv ++ xPub ++ mlkemSk
+    // `xPriv` and `mlkemSk` are now redundant live copies of private-key material inside `secret`
+    // (`++` copies); zero them (Constitution II), mirroring the JVM adapter's `HybridSecret.destroy()`
+    // of its struct copies. `xPub` is PUBLIC and retained in both outputs — left intact.
+    wipe(xPriv)
+    wipe(mlkemSk)
     (publicKey, secret)
 
   /** Encapsulate to a peer's hybrid public key. Returns `(ciphertext 1120, sharedSecret 32)`. A
@@ -95,8 +101,9 @@ object HybridKem:
     var ssX: Array[Byte] = null
     var ssMl: Array[Byte] = null
     try
-      // Throws (via @noble/curves) on a low-order / all-zero peer point — matching the JVM reject.
-      ssX = X25519.sharedSecret(ephPriv, peerXStatic)
+      // Validates `u < p` then agrees, normalizing noble's low-order/degenerate throw to
+      // IllegalArgumentException — cross-platform-uniform peer-key rejection (matching the JVM).
+      ssX = x25519AgreeChecked(ephPriv, peerXStatic)
       val (mlCt, ssMlOut) = Kem.encaps(peerMlkemPub)
       ssMl = ssMlOut
       val ciphertext = ephPub ++ mlCt
@@ -130,8 +137,9 @@ object HybridKem:
     var ssX: Array[Byte] = null
     var ssMl: Array[Byte] = null
     try
-      // Classical leg: our static private × the peer's ephemeral public (throws on low-order).
-      ssX = X25519.sharedSecret(x25519Priv, ephX)
+      // Classical leg: our static private × the peer's ephemeral public. Validates `u < p` then
+      // agrees, normalizing noble's low-order/degenerate throw to IllegalArgumentException.
+      ssX = x25519AgreeChecked(x25519Priv, ephX)
       ssMl = Kem.decaps(mlCt, mlkemSk)
       // Same transcript order as encaps: ephemeral (initiator) pub, static (our) pub, PQ ciphertext.
       combine(ssX, ssMl, ephX, x25519StaticPub, mlCt)
@@ -155,9 +163,57 @@ object HybridKem:
       peerX25519Raw: Array[Byte],
       mlkemCiphertext: Array[Byte]
   ): Array[Byte] =
+    // `msg` (and its `Uint8Array` copy `jsMsg`) hold BOTH KEM shared secrets in the clear; they are
+    // OUR arrays, so wiping them after the digest is a real zeroization (Constitution II) — otherwise
+    // they undercut the `wipe(ssX)`/`wipe(ssMl)` in encaps/decaps. `++` copies, so this does NOT
+    // touch `Label` or the caller's `ssX25519`/`ssMlKem` inputs. The digest bytes are unchanged.
     val msg = Label ++ ssX25519 ++ ssMlKem ++ ephemeralX25519Raw ++ peerX25519Raw ++ mlkemCiphertext
-    Uint8.toBytes(Sha256Module.sha256(Uint8.toJs(msg)))
+    val jsMsg = Uint8.toJs(msg)
+    try Uint8.toBytes(Sha256Module.sha256(jsMsg))
+    finally
+      wipe(msg)
+      wipeJs(jsMsg)
+
+  // Curve25519 field prime p = 2^255 - 19 (RFC 7748). A well-formed u-coordinate satisfies u < p
+  // after the unused top bit is masked; an out-of-range `p <= u < 2^255` encoding could otherwise be
+  // reduced differently by different peers, silently disagreeing on the classical leg. BigInt (not
+  // java.math.BigInteger) so this stays Scala.js-compatible.
+  private val P25519: BigInt = BigInt(2).pow(255) - 19
+
+  /** Reject a non-canonical peer X25519 u-coordinate (`u >= p` after masking bit 255), matching the
+    * JVM `crypto.HybridKem` `u < p` range check. Pure validation over the PUBLIC peer bytes — no
+    * secret-dependent branch, no crypto (Constitution I/II). Throws `IllegalArgumentException`. */
+  private def requireCanonicalX25519(raw: Array[Byte]): Unit =
+    require(raw.length == X25519KeyBytes, s"X25519 raw public key must be $X25519KeyBytes bytes")
+    // Interpret little-endian with bit 255 cleared (RFC 7748 ignores the top bit on decode).
+    var u = BigInt(0)
+    var i = X25519KeyBytes - 1
+    while i >= 0 do
+      val b = if i == X25519KeyBytes - 1 then raw(i) & 0x7f else raw(i) & 0xff
+      u = (u << 8) | BigInt(b)
+      i -= 1
+    require(u < P25519, "X25519 peer u-coordinate is >= p")
+
+  /** X25519 ECDH with cross-platform-uniform peer-key rejection: validates the peer u-coordinate is
+    * canonical (`u < p`) BEFORE the ECDH, then normalizes `@noble/curves`' low-order / all-zero throw
+    * (raised as `js.JavaScriptException`) to `IllegalArgumentException` — the same exception type the
+    * JVM `crypto.HybridKem` raises for EVERY peer-key rejection, so shared engine code catching
+    * `IllegalArgumentException` treats attacker peer material uniformly on both platforms. */
+  private def x25519AgreeChecked(privateScalar: Array[Byte], peerRaw: Array[Byte]): Array[Byte] =
+    requireCanonicalX25519(peerRaw)
+    try X25519.sharedSecret(privateScalar, peerRaw)
+    catch
+      case e: js.JavaScriptException =>
+        throw new IllegalArgumentException(s"X25519 peer key rejected: ${e.getMessage}", e)
 
   /** Best-effort zero a secret byte array (Constitution II). Best-effort on both platforms: a moving
     * GC may have copied it, and noble's own internal buffers are outside our reach. */
   private def wipe(a: Array[Byte]): Unit = java.util.Arrays.fill(a, 0.toByte)
+
+  /** Zero a `Uint8Array` we own (e.g. the SHA-256 input copy in `combine`) — a real zeroization of
+    * OUR buffer (Constitution II), not a best-effort reach into noble internals. */
+  private def wipeJs(u: Uint8Array): Unit =
+    var i = 0
+    while i < u.length do
+      u(i) = 0.toShort
+      i += 1
