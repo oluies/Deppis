@@ -49,6 +49,19 @@ object KeySchedule:
   def pqContentRoot(contentRoot: Array[Byte], kemSharedSecret: Array[Byte]): Array[Byte] =
     kdf.Kdf.hmacSha256(contentRoot, "ks/pq-prekey".getBytes(UTF_8) ++ kemSharedSecret)
 
+  /** Key-confirmation tag over the mixed PQ root — the explicit remedy for ML-KEM's IMPLICIT
+    * REJECTION. ML-KEM `decaps` never throws on a tampered same-length ciphertext; it silently returns
+    * a pseudo-random shared secret. Both sides therefore derive a tag `HMAC(pqRoot, "ks/pq-confirm")`
+    * from the mixed root (which depends on the KEM shared secret), and the initiator constant-time
+    * compares its tag to the responder's BEFORE seeding. ANY tamper of `kemPublicKey`/`kemCiphertext`
+    * changes the shared secret ⇒ changes the root ⇒ changes the tag ⇒ explicit fail-closed, instead of
+    * a silently-non-interoperable ("confirmed but dead") pairing that also strips the PQ hardening.
+    *
+    * Domain-separated from the seed: the tag mixes the SAME root under a DIFFERENT label than any key
+    * the ratchet consumes, so publishing the tag reveals nothing about the seed (HMAC one-wayness). */
+  def pqConfirmTag(pqContentRoot: Array[Byte]): Array[Byte] =
+    kdf.Kdf.hmacSha256(pqContentRoot, "ks/pq-confirm".getBytes(UTF_8))
+
   /** Initial chain key for the `from → to` direction; both parties derive the same one. */
   def chain0(contentRoot: Array[Byte], from: String, to: String): Array[Byte] =
     kdf.Kdf.hmacSha256(contentRoot, s"ks/chain/$from/$to".getBytes(UTF_8))

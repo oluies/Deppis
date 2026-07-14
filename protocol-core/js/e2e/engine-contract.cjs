@@ -83,17 +83,29 @@ const pqRespAdd = JSON.parse(
   pqResp.handle(`{"apiVersion":"1","command":"addBuddy","args":{"sharedSecret":"oob","role":"responder","initiatorKemPublicKey":"${kemPub}"}}`)
 );
 const kemCt = pqRespAdd.result.kemCiphertext;
+const kemTag = pqRespAdd.result.kemConfirmTag;
 assert.ok(typeof kemCt === "string" && kemCt.length > 100, "responder returns a base64 KEM ciphertext");
+assert.ok(typeof kemTag === "string" && kemTag.length > 20, "responder returns a base64 key-confirmation tag");
 assert.strictEqual(pqAdd.result.pairId, pqRespAdd.result.pairId, "pairId unchanged by the KEM");
-// Fail closed: matched WITHOUT the ciphertext is refused (no silent classical downgrade).
+// Fail closed: matched WITHOUT the ciphertext + tag is refused (no silent classical downgrade).
 const pqNoCt = JSON.parse(
   pqInit.handle(`{"apiVersion":"1","command":"confirmBuddy","args":{"pairId":"${pqAdd.result.pairId}","matched":true}}`)
 );
-assert.strictEqual(pqNoCt.error.code, "pq_prekey_required", "PQ confirm without ciphertext refused");
-// With the ciphertext the initiator completes and buddyConfirmed fires.
-const pqConf = JSON.parse(
-  pqInit.handle(`{"apiVersion":"1","command":"confirmBuddy","args":{"pairId":"${pqAdd.result.pairId}","matched":true,"kemCiphertext":"${kemCt}"}}`)
+assert.strictEqual(pqNoCt.error.code, "pq_prekey_required", "PQ confirm without ciphertext/tag refused");
+// Key confirmation: a SAME-LENGTH bit-flip of the ciphertext (base64) fails closed — ML-KEM's implicit
+// rejection does not throw, but the confirmation tag catches it.
+const ctBuf = Buffer.from(kemCt, "base64");
+ctBuf[0] ^= 0x01;
+const tamperedCt = ctBuf.toString("base64");
+assert.strictEqual(tamperedCt.length, kemCt.length, "tamper is same-length");
+const pqTamper = JSON.parse(
+  pqInit.handle(`{"apiVersion":"1","command":"confirmBuddy","args":{"pairId":"${pqAdd.result.pairId}","matched":true,"kemCiphertext":"${tamperedCt}","kemConfirmTag":"${kemTag}"}}`)
 );
-assert.strictEqual(pqConf.events[0].event, "buddyConfirmed", "PQ initiator confirms with the ciphertext");
+assert.strictEqual(pqTamper.error.code, "pq_confirm_failed", "same-length ciphertext tamper fails closed");
+// With the correct ciphertext + tag the initiator completes and buddyConfirmed fires.
+const pqConf = JSON.parse(
+  pqInit.handle(`{"apiVersion":"1","command":"confirmBuddy","args":{"pairId":"${pqAdd.result.pairId}","matched":true,"kemCiphertext":"${kemCt}","kemConfirmTag":"${kemTag}"}}`)
+);
+assert.strictEqual(pqConf.events[0].event, "buddyConfirmed", "PQ initiator confirms with ciphertext + tag");
 
 console.log("engine-contract e2e: OK (bundle =", path.basename(bundle) + ")");

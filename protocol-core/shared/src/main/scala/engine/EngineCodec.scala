@@ -56,9 +56,9 @@ final class EngineCodec(engine: Engine):
         // PQ pairing prekey (US7) wire fields (all optional; base64):
         //   in : `initiatorKemPublicKey` (responder consumes the initiator's hybrid-KEM public key),
         //        `pqPrekey: true` (an initiator opting into the PQ path — generate a keypair + defer).
-        //   out: `kemPublicKey` (initiator) or `kemCiphertext` (responder) — PUBLIC material the app
-        //        carries out of band to the peer. Absent on the classical path. A malformed base64
-        //        value throws and is mapped to `bad_request` by the guard in `handle`.
+        //   out: `kemPublicKey` (initiator) or `kemCiphertext` + `kemConfirmTag` (responder) — PUBLIC
+        //        material the app carries out of band to the peer. Absent on the classical path. A
+        //        malformed base64 value throws and is mapped to `bad_request` by the guard in `handle`.
         for
           role <- BuddyRole.parse(str(args, "role"))
           res <- engine.addBuddy(
@@ -71,16 +71,18 @@ final class EngineCodec(engine: Engine):
           val obj = ujson.Obj("pairId" -> res.pairId, "safetyNumber" -> res.safetyNumber)
           res.kemPublicKey.foreach(b => obj("kemPublicKey") = b64e(b))
           res.kemCiphertext.foreach(b => obj("kemCiphertext") = b64e(b))
+          res.kemConfirmTag.foreach(b => obj("kemConfirmTag") = b64e(b))
           obj
 
       case "confirmBuddy" =>
-        // An initiator PQ pairing carries the responder's `kemCiphertext` (base64) back here to
-        // complete the prekey and seed its deferred ratchet; absent/ignored on the classical path.
+        // An initiator PQ pairing carries the responder's `kemCiphertext` + `kemConfirmTag` (base64)
+        // back here to key-confirm + seed its deferred ratchet; absent/ignored on the classical path.
         engine
           .confirmBuddy(
             str(args, "pairId"),
             bool(args, "matched"),
-            kemCiphertext = optBytes(args, "kemCiphertext")
+            kemCiphertext = optBytes(args, "kemCiphertext"),
+            kemConfirmTag = optBytes(args, "kemConfirmTag")
           )
           .map(_ => ujson.Null)
 
