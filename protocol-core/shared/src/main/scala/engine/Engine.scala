@@ -116,6 +116,14 @@ final class Engine(
   // tag mismatch RETAINS it for a legitimate retry). The parked tag is a one-way HMAC (not the seed),
   // but is wiped anyway for uniformity with every other pairing secret.
   private val pendingResponderTag = mutable.Map.empty[String, Array[Byte]]
+  // Post-quantum pairing prekey (US7), INITIATOR side: after a successful `completePqInitiator` we
+  // RETAIN the initiator's `"ks/pq-confirm/i"` tag (PUBLIC — a one-way HMAC, not the seed) keyed by
+  // pairId, so a repeat `confirmBuddy(matched = true)` on an already-Confirmed PQ initiator can
+  // IDEMPOTENTLY return the SAME `initiatorConfirmTag` (no re-seed, no duplicate `BuddyConfirmed`). The
+  // tag is one-shot in the `ConfirmResult`; if the app loses it (crash, dropped wire response, UI
+  // dismissal) the RESPONDER would otherwise be stranded in pending-confirm forever with no way to
+  // recover the value it must verify. Wiped + removed on `removeBuddy` (the pairing is gone).
+  private val completedInitiatorTag = mutable.Map.empty[String, Array[Byte]]
   // Per-session cover-traffic key + counter. Cover (carrier) writes go to fresh, random-looking
   // tokens derived from this key, so a carrier round's store write is indistinguishable from a real
   // one (FR-012 cover traffic). The key never leaves the engine.
@@ -439,6 +447,11 @@ final class Engine(
     *     lands in a confirmed-but-dead state.
     *   - '''CLASSICAL''' (no parked state, ratchet seeded at addBuddy): confirm/reject as before.
     *
+    * A repeat matched `confirmBuddy` on an ALREADY-completed PQ initiator is IDEMPOTENT: it re-returns
+    * the same `initiatorConfirmTag` (the tag is retained, PUBLIC) WITHOUT re-seeding or re-emitting
+    * `BuddyConfirmed`, so an app that lost the first `ConfirmResult` can still recover the value the
+    * responder must verify (otherwise the responder would be stranded in pending-confirm).
+    *
     * Fail closed — a matched PQ pairing missing the required tag(s) is refused (`pq_prekey_required`;
     * it must not silently downgrade to the classical seed), and a tag mismatch is refused
     * (`pq_confirm_failed`) with the parked state RETAINED so a legitimate retry can complete. On a
@@ -468,6 +481,12 @@ final class Engine(
                   "responder KEM ciphertext and confirmation tag required to confirm"
                 )
               )
+      case None if matched && completedInitiatorTag.contains(pairId) =>
+        // Idempotent replay: this PQ initiator already completed (prekey consumed, ratchet seeded,
+        // BuddyConfirmed already emitted). Re-return the SAME /i tag WITHOUT re-seeding or re-emitting,
+        // so an app that lost the first ConfirmResult can still relay it to the responder. A COPY is
+        // handed back so the caller cannot mutate our retained value.
+        Right(ConfirmResult(initiatorConfirmTag = completedInitiatorTag.get(pairId).map(_.clone())))
       case None =>
         pendingResponderTag.get(pairId) match
           case Some(expectedInitTag) =>
@@ -563,6 +582,9 @@ final class Engine(
             // Success: the parked prekey is consumed — wipe + remove it now.
             pending.wipe()
             pendingPq.remove(pairId)
+            // Retain a COPY of the /i tag (PUBLIC) so a repeat confirm can idempotently re-return it if
+            // the app lost the ConfirmResult — otherwise `rootP`/the prekey are wiped and it is gone.
+            completedInitiatorTag(pairId) = initiatorTag.clone()
             Right(ConfirmResult(initiatorConfirmTag = Some(initiatorTag)))
           case Left(reason) =>
             Left(EngineError("confirm_failed", reason)) // retain pending for a legitimate retry
@@ -635,6 +657,7 @@ final class Engine(
         runtime.remove(pairId)
         pendingPq.remove(pairId).foreach(_.wipe())
         pendingResponderTag.remove(pairId).foreach(wipe)
+        completedInitiatorTag.remove(pairId).foreach(wipe)
         Right(())
       case Left(reason) => Left(EngineError("remove_failed", reason))
 

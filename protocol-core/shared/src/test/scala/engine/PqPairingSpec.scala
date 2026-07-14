@@ -337,7 +337,8 @@ class PqPairingSpec extends AnyFunSuite:
         .isRight
     )
     assert(s.alice.confirmedCount == 1)
-    // The parked state is consumed: a second completion finds no pending prekey (already confirmed).
+    // The parked prekey is consumed, but a repeat matched confirm is now IDEMPOTENT: it re-returns the
+    // same /i tag (recoverable if the app lost the first ConfirmResult), not an error.
     assert(
       s.alice
         .confirmBuddy(
@@ -346,8 +347,39 @@ class PqPairingSpec extends AnyFunSuite:
           kemCiphertext = Some(s.kemCiphertext),
           kemConfirmTag = Some(s.kemConfirmTag)
         )
-        .isLeft
+        .isRight
     )
+
+  test(
+    "BIDIRECTIONAL: a repeat initiator confirm idempotently re-returns the same /i tag, no dup event"
+  ):
+    val s = pqSetup(FakeBackend())
+    val firstTag = completeInitiator(s)
+    assert(s.alice.drainEvents().collect { case EngineEvent.BuddyConfirmed(_, _) => 1 }.sum == 1)
+    // A repeat matched confirm — even WITHOUT re-supplying the ciphertext/tag — replays the same /i tag
+    // without re-seeding or re-emitting BuddyConfirmed (the app can recover a lost ConfirmResult).
+    val again = s.alice.confirmBuddy(s.pid, matched = true)
+    assert(again.isRight)
+    assert(
+      again.toOption.get.initiatorConfirmTag.exists(_.sameElements(firstTag)),
+      "the same /i tag is re-returned"
+    )
+    assert(s.alice.drainEvents().isEmpty, "no duplicate BuddyConfirmed on replay")
+    assert(s.alice.confirmedCount == 1, "still exactly one confirmed buddy")
+    // The re-returned tag is a COPY: mutating it does not corrupt the retained value.
+    again.toOption.get.initiatorConfirmTag.foreach(t => t(0) = (t(0) ^ 0xff).toByte)
+    assert(
+      s.alice
+        .confirmBuddy(s.pid, matched = true)
+        .toOption
+        .get
+        .initiatorConfirmTag
+        .exists(_.sameElements(firstTag)),
+      "the retained tag is unchanged after the caller mutated a returned copy"
+    )
+    // After removeBuddy the retained tag is gone: a later replay can no longer recover it.
+    assert(s.alice.removeBuddy(s.pid).isRight)
+    assert(s.alice.confirmBuddy(s.pid, matched = true).isLeft, "no tag to replay after removeBuddy")
 
   test("mismatch on a PQ initiator establishes nothing and clears the parked KEM secret"):
     val alice = Engine()

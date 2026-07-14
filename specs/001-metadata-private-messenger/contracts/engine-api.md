@@ -80,6 +80,16 @@ Because a KEM is asymmetric, the two devices exchange real, distinct key materia
   into a non-PQ pairing.
 - `kemPublicKey` / `kemCiphertext` / `kemConfirmTag` / `initiatorConfirmTag` are PUBLIC (a KEM public
   key, ciphertext, and one-way HMAC tags); no private key or shared secret ever crosses the boundary.
+- **Idempotent recovery:** the initiator's `initiatorConfirmTag` is retained after completion, so a
+  repeat `confirmBuddy(matched: true)` on an already-confirmed PQ initiator re-returns the SAME tag
+  (no duplicate `buddyConfirmed`, no re-seed). An app that loses the first result (crash, dropped
+  response) can recover the value it must relay instead of stranding the responder.
+- **Compatibility (behavior change under `apiVersion` "1"):** a PQ *responder* confirmation now
+  **requires** the relayed `initiatorConfirmTag` — a bare `confirmBuddy(matched: true)` on a PQ
+  responder returns `pq_prekey_required` (fail closed) rather than confirming as it did before
+  bidirectional confirmation. Integrators MUST relay the initiator's tag to the responder. The
+  classical (non-PQ) responder path is unchanged (`confirmBuddy(matched: true)` still confirms), so
+  `apiVersion` stays "1"; only the PQ responder step gained the new required field.
 
 **HONEST LABELING (Constitution IV): this hardens ONLY the initial content root.** The ongoing
 per-message X25519 DH ratchet REMAINS CLASSICAL — every subsequent message key still comes from a
