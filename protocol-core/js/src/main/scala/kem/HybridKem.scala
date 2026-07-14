@@ -89,20 +89,27 @@ object HybridKem:
     */
   def keypair(): (Array[Byte], Array[Byte]) =
     val (xPriv, xPub) = X25519.generateKeyPair()
-    val (mlkemPub, mlkemSk) = Kem.keypair()
-    val publicKey = xPub ++ mlkemPub // both public — no secret intermediate
-    // Assemble `secret` by copying the three parts into a preallocated buffer so NO intermediate
-    // concatenation of secret material is ever materialized — a left-assoc `xPriv ++ xPub ++ mlkemSk`
-    // would build an unwiped `(xPriv ++ xPub)` holding the private scalar. Then zero the redundant
-    // private-key copies (Constitution II), mirroring the JVM adapter's `HybridSecret.destroy()`.
-    // `xPub` is PUBLIC and retained in both outputs — left intact.
-    val secret = new Array[Byte](SecretKeyBytes)
-    System.arraycopy(xPriv, 0, secret, 0, X25519KeyBytes)
-    System.arraycopy(xPub, 0, secret, X25519KeyBytes, X25519KeyBytes)
-    System.arraycopy(mlkemSk, 0, secret, X25519KeyBytes + X25519KeyBytes, MlKemSecretBytes)
-    wipe(xPriv)
-    wipe(mlkemSk)
-    (publicKey, secret)
+    // `mlkemSk` is populated inside the try so a throw from `Kem.keypair()` still runs the finally
+    // (which then only has `xPriv` to wipe — `mlkemSk` is null-guarded), mirroring encaps/decaps.
+    var mlkemSk: Array[Byte] = null
+    try
+      val (mlkemPub, mlkemSkOut) = Kem.keypair()
+      mlkemSk = mlkemSkOut
+      val publicKey = xPub ++ mlkemPub // both public — no secret intermediate
+      // Assemble `secret` by copying the three parts into a preallocated buffer so NO intermediate
+      // concatenation of secret material is ever materialized — a left-assoc `xPriv ++ xPub ++ mlkemSk`
+      // would build an unwiped `(xPriv ++ xPub)` holding the private scalar. `xPub` is PUBLIC and
+      // retained in both outputs — left intact.
+      val secret = new Array[Byte](SecretKeyBytes)
+      System.arraycopy(xPriv, 0, secret, 0, X25519KeyBytes)
+      System.arraycopy(xPub, 0, secret, X25519KeyBytes, X25519KeyBytes)
+      System.arraycopy(mlkemSk, 0, secret, X25519KeyBytes + X25519KeyBytes, MlKemSecretBytes)
+      (publicKey, secret)
+    finally
+      // Zero the redundant private-key copies (Constitution II), mirroring the JVM adapter's
+      // `HybridSecret.destroy()`. Runs on the happy path AND if any arraycopy/Kem.keypair throws.
+      wipe(xPriv)
+      if mlkemSk != null then wipe(mlkemSk)
 
   /** Encapsulate to a peer's hybrid public key. Returns `(ciphertext 1120, sharedSecret 32)`. A
     * fresh ephemeral X25519 keypair is generated per call (forward secrecy of the classical leg). */
@@ -188,18 +195,26 @@ object HybridKem:
     // output is unchanged (combiner KAT fd00…69d8) — same Label, same field order, same digest.
     val h = Sha256Module.sha256.create()
     h.update(Uint8.toJs(Label)) // public domain-separation label
-    val jsSsX = Uint8.toJs(ssX25519)
-    h.update(jsSsX)
-    wipeJs(jsSsX) // secret: X25519 leg
-    val jsSsMl = Uint8.toJs(ssMlKem)
-    h.update(jsSsMl)
-    wipeJs(jsSsMl) // secret: ML-KEM leg
-    h.update(Uint8.toJs(ephemeralX25519Raw)) // public transcript
-    h.update(Uint8.toJs(peerX25519Raw)) // public transcript
-    h.update(Uint8.toJs(mlkemCiphertext)) // public transcript
-    val digest = h.digest()
-    try Uint8.toBytes(digest)
-    finally wipeJs(digest)
+    var jsSsX: Uint8Array = null
+    var jsSsMl: Uint8Array = null
+    var digest: Uint8Array = null
+    try
+      jsSsX = Uint8.toJs(ssX25519)
+      h.update(jsSsX) // secret: X25519 leg
+      jsSsMl = Uint8.toJs(ssMlKem)
+      h.update(jsSsMl) // secret: ML-KEM leg
+      h.update(Uint8.toJs(ephemeralX25519Raw)) // public transcript
+      h.update(Uint8.toJs(peerX25519Raw)) // public transcript
+      h.update(Uint8.toJs(mlkemCiphertext)) // public transcript
+      digest = h.digest()
+      Uint8.toBytes(digest)
+    finally
+      // Zero every secret-bearing buffer we own regardless of a throw mid-stream (Constitution II):
+      // the two KEM-shared-secret copies and the returned digest (itself the hybrid shared secret).
+      // The public label/transcript copies need no wipe; noble's own state is self-zeroed by digest().
+      if jsSsX != null then wipeJs(jsSsX)
+      if jsSsMl != null then wipeJs(jsSsMl)
+      if digest != null then wipeJs(digest)
 
   // Curve25519 field prime p = 2^255 - 19 (RFC 7748). A well-formed u-coordinate satisfies u < p
   // after the unused top bit is masked; an out-of-range `p <= u < 2^255` encoding could otherwise be

@@ -32,6 +32,16 @@ class HybridKemCrossSpec extends AnyFunSuite:
   // "ffffffXX" (the JVM Formatter does not), so mask explicitly for cross-platform-stable hex.
   private def toHex(a: Array[Byte]): String = a.map(b => "%02x".format(b & 0xff)).mkString
 
+  // A NON-zero small-order Curve25519 u-coordinate (order 8), from RFC 7748 §7 / the libsodium
+  // small-subgroup blocklist embedded in crypto.HybridKem. 32-byte little-endian, bit 255 clear.
+  // Any clamped X25519 scalar (a multiple of 8) drives this point to the identity, forcing the ECDH
+  // shared secret to all-zero — non-contributory. Both platforms MUST reject it: JVM via its
+  // blocklist / SunEC small-order rejection / all-zero backstop, JS via `@noble/curves` throwing.
+  // Pinning a NON-trivial degenerate encoding (beyond the easiest all-zero order-1 point) exercises
+  // those real rejection paths.
+  private val smallOrder8LeU: Array[Byte] =
+    hex("e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b800")
+
   test("round-trip: keypair -> encaps -> decaps agree; sizes match the contract"):
     val (pub, secret) = HybridKem.keypair()
     assert(pub.length == HybridKem.PublicKeyBytes, "public key = 1216")
@@ -216,6 +226,14 @@ class HybridKemCrossSpec extends AnyFunSuite:
     for i <- 0 until 32 do lowOrderPub(i) = 0.toByte
     assertThrows[IllegalArgumentException](HybridKem.encaps(lowOrderPub))
 
+  test("encaps rejects a hybrid public key whose X25519 prefix is a small-order (order-8) point"):
+    // Beyond the easiest all-zero encoding: a NON-zero small-order point (pinned vector). The ECDH
+    // still collapses to all-zero for any clamped scalar, so encaps MUST reject uniformly.
+    val (pub, _) = HybridKem.keypair()
+    val lowOrderPub = pub.clone()
+    System.arraycopy(smallOrder8LeU, 0, lowOrderPub, 0, 32)
+    assertThrows[IllegalArgumentException](HybridKem.encaps(lowOrderPub))
+
   test("encaps rejects a non-canonical peer X25519 component (u = p)"):
     // p = 2^255 - 19 encodes little-endian as ed ff*30 7f. u = p is >= p, so the canonicality check
     // rejects it (a peer that reduced mod p would otherwise silently disagree on the classical leg).
@@ -233,6 +251,15 @@ class HybridKemCrossSpec extends AnyFunSuite:
     // platforms (the remaining ML-KEM ct region is irrelevant — rejection is on the X25519 leg).
     val (_, secret) = HybridKem.keypair()
     val ct = new Array[Byte](HybridKem.CiphertextBytes) // eph-X25519 prefix = 32 zero bytes
+    assertThrows[IllegalArgumentException](HybridKem.decaps(ct, secret))
+
+  test("decaps rejects a ciphertext whose eph-X25519 prefix is a small-order (order-8) point"):
+    // The security-relevant direction with a NON-zero small-order ephemeral prefix (pinned vector):
+    // the ECDH collapses to all-zero for our clamped static scalar, so decaps MUST reject uniformly,
+    // on the X25519 leg before ML-KEM decaps.
+    val (_, secret) = HybridKem.keypair()
+    val ct = new Array[Byte](HybridKem.CiphertextBytes)
+    System.arraycopy(smallOrder8LeU, 0, ct, 0, 32)
     assertThrows[IllegalArgumentException](HybridKem.decaps(ct, secret))
 
   test("decaps rejects a ciphertext whose eph-X25519 prefix is non-canonical (u = p)"):
