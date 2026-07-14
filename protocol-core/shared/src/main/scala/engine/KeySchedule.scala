@@ -30,6 +30,25 @@ object KeySchedule:
   def contentRoot(pairKey: Array[Byte]): Array[Byte] =
     kdf.Kdf.hmacSha256(pairKey, "ks/content-root".getBytes(UTF_8))
 
+  /** Fold a hybrid-KEM (X25519+ML-KEM-768) pairing-prekey shared secret into the content root — the
+    * **post-quantum pairing prekey** (US7, harvest-now-decrypt-later). The initial content root that
+    * seeds the DH double ratchet becomes
+    * `HMAC(contentRoot, "ks/pq-prekey" ++ kemSharedSecret)`, so an adversary who has ONLY the
+    * (classical) out-of-band pairing secret and later a quantum computer still cannot reconstruct it
+    * without also breaking the KEM.
+    *
+    * HONEST LABELING (Constitution IV): this PQ-protects ONLY the INITIAL content root. The ongoing
+    * X25519 DH ratchet (`DoubleRatchet`) that re-keys every message REMAINS CLASSICAL — each per-
+    * message DH step is still harvest-now-decrypt-later-exposed. This is NOT post-quantum messaging;
+    * it hardens the pairing seed only.
+    *
+    * Single source of truth: both engine paths (responder `encaps`, initiator `decaps`) and the tests
+    * mix through THIS function with the SAME label ordering, so the two sides derive a byte-identical
+    * seed. `kemSharedSecret` is a secret — the caller wipes it after this returns. HMAC-SHA256 only
+    * (vetted `kdf.Kdf`; cross-platform JVM + JS — Constitution I). */
+  def pqContentRoot(contentRoot: Array[Byte], kemSharedSecret: Array[Byte]): Array[Byte] =
+    kdf.Kdf.hmacSha256(contentRoot, "ks/pq-prekey".getBytes(UTF_8) ++ kemSharedSecret)
+
   /** Initial chain key for the `from → to` direction; both parties derive the same one. */
   def chain0(contentRoot: Array[Byte], from: String, to: String): Array[Byte] =
     kdf.Kdf.hmacSha256(contentRoot, s"ks/chain/$from/$to".getBytes(UTF_8))

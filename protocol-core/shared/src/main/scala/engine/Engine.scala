@@ -4,6 +4,7 @@ import buddy.Buddy
 import buddy.Buddy.{BuddyBook, BuddyRelationship, BuddyState}
 import frame.Frame
 import handshake.Handshake
+import kem.HybridKem
 import privacy.Privacy
 import schedule.Schedule
 import token.RetrievalToken
@@ -54,8 +55,17 @@ object EngineEvent:
   final case class PrivacyStatus(backend: String, metadataPrivate: Boolean, label: String)
       extends EngineEvent
 
-/** Result of `addBuddy` — the comparable safety number for out-of-band comparison. NEVER the key. */
-final case class AddBuddyResult(pairId: String, safetyNumber: String)
+/** Result of `addBuddy` — the comparable safety number for out-of-band comparison. NEVER a private
+  * key. `kemPublicKey`/`kemCiphertext` are the PUBLIC hybrid-KEM pairing-prekey material (public key
+  * and ciphertext respectively — not secrets) the app carries out of band to the peer; at most one is
+  * set per call (initiator ⇒ `kemPublicKey`, PQ responder ⇒ `kemCiphertext`), and both are absent on
+  * the classical (non-PQ) path. See [[Engine.addBuddy]]. */
+final case class AddBuddyResult(
+    pairId: String,
+    safetyNumber: String,
+    kemPublicKey: Option[Array[Byte]] = None,
+    kemCiphertext: Option[Array[Byte]] = None
+)
 
 /** Per-round client decision from the schedule (`tick`). `kind`/`retrieve` only — no payload. */
 final case class RoundDecision(roundId: Long, carrier: Boolean, retrieve: Boolean)
@@ -77,6 +87,13 @@ final class Engine(
   private val events = mutable.ArrayBuffer.empty[EngineEvent]
   // Per-buddy delivery runtime: the role fixes the token direction; counters are non-recurrent.
   private val runtime = mutable.Map.empty[String, BuddyRuntime]
+  // Post-quantum pairing prekey (US7): an INITIATOR that opts into the PQ path generates a hybrid-KEM
+  // keypair at `addBuddy` and DEFERS seeding its ratchet until the responder's ciphertext arrives at
+  // `confirmBuddy`. Until then it parks the KEM SECRET key + the base content root here, keyed by
+  // pairId. Both are secret byte arrays and are WIPED on completion, mismatch, removeBuddy, and any
+  // error path (Constitution II) — the map is the only place an initiator's un-completed prekey secret
+  // lives, so wiping on removal from it is the whole forward-secrecy boundary for this state.
+  private val pendingPq = mutable.Map.empty[String, PendingPq]
   // Per-session cover-traffic key + counter. Cover (carrier) writes go to fresh, random-looking
   // tokens derived from this key, so a carrier round's store write is indistinguishable from a real
   // one (FR-012 cover traffic). The key never leaves the engine.
@@ -118,6 +135,19 @@ final class Engine(
     val ratchet: DoubleRatchet = role match
       case BuddyRole.Initiator => DoubleRatchet.initInitiator(contentRoot)
       case BuddyRole.Responder => DoubleRatchet.initResponder(contentRoot)
+
+  /** Parked initiator PQ pairing-prekey state (see `pendingPq`). Holds the hybrid-KEM secret key and
+    * the base content root — BOTH secret — until the responder's ciphertext arrives. Only ever an
+    * INITIATOR's state (a responder seeds its ratchet synchronously at `addBuddy`), so the role is
+    * implicit. `wipe()` zeroes both arrays in place; it is called when the parked state is CONSUMED
+    * (successful completion), and on removeBuddy — never on a failed/retryable completion. */
+  private final class PendingPq(
+      val kemSecret: Array[Byte],
+      val baseContentRoot: Array[Byte]
+  ):
+    def wipe(): Unit =
+      Engine.this.wipe(kemSecret)
+      Engine.this.wipe(baseContentRoot)
 
   private def peerRole(r: BuddyRole): BuddyRole = r match
     case BuddyRole.Initiator => BuddyRole.Responder
@@ -196,11 +226,32 @@ final class Engine(
 
   /** Run the add-friend handshake. Derives `pairId`/`safetyNumber`/`pairKey` from the shared
     * secret (symmetric), records a Pending relationship, and returns ONLY the comparable values —
-    * the derived `pairKey` never leaves the engine. */
+    * the derived `pairKey` never leaves the engine.
+    *
+    * ==Post-quantum pairing prekey (US7, Option A)==
+    * Optionally layers a hybrid-KEM (X25519+ML-KEM-768) prekey exchange whose shared secret is folded
+    * into the INITIAL content root via `KeySchedule.pqContentRoot`, WITHOUT touching the DH ratchet:
+    *   - '''Initiator''' with `initiatePqPrekey = true`: generate `(kemPub, kemSecret)`, park the
+    *     secret + base content root in `pendingPq`, DEFER ratchet seeding, and return `kemPublicKey`
+    *     for the app to send to the peer out of band. The relationship is Pending with no runtime yet.
+    *   - '''Responder''' given `initiatorKemPublicKey`: `encaps` to it, mix the shared secret into the
+    *     content root, seed the ratchet NOW, and return `kemCiphertext` for the app to return to the
+    *     initiator. The KEM shared secret is wiped after mixing.
+    *   - '''Classical (legacy / local-only)''': no KEM material ⇒ seed the ratchet from the classical
+    *     content root exactly as before. This path is NON-PQ (the pairing seed is only as strong as
+    *     the classical OOB secret); a PQ pairing must instead flow KEM material on both sides.
+    *
+    * HONEST LABELING (Constitution IV): even on the PQ path this hardens ONLY the initial content
+    * root; the ongoing per-message X25519 DH ratchet stays classical (see `KeySchedule.pqContentRoot`
+    * / the engine-api doc). `kemPublicKey`/`kemCiphertext` are PUBLIC; no private key leaves the
+    * engine. A PQ pairing does NOT silently downgrade — once an initiator opts in, `confirmBuddy`
+    * requires the ciphertext (fail closed). */
   def addBuddy(
       sharedSecret: Array[Byte],
       role: BuddyRole,
-      peerNotifyLabel: Array[Byte] = Array.emptyByteArray
+      peerNotifyLabel: Array[Byte] = Array.emptyByteArray,
+      initiatorKemPublicKey: Option[Array[Byte]] = None,
+      initiatePqPrekey: Boolean = false
   ): Either[EngineError, AddBuddyResult] =
     if sharedSecret.isEmpty then Left(EngineError("invalid_arg", "shared secret required"))
     else
@@ -222,33 +273,205 @@ final class Engine(
           addrKey,
           peerNotifyLabel.clone()
         )
-      book.add(rel) match
-        case Right(nb) =>
-          book = nb
-          runtime(init.pairId) = BuddyRuntime(role, contentRoot) // seeds the per-direction chains
-          wipe(contentRoot) // chains are seeded; the content root must not linger
-          Right(AddBuddyResult(init.pairId, init.safetyNumber)) // no key material
-        case Left(reason) =>
-          wipe(contentRoot)
-          wipe(addrKey) // not retained in a relationship on this path either
-          // reason is a fixed, non-secret string ("duplicate buddy" / "buddy cap 512 reached").
-          Left(EngineError("add_failed", reason))
+      (role, initiatorKemPublicKey) match
+        case (BuddyRole.Responder, Some(peerPub)) =>
+          addResponderPq(init, rel, addrKey, contentRoot, peerPub)
+        case (BuddyRole.Initiator, _) if initiatePqPrekey =>
+          addInitiatorPq(init, rel, addrKey, contentRoot)
+        case _ =>
+          addClassical(init, rel, addrKey, contentRoot, role)
 
-  /** Confirm/reject a pairing after the out-of-band safety-number comparison. On match, emits
-    * `buddyConfirmed`; on mismatch the relationship is removed and nothing is established. */
-  def confirmBuddy(pairId: String, matched: Boolean): Either[EngineError, Unit] =
-    book.confirm(pairId, matched) match
+  /** Classical (non-PQ) add: seed the ratchet immediately from the content root, as before. */
+  private def addClassical(
+      init: Handshake.PairInit,
+      rel: BuddyRelationship,
+      addrKey: Array[Byte],
+      contentRoot: Array[Byte],
+      role: BuddyRole
+  ): Either[EngineError, AddBuddyResult] =
+    book.add(rel) match
       case Right(nb) =>
         book = nb
-        if matched then
-          book.get(pairId).foreach(r => emit(EngineEvent.BuddyConfirmed(r.pairId, r.safetyNumber)))
-        Right(())
-      case Left(reason) => Left(EngineError("confirm_failed", reason))
+        runtime(init.pairId) = BuddyRuntime(role, contentRoot) // seeds the per-direction chains
+        wipe(contentRoot) // chains are seeded; the content root must not linger
+        Right(AddBuddyResult(init.pairId, init.safetyNumber)) // no key material
+      case Left(reason) =>
+        wipe(contentRoot)
+        wipe(addrKey) // not retained in a relationship on this path either
+        // reason is a fixed, non-secret string ("duplicate buddy" / "buddy cap 512 reached").
+        Left(EngineError("add_failed", reason))
 
-  /** Remove a buddy. Stops future delivery (FR-018) without leaking prior existence — no event. */
+  /** PQ responder add: `encaps` to the initiator's hybrid public key, fold the shared secret into the
+    * content root, seed the responder ratchet NOW, and return the ciphertext. `encaps` runs (and can
+    * reject a malformed/low-order peer key) BEFORE any book mutation, so a bad key adds nothing. */
+  private def addResponderPq(
+      init: Handshake.PairInit,
+      rel: BuddyRelationship,
+      addrKey: Array[Byte],
+      contentRoot: Array[Byte],
+      peerPub: Array[Byte]
+  ): Either[EngineError, AddBuddyResult] =
+    val encapsed =
+      try Right(HybridKem.encaps(peerPub))
+      catch case _: Throwable => Left(EngineError("pq_prekey_failed", "invalid KEM public key"))
+    encapsed match
+      case Left(err) =>
+        wipe(contentRoot); wipe(addrKey)
+        Left(err)
+      case Right((ct, ss)) =>
+        // Mix the KEM secret into the content root, then wipe the KEM secret + the base root in a
+        // `finally` so both are zeroed even if the mixing throws; only the PQ-hardened seed (`rootP`,
+        // itself wiped after seeding) reaches the ratchet.
+        val rootP =
+          try KeySchedule.pqContentRoot(contentRoot, ss)
+          finally
+            wipe(ss)
+            wipe(contentRoot)
+        book.add(rel) match
+          case Right(nb) =>
+            book = nb
+            try runtime(init.pairId) = BuddyRuntime(BuddyRole.Responder, rootP)
+            finally wipe(rootP) // chains seeded; the PQ content root must not linger
+            Right(AddBuddyResult(init.pairId, init.safetyNumber, kemCiphertext = Some(ct)))
+          case Left(reason) =>
+            wipe(rootP); wipe(addrKey)
+            Left(EngineError("add_failed", reason))
+
+  /** PQ initiator add: generate a hybrid-KEM keypair, PARK the secret + base content root, and DEFER
+    * ratchet seeding until the responder's ciphertext arrives at `confirmBuddy`. Returns the public
+    * key for out-of-band delivery. No runtime/ratchet exists for this buddy until completion. */
+  private def addInitiatorPq(
+      init: Handshake.PairInit,
+      rel: BuddyRelationship,
+      addrKey: Array[Byte],
+      contentRoot: Array[Byte]
+  ): Either[EngineError, AddBuddyResult] =
+    // Generate the keypair BEFORE any book mutation (mirrors addResponderPq's encaps-first ordering),
+    // so a generation failure adds nothing to unwind.
+    val generated =
+      try Right(HybridKem.keypair())
+      catch case _: Throwable => Left(EngineError("pq_prekey_failed", "prekey generation failed"))
+    generated match
+      case Left(err) =>
+        wipe(contentRoot); wipe(addrKey)
+        Left(err)
+      case Right((kemPub, kemSecret)) =>
+        book.add(rel) match
+          case Right(nb) =>
+            book = nb
+            // `kemSecret` + `contentRoot` ownership transfers to the parked state (wiped when the
+            // prekey is consumed on completion, or on removeBuddy).
+            pendingPq(init.pairId) = PendingPq(kemSecret, contentRoot)
+            Right(AddBuddyResult(init.pairId, init.safetyNumber, kemPublicKey = Some(kemPub)))
+          case Left(reason) =>
+            wipe(kemSecret); wipe(contentRoot); wipe(addrKey)
+            Left(EngineError("add_failed", reason))
+
+  /** Confirm/reject a pairing after the out-of-band safety-number comparison. On match, emits
+    * `buddyConfirmed`; on mismatch the relationship is removed and nothing is established.
+    *
+    * For an initiator that opened a PQ pairing prekey (see `addBuddy`), the responder's
+    * `kemCiphertext` is delivered HERE (it travels out of band alongside the safety-number
+    * comparison): on match it is `decaps`-ed, folded into the content root, and the deferred ratchet
+    * is seeded now. Fail closed — a matched PQ pairing WITHOUT the ciphertext is refused (it must not
+    * silently downgrade to the classical seed); the pending state is retained so a corrected retry can
+    * complete. On mismatch the parked KEM secret is wiped and nothing is established. */
+  def confirmBuddy(
+      pairId: String,
+      matched: Boolean,
+      kemCiphertext: Option[Array[Byte]] = None
+  ): Either[EngineError, Unit] =
+    pendingPq.get(pairId) match
+      case Some(pending) =>
+        if !matched then
+          pending.wipe()
+          pendingPq.remove(pairId)
+          book.confirm(pairId, matched) match
+            case Right(nb) => book = nb; Right(())
+            case Left(reason) => Left(EngineError("confirm_failed", reason))
+        else
+          kemCiphertext match
+            case None =>
+              Left(
+                EngineError("pq_prekey_required", "responder KEM ciphertext required to confirm")
+              )
+            case Some(ct) => completePqInitiator(pairId, pending, ct)
+      case None =>
+        // Responder (ratchet already seeded at addBuddy) or classical: no parked PQ state. Any stray
+        // `kemCiphertext` is ignored here — only an initiator with parked PQ state consumes one.
+        book.confirm(pairId, matched) match
+          case Right(nb) =>
+            if matched then
+              // Defense in depth (fail closed): a matched confirm MUST have a seeded ratchet — the
+              // responder/classical paths seed one at addBuddy. A Pending relationship with NO runtime
+              // and NO parked prekey is an un-completed PQ initiator (its prekey was aborted); refuse
+              // rather than confirm a buddy that could never send/receive. This also blocks any path
+              // where a PQ initiator could reach a silent non-PQ (classical) confirm.
+              if !runtime.contains(pairId) then
+                Left(EngineError("pq_prekey_required", "pairing not ready to confirm"))
+              else
+                book = nb
+                book
+                  .get(pairId)
+                  .foreach(r => emit(EngineEvent.BuddyConfirmed(r.pairId, r.safetyNumber)))
+                Right(())
+            else
+              // Mismatch is terminal (relationship now Removed): drop the buddy's runtime + outbox so no
+              // seeded ratchet — including a PQ-hardened responder seed — lingers past the rejected
+              // pairing (parallels removeBuddy's cleanup).
+              book = nb
+              runtime.remove(pairId)
+              outbox.remove(pairId)
+              Right(())
+          case Left(reason) => Left(EngineError("confirm_failed", reason))
+
+  /** Complete an initiator PQ pairing prekey: `decaps` the responder's ciphertext, fold the recovered
+    * shared secret into the base content root (identically to the responder's `encaps` path, so both
+    * sides seed a byte-identical ratchet), seed the deferred initiator ratchet, and confirm.
+    *
+    * The transient secrets `ss` (KEM shared secret) and `rootP` (seed) are ALWAYS wiped in `finally`.
+    * The parked `pending` (the KEM secret key + base content root) is wiped + removed ONLY on a
+    * successful completion — on ANY failure (a corrupt/wrong-length ciphertext makes `decaps` throw,
+    * or `book.confirm` refuses) it is RETAINED so a corrected retry with a good ciphertext can still
+    * complete. This is the fail-closed guarantee: a failed completion must NEVER drop the prekey and
+    * let a later confirm silently establish a non-PQ (or un-seeded) buddy. `removeBuddy` wipes the
+    * parked state if the app abandons the pairing instead. */
+  private def completePqInitiator(
+      pairId: String,
+      pending: PendingPq,
+      ct: Array[Byte]
+  ): Either[EngineError, Unit] =
+    var ss: Array[Byte] = null
+    var rootP: Array[Byte] = null
+    try
+      ss = HybridKem.decaps(ct, pending.kemSecret)
+      rootP = KeySchedule.pqContentRoot(pending.baseContentRoot, ss)
+      book.confirm(pairId, matched = true) match
+        case Right(nb) =>
+          book = nb
+          // Only ever an initiator's parked prekey (see PendingPq); seed the deferred initiator ratchet.
+          runtime(pairId) = BuddyRuntime(BuddyRole.Initiator, rootP)
+          book.get(pairId).foreach(r => emit(EngineEvent.BuddyConfirmed(r.pairId, r.safetyNumber)))
+          // Success: the parked prekey is consumed — wipe + remove it now.
+          pending.wipe()
+          pendingPq.remove(pairId)
+          Right(())
+        case Left(reason) => Left(EngineError("confirm_failed", reason)) // retain pending for retry
+    catch case _: Throwable => Left(EngineError("pq_prekey_failed", "prekey completion failed"))
+    finally
+      if ss != null then wipe(ss)
+      if rootP != null then wipe(rootP)
+
+  /** Remove a buddy. Stops future delivery (FR-018) without leaking prior existence — no event. Any
+    * parked (un-completed) PQ pairing-prekey secret for this pair is wiped here too. */
   def removeBuddy(pairId: String): Either[EngineError, Unit] =
     book.remove(pairId) match
-      case Right(nb) => book = nb; outbox.remove(pairId); runtime.remove(pairId); Right(())
+      case Right(nb) =>
+        book = nb
+        outbox.remove(pairId)
+        runtime.remove(pairId)
+        pendingPq.remove(pairId).foreach(_.wipe())
+        Right(())
       case Left(reason) => Left(EngineError("remove_failed", reason))
 
   /** Frame + enqueue a message for the next round to a confirmed buddy. Returns the queue depth;

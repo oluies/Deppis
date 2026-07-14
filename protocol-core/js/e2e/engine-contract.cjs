@@ -67,4 +67,33 @@ assert.strictEqual(bad.error.code, "api_version", "apiVersion mismatch refused")
 const misshaped = JSON.parse(engine.handle("[1,2,3]"));
 assert.strictEqual(misshaped.error.code, "bad_request", "misshaped input → bad_request");
 
+// Post-quantum pairing prekey (US7): the initiator generates a hybrid-KEM keypair and DEFERS, the
+// responder encapsulates, the initiator decapsulates at confirm — proving the actual linked bundle
+// carries the KEM (X25519 + ML-KEM-768) and the wire fields round-trip. HONEST SCOPE: this hardens
+// only the pairing seed; the ongoing DH ratchet stays classical.
+const pqInit = new ProtocolEngine();
+const pqResp = new ProtocolEngine();
+const pqAdd = JSON.parse(
+  pqInit.handle('{"apiVersion":"1","command":"addBuddy","args":{"sharedSecret":"oob","role":"initiator","pqPrekey":true}}')
+);
+const kemPub = pqAdd.result.kemPublicKey;
+assert.ok(typeof kemPub === "string" && kemPub.length > 100, "initiator returns a base64 KEM public key");
+assert.ok(!("kemCiphertext" in pqAdd.result), "initiator result has no ciphertext");
+const pqRespAdd = JSON.parse(
+  pqResp.handle(`{"apiVersion":"1","command":"addBuddy","args":{"sharedSecret":"oob","role":"responder","initiatorKemPublicKey":"${kemPub}"}}`)
+);
+const kemCt = pqRespAdd.result.kemCiphertext;
+assert.ok(typeof kemCt === "string" && kemCt.length > 100, "responder returns a base64 KEM ciphertext");
+assert.strictEqual(pqAdd.result.pairId, pqRespAdd.result.pairId, "pairId unchanged by the KEM");
+// Fail closed: matched WITHOUT the ciphertext is refused (no silent classical downgrade).
+const pqNoCt = JSON.parse(
+  pqInit.handle(`{"apiVersion":"1","command":"confirmBuddy","args":{"pairId":"${pqAdd.result.pairId}","matched":true}}`)
+);
+assert.strictEqual(pqNoCt.error.code, "pq_prekey_required", "PQ confirm without ciphertext refused");
+// With the ciphertext the initiator completes and buddyConfirmed fires.
+const pqConf = JSON.parse(
+  pqInit.handle(`{"apiVersion":"1","command":"confirmBuddy","args":{"pairId":"${pqAdd.result.pairId}","matched":true,"kemCiphertext":"${kemCt}"}}`)
+);
+assert.strictEqual(pqConf.events[0].event, "buddyConfirmed", "PQ initiator confirms with the ciphertext");
+
 console.log("engine-contract e2e: OK (bundle =", path.basename(bundle) + ")");
