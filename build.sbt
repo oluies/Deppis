@@ -38,7 +38,12 @@ lazy val protocolCore = (project in file("protocol-core"))
       baseDirectory.value / "jvm" / "src" / "main" / "scala"
     ),
     Test / unmanagedSourceDirectories := Seq(
-      baseDirectory.value / "shared" / "src" / "test" / "scala"
+      baseDirectory.value / "shared" / "src" / "test" / "scala",
+      // crosstest/ holds the ONE copy of cross-platform specs (e.g. kem.HybridKemCrossSpec) compiled
+      // into BOTH this JVM build and protocolCoreJS below, so the pinned KAT vectors are single-
+      // sourced. It carries ONLY platform-agnostic specs (uniform `kem.*` API) — unlike shared/src/
+      // test, which we do NOT feed to the JS build (it holds JVM-only specs).
+      baseDirectory.value / "crosstest" / "src" / "test" / "scala"
     ),
     scalacOptions ++= Seq("-deprecation", "-feature", "-unchecked", "-Wunused:all"),
     // CLIs read JSON from stdin (Constitution V); fork and connect stdin so `run` forwards it.
@@ -75,7 +80,12 @@ lazy val protocolCoreJS = (project in file("protocol-core-js"))
       (protocolCore.base / "shared" / "src" / "main" / "scala"),
       (protocolCore.base / "js" / "src" / "main" / "scala")
     ),
-    Test / unmanagedSourceDirectories := Seq(protocolCore.base / "js" / "src" / "test" / "scala"),
+    // js/src/test (JS-only specs) + crosstest/src/test (the ONE copy of cross-platform specs shared
+    // with the JVM build above — e.g. kem.HybridKemCrossSpec, single-sourcing the pinned KATs).
+    Test / unmanagedSourceDirectories := Seq(
+      protocolCore.base / "js" / "src" / "test" / "scala",
+      protocolCore.base / "crosstest" / "src" / "test" / "scala"
+    ),
     libraryDependencies ++= Seq(
       // sbt-scalajs 1.22.0 (sbt 2.0) no longer provides the `%%%` operator for plain JS projects,
       // so we name the Scala.js artifacts explicitly (Scala.js 1.x + Scala 3 ⇒ `_sjs1_3`).

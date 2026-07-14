@@ -2,18 +2,34 @@ package kem
 
 import org.scalatest.funsuite.AnyFunSuite
 
-/** JVM (protocolCore) tests for the cross-platform hybrid KEM [[HybridKem]] — the delegating adapter
-  * over the vetted `crypto.HybridKem` (X25519 via JCA + ML-KEM-768 via liboqs). Pins the interop
-  * contract shared with the Scala.js side (`protocol-core/js/.../HybridKemJsSpec`):
-  *   - the combiner byte construction (KAT `fd00…69d8`), and
-  *   - a fixed `(secret, ciphertext) -> sharedSecret` decapsulation vector GENERATED on this JVM and
-  *     reproduced verbatim in the JS spec — proving the two hybrid KEMs interoperate (see the class
-  *     doc in `HybridKemJsSpec` for the full argument). */
-class HybridKemSpec extends AnyFunSuite:
+/** SINGLE-SOURCED cross-platform tests for the hybrid KEM [[HybridKem]]. This one file is compiled
+  * into BOTH builds — the JVM `protocolCore` (delegating adapter over the vetted `crypto.HybridKem`:
+  * X25519 via JCA + ML-KEM-768 via liboqs) AND the Scala.js `protocolCoreJS` (`@noble/curves` +
+  * `@noble/post-quantum` + `@noble/hashes`) — via a shared entry in each project's
+  * `Test / unmanagedSourceDirectories` (see build.sbt). `kem.HybridKem` resolves to the platform
+  * object of whichever build compiles this file, so ONE copy of the pinned KAT vectors and the
+  * platform-agnostic assertions guards both platforms with zero lockstep-drift hazard.
+  *
+  * ==Cross-platform interop KAT — why this proves the two hybrid KEMs interoperate==
+  * The strongest test is the shared decapsulation vector: a fixed `(secret 2464, ciphertext 1120)`
+  * GENERATED ONCE on the JVM (`kem.HybridKem.keypair` + `encaps`) and pinned VERBATIM here. If the
+  * JS `decaps` reproduces the same 32-byte shared secret the JVM produced, the two hybrid KEMs agree
+  * on that vector. This is valid because every leg is independently proven cross-platform:
+  *   - ML-KEM-768: `@noble/post-quantum` ≡ liboqs ≡ FIPS 203 — the ACVP decapsulation KAT in
+  *     `KemJsSpec` / `crypto.OqsKatSpec` (#75);
+  *   - X25519: `@noble/curves` ≡ JCA — the RFC 7748 KAT in `X25519JsSpec` / `x25519.X25519Spec`;
+  *   - the combiner: byte-identical SHA-256 construction — the `fd00…69d8` KAT below.
+  * Since decaps is `combine(X25519(sk_static, eph_pub), ML-KEM.decaps(ct, sk_ml), …)` and all three
+  * components match across platforms, a shared vector verifying on both is deterministic proof of
+  * interop. NOTE (honesty): this is NOT a live cross-process handshake — it is a pinned known-answer
+  * test, the same methodology used to pin the ACVP ML-KEM vectors. */
+class HybridKemCrossSpec extends AnyFunSuite:
 
   private def hex(s: String): Array[Byte] =
     s.filterNot(_.isWhitespace).grouped(2).map(Integer.parseInt(_, 16).toByte).toArray
 
+  // Mask to unsigned before formatting: Scala.js `"%02x".format(negativeByte)` sign-extends to
+  // "ffffffXX" (the JVM Formatter does not), so mask explicitly for cross-platform-stable hex.
   private def toHex(a: Array[Byte]): String = a.map(b => "%02x".format(b & 0xff)).mkString
 
   test("round-trip: keypair -> encaps -> decaps agree; sizes match the contract"):
@@ -26,10 +42,10 @@ class HybridKemSpec extends AnyFunSuite:
     val ssDec = HybridKem.decaps(ct, secret)
     assert(ssDec.sameElements(ssEnc), "encaps and decaps must derive the same secret")
 
-  test("combiner KAT: fixed inputs pin the exact 32-byte SHA-256 output (interop with JS)"):
-    // Same fixed inputs + expected output as crypto.HybridKemSpec and the JS HybridKemJsSpec. Pins
-    // Label, field order (label ++ ssX ++ ssMl ++ eph ++ peer ++ ct), and the digest across all three
-    // implementations. A silent drift here would break JVM<->JS interop while passing round-trips.
+  test("combiner KAT: fixed inputs pin the exact 32-byte SHA-256 output (JVM<->JS interop)"):
+    // Byte-identical to crypto.HybridKemSpec's KAT — pins Label, field order
+    // (label ++ ssX ++ ssMl ++ eph ++ peer ++ ct), and the digest across all implementations. A
+    // silent drift here would break JVM<->JS interop while passing round-trips.
     def fill(n: Int, v: Int): Array[Byte] = Array.fill(n)(v.toByte)
     val out = HybridKem.combine(
       ssX25519 = fill(32, 0x11),
@@ -44,10 +60,7 @@ class HybridKemSpec extends AnyFunSuite:
     )
 
   test("cross-platform interop KAT: fixed (secret, ciphertext) decaps to the pinned shared secret"):
-    // Generated ONCE on this JVM (kem.HybridKem.keypair + encaps) and reproduced VERBATIM in the JS
-    // spec. Because ML-KEM (noble ≡ liboqs, ACVP KAT #75), X25519 (RFC 7748), and the combiner (KAT
-    // above) each match across platforms, a shared decaps vector verifying on BOTH proves the two
-    // hybrid KEMs interoperate. This is NOT a live cross-process handshake (see PR body).
+    // Generated ONCE on the JVM (kem.HybridKem.keypair + encaps) and verified on BOTH platforms here.
     val secret = hex(
       "8d9e827d198c6b5ec2d71fc396824af8eeb46844888614836683cd665864df2c" +
         "9ffbf8c37a253d30b57f616059649fc94dda921fa2c234894d85bf0433a13e09" +
@@ -170,7 +183,7 @@ class HybridKemSpec extends AnyFunSuite:
     assert(ciphertext.length == HybridKem.CiphertextBytes)
     assert(
       HybridKem.decaps(ciphertext, secret).sameElements(expectedSs),
-      "JVM decaps of the pinned interop vector must reproduce the shared secret"
+      "decaps of the pinned interop vector must reproduce the shared secret"
     )
 
   test("decaps rejects a wrong-length ciphertext"):
@@ -197,7 +210,7 @@ class HybridKemSpec extends AnyFunSuite:
   test("encaps rejects a hybrid public key whose X25519 prefix is a low-order (all-zero) point"):
     // The all-zero X25519 u-coordinate is an order-1 point: the ECDH result is all-zero regardless of
     // the ephemeral scalar (non-contributory). The hybrid encaps MUST reject it (IllegalArgumentException),
-    // at the hybrid level — not only one layer down in the X25519 leg. Uniform with the JS side.
+    // at the hybrid level — not only one layer down in the X25519 leg. Uniform on both platforms.
     val (pub, _) = HybridKem.keypair()
     val lowOrderPub = pub.clone()
     for i <- 0 until 32 do lowOrderPub(i) = 0.toByte
@@ -212,6 +225,23 @@ class HybridKemSpec extends AnyFunSuite:
     for i <- 1 until 31 do nonCanonical(i) = 0xff.toByte
     nonCanonical(31) = 0x7f.toByte
     assertThrows[IllegalArgumentException](HybridKem.encaps(nonCanonical))
+
+  test("decaps rejects a ciphertext whose eph-X25519 prefix is a low-order (all-zero) point"):
+    // The MORE security-relevant direction: a responder decapsulating hostile ciphertext. The
+    // attacker controls the first 32 bytes (the ephemeral X25519 public). An all-zero (order-1)
+    // prefix is non-contributory and MUST be rejected BEFORE ML-KEM decaps, uniformly on both
+    // platforms (the remaining ML-KEM ct region is irrelevant — rejection is on the X25519 leg).
+    val (_, secret) = HybridKem.keypair()
+    val ct = new Array[Byte](HybridKem.CiphertextBytes) // eph-X25519 prefix = 32 zero bytes
+    assertThrows[IllegalArgumentException](HybridKem.decaps(ct, secret))
+
+  test("decaps rejects a ciphertext whose eph-X25519 prefix is non-canonical (u = p)"):
+    val (_, secret) = HybridKem.keypair()
+    val ct = new Array[Byte](HybridKem.CiphertextBytes)
+    ct(0) = 0xed.toByte
+    for i <- 1 until 31 do ct(i) = 0xff.toByte
+    ct(31) = 0x7f.toByte
+    assertThrows[IllegalArgumentException](HybridKem.decaps(ct, secret))
 
   test("tampering either ciphertext leg changes the decapsulated secret (transcript binding)"):
     // The combiner binds BOTH the eph-X25519 prefix and the ML-KEM ciphertext into the derived secret,

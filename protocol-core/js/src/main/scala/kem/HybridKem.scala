@@ -6,14 +6,26 @@ import scala.scalajs.js
 import scala.scalajs.js.annotation.JSImport
 import scala.scalajs.js.typedarray.Uint8Array
 
-/** Plain SHA-256 facade over **@noble/hashes** (audited, browser-safe — Constitution I). noble's
-  * `sha256` is a callable hash: `sha256(msg) -> 32-byte digest`. This mirrors the JVM combiner's
-  * `MessageDigest.getInstance("SHA-256")`. (kdf.Kdf imports the same module for HMAC; here we need
-  * the bare hash.) */
+/** Streaming SHA-256 facade over **@noble/hashes** (audited, browser-safe — Constitution I). We use
+  * the INCREMENTAL API (`sha256.create().update(..)….digest()`) rather than the one-shot
+  * `sha256(msg)` so `combine` never materializes a secret-bearing concatenation of the two KEM
+  * shared secrets (Constitution II). `wrapConstructor` (noble 1.3.3) exposes `.create()` on the
+  * `sha256` export; the returned hash's `update` absorbs the bytes into the hash state (it does not
+  * retain the input array) and is chainable, and `digest()` returns a fresh 32-byte `Uint8Array`.
+  * This mirrors the JVM combiner's streaming `MessageDigest.update(..)` calls. */
 @js.native
 @JSImport("@noble/hashes/sha256", JSImport.Namespace)
 private object Sha256Module extends js.Object:
-  def sha256(msg: Uint8Array): Uint8Array = js.native
+  val sha256: Sha256Fn = js.native
+
+@js.native
+private trait Sha256Fn extends js.Object:
+  def create(): Sha256Hash = js.native
+
+@js.native
+private trait Sha256Hash extends js.Object:
+  def update(data: Uint8Array): Sha256Hash = js.native
+  def digest(): Uint8Array = js.native
 
 /** Cross-platform hybrid post-quantum KEM — **Scala.js platform object** (the JVM counterpart is
   * `protocol-core/jvm/src/main/scala/kem/HybridKem.scala`, which delegates to the vetted
@@ -78,11 +90,16 @@ object HybridKem:
   def keypair(): (Array[Byte], Array[Byte]) =
     val (xPriv, xPub) = X25519.generateKeyPair()
     val (mlkemPub, mlkemSk) = Kem.keypair()
-    val publicKey = xPub ++ mlkemPub
-    val secret = xPriv ++ xPub ++ mlkemSk
-    // `xPriv` and `mlkemSk` are now redundant live copies of private-key material inside `secret`
-    // (`++` copies); zero them (Constitution II), mirroring the JVM adapter's `HybridSecret.destroy()`
-    // of its struct copies. `xPub` is PUBLIC and retained in both outputs — left intact.
+    val publicKey = xPub ++ mlkemPub // both public — no secret intermediate
+    // Assemble `secret` by copying the three parts into a preallocated buffer so NO intermediate
+    // concatenation of secret material is ever materialized — a left-assoc `xPriv ++ xPub ++ mlkemSk`
+    // would build an unwiped `(xPriv ++ xPub)` holding the private scalar. Then zero the redundant
+    // private-key copies (Constitution II), mirroring the JVM adapter's `HybridSecret.destroy()`.
+    // `xPub` is PUBLIC and retained in both outputs — left intact.
+    val secret = new Array[Byte](SecretKeyBytes)
+    System.arraycopy(xPriv, 0, secret, 0, X25519KeyBytes)
+    System.arraycopy(xPub, 0, secret, X25519KeyBytes, X25519KeyBytes)
+    System.arraycopy(mlkemSk, 0, secret, X25519KeyBytes + X25519KeyBytes, MlKemSecretBytes)
     wipe(xPriv)
     wipe(mlkemSk)
     (publicKey, secret)
@@ -163,16 +180,26 @@ object HybridKem:
       peerX25519Raw: Array[Byte],
       mlkemCiphertext: Array[Byte]
   ): Array[Byte] =
-    // `msg` (and its `Uint8Array` copy `jsMsg`) hold BOTH KEM shared secrets in the clear; they are
-    // OUR arrays, so wiping them after the digest is a real zeroization (Constitution II) — otherwise
-    // they undercut the `wipe(ssX)`/`wipe(ssMl)` in encaps/decaps. `++` copies, so this does NOT
-    // touch `Label` or the caller's `ssX25519`/`ssMlKem` inputs. The digest bytes are unchanged.
-    val msg = Label ++ ssX25519 ++ ssMlKem ++ ephemeralX25519Raw ++ peerX25519Raw ++ mlkemCiphertext
-    val jsMsg = Uint8.toJs(msg)
-    try Uint8.toBytes(Sha256Module.sha256(jsMsg))
-    finally
-      wipe(msg)
-      wipeJs(jsMsg)
+    // STREAM each field into SHA-256 (same order as crypto.HybridKem's MessageDigest.update calls) so
+    // no secret-bearing CONCATENATION is ever materialized (Constitution II). The `Uint8Array` copies
+    // of the two KEM shared secrets are zeroed the instant they are absorbed (noble's `update` copies
+    // the bytes into the hash state and does not retain the input). The digest noble RETURNS *is* the
+    // hybrid shared secret, so it is wiped after `Uint8.toBytes` copies it out for the caller. Byte
+    // output is unchanged (combiner KAT fd00…69d8) — same Label, same field order, same digest.
+    val h = Sha256Module.sha256.create()
+    h.update(Uint8.toJs(Label)) // public domain-separation label
+    val jsSsX = Uint8.toJs(ssX25519)
+    h.update(jsSsX)
+    wipeJs(jsSsX) // secret: X25519 leg
+    val jsSsMl = Uint8.toJs(ssMlKem)
+    h.update(jsSsMl)
+    wipeJs(jsSsMl) // secret: ML-KEM leg
+    h.update(Uint8.toJs(ephemeralX25519Raw)) // public transcript
+    h.update(Uint8.toJs(peerX25519Raw)) // public transcript
+    h.update(Uint8.toJs(mlkemCiphertext)) // public transcript
+    val digest = h.digest()
+    try Uint8.toBytes(digest)
+    finally wipeJs(digest)
 
   // Curve25519 field prime p = 2^255 - 19 (RFC 7748). A well-formed u-coordinate satisfies u < p
   // after the unused top bit is masked; an out-of-range `p <= u < 2^255` encoding could otherwise be
