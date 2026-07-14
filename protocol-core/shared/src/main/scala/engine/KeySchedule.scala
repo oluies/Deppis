@@ -30,6 +30,46 @@ object KeySchedule:
   def contentRoot(pairKey: Array[Byte]): Array[Byte] =
     kdf.Kdf.hmacSha256(pairKey, "ks/content-root".getBytes(UTF_8))
 
+  /** Fold a hybrid-KEM (X25519+ML-KEM-768) pairing-prekey shared secret into the content root — the
+    * **post-quantum pairing prekey** (US7, harvest-now-decrypt-later). The initial content root that
+    * seeds the DH double ratchet becomes
+    * `HMAC(contentRoot, "ks/pq-prekey" ++ kemSharedSecret)`, so an adversary who has ONLY the
+    * (classical) out-of-band pairing secret and later a quantum computer still cannot reconstruct it
+    * without also breaking the KEM.
+    *
+    * HONEST LABELING (Constitution IV): this PQ-protects ONLY the INITIAL content root. The ongoing
+    * X25519 DH ratchet (`DoubleRatchet`) that re-keys every message REMAINS CLASSICAL — each per-
+    * message DH step is still harvest-now-decrypt-later-exposed. This is NOT post-quantum messaging;
+    * it hardens the pairing seed only.
+    *
+    * Single source of truth: both engine paths (responder `encaps`, initiator `decaps`) and the tests
+    * mix through THIS function with the SAME label ordering, so the two sides derive a byte-identical
+    * seed. `kemSharedSecret` is a secret — the caller wipes it after this returns. HMAC-SHA256 only
+    * (vetted `kdf.Kdf`; cross-platform JVM + JS — Constitution I). */
+  def pqContentRoot(contentRoot: Array[Byte], kemSharedSecret: Array[Byte]): Array[Byte] =
+    // Build the HMAC info in a local and wipe it in `finally` — a bare `label ++ kemSharedSecret`
+    // would leave an intermediate array holding an un-wiped copy of the KEM shared secret, undermining
+    // the caller's `wipe(ss)` (Constitution II). `System.arraycopy`/`Arrays.fill` are Scala.js-safe.
+    val label = "ks/pq-prekey".getBytes(UTF_8)
+    val info = new Array[Byte](label.length + kemSharedSecret.length)
+    System.arraycopy(label, 0, info, 0, label.length)
+    System.arraycopy(kemSharedSecret, 0, info, label.length, kemSharedSecret.length)
+    try kdf.Kdf.hmacSha256(contentRoot, info)
+    finally java.util.Arrays.fill(info, 0.toByte)
+
+  /** Key-confirmation tag over the mixed PQ root — the explicit remedy for ML-KEM's IMPLICIT
+    * REJECTION. ML-KEM `decaps` never throws on a tampered same-length ciphertext; it silently returns
+    * a pseudo-random shared secret. Both sides therefore derive a tag `HMAC(pqRoot, "ks/pq-confirm")`
+    * from the mixed root (which depends on the KEM shared secret), and the initiator constant-time
+    * compares its tag to the responder's BEFORE seeding. ANY tamper of `kemPublicKey`/`kemCiphertext`
+    * changes the shared secret ⇒ changes the root ⇒ changes the tag ⇒ explicit fail-closed, instead of
+    * a silently-non-interoperable ("confirmed but dead") pairing that also strips the PQ hardening.
+    *
+    * Domain-separated from the seed: the tag mixes the SAME root under a DIFFERENT label than any key
+    * the ratchet consumes, so publishing the tag reveals nothing about the seed (HMAC one-wayness). */
+  def pqConfirmTag(pqContentRoot: Array[Byte]): Array[Byte] =
+    kdf.Kdf.hmacSha256(pqContentRoot, "ks/pq-confirm".getBytes(UTF_8))
+
   /** Initial chain key for the `from → to` direction; both parties derive the same one. */
   def chain0(contentRoot: Array[Byte], from: String, to: String): Array[Byte] =
     kdf.Kdf.hmacSha256(contentRoot, s"ks/chain/$from/$to".getBytes(UTF_8))
