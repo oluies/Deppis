@@ -2,14 +2,22 @@ package engine
 
 import scala.collection.mutable
 
-/** JS-source mirror of `protocol-core/shared/src/test/scala/engine/PqTestKit.scala` (the JVM and JS
-  * test source sets are separate — see build.sbt — so this shared PQ-pairing scaffolding is compiled
-  * once per platform). Keep byte-for-byte in sync with the JVM copy. */
+/** SINGLE-SOURCED test scaffolding for the PQ pairing-prekey specs — the platform-neutral in-memory
+  * backend + conversation driver + hex helpers used by both `PqPairingSpec` (JVM, `shared/src/test`)
+  * and `PqPairingJsSpec` (JS, `js/src/test`). Following the pattern PR #77 established for
+  * `kem.HybridKemCrossSpec`, this ONE copy lives in `crosstest/src/test/scala`, which is wired into
+  * BOTH the JVM `protocolCore` and the Scala.js `protocolCoreJS` `Test / unmanagedSourceDirectories`
+  * (see build.sbt), so the helper is compiled once per platform from a single source with zero
+  * lockstep-drift hazard. It touches only the platform-neutral engine API, so it compiles unchanged on
+  * either build. */
 object PqTestKit:
   def hex(b: Array[Byte]): String = b.map(x => f"${x & 0xff}%02x").mkString
   def unhex(s: String): Array[Byte] =
     s.filterNot(_.isWhitespace).grouped(2).map(Integer.parseInt(_, 16).toByte).toArray
 
+  /** A shared in-memory backend modelling obsd (same shape as RoundTransportSpec's): one token→frame
+    * store + a notify aggregator connecting `signal`→`fetchDigest` per (round, label tag), so two
+    * engines wired to it drive the full stop-and-wait ARQ flow automatically. */
   final class FakeBackend:
     val store = mutable.Map.empty[String, Array[Byte]]
     private val bits = mutable.Map.empty[(Long, Vector[Byte]), mutable.Set[Int]]
@@ -26,6 +34,7 @@ object PqTestKit:
           .foreach(_.foreach(b => out(b >> 3) = (out(b >> 3) | (1 << (b & 7))).toByte))
         out
 
+  /** Tick both engines through rounds `from..to`, collecting each side's delivered plaintexts. */
   def converse(a: Engine, b: Engine, from: Long, to: Long): (Seq[String], Seq[String]) =
     val ma = mutable.ArrayBuffer.empty[String]; val mb = mutable.ArrayBuffer.empty[String]
     for r <- from to to do

@@ -57,18 +57,32 @@ object KeySchedule:
     try kdf.Kdf.hmacSha256(contentRoot, info)
     finally java.util.Arrays.fill(info, 0.toByte)
 
-  /** Key-confirmation tag over the mixed PQ root — the explicit remedy for ML-KEM's IMPLICIT
+  /** Key-confirmation tags over the mixed PQ root — the explicit remedy for ML-KEM's IMPLICIT
     * REJECTION. ML-KEM `decaps` never throws on a tampered same-length ciphertext; it silently returns
-    * a pseudo-random shared secret. Both sides therefore derive a tag `HMAC(pqRoot, "ks/pq-confirm")`
-    * from the mixed root (which depends on the KEM shared secret), and the initiator constant-time
-    * compares its tag to the responder's BEFORE seeding. ANY tamper of `kemPublicKey`/`kemCiphertext`
-    * changes the shared secret ⇒ changes the root ⇒ changes the tag ⇒ explicit fail-closed, instead of
-    * a silently-non-interoperable ("confirmed but dead") pairing that also strips the PQ hardening.
+    * a pseudo-random shared secret. Both sides derive these tags from the mixed root (which depends on
+    * the KEM shared secret) and constant-time compare the OTHER side's tag BEFORE confirming/seeding.
+    * ANY tamper of `kemPublicKey`/`kemCiphertext` changes the shared secret ⇒ changes the root ⇒
+    * changes the tag ⇒ explicit fail-closed on BOTH sides, instead of a silently-non-interoperable
+    * ("confirmed but dead") pairing that also strips the PQ hardening.
     *
-    * Domain-separated from the seed: the tag mixes the SAME root under a DIFFERENT label than any key
-    * the ratchet consumes, so publishing the tag reveals nothing about the seed (HMAC one-wayness). */
-  def pqConfirmTag(pqContentRoot: Array[Byte]): Array[Byte] =
-    kdf.Kdf.hmacSha256(pqContentRoot, "ks/pq-confirm".getBytes(UTF_8))
+    * ==Bidirectional confirmation (US7)==
+    * The two directions are DOMAIN-SEPARATED so a tag can never be reflected: the responder returns
+    * `pqConfirmTagResponder` (label `"ks/pq-confirm/r"`) and the initiator verifies it; the initiator
+    * returns `pqConfirmTagInitiator` (label `"ks/pq-confirm/i"`) and the responder verifies it. Distinct
+    * labels mean the initiator's `/i` tag can never satisfy the responder's `/r` check (or vice versa),
+    * so an attacker cannot bounce one side's tag back as the other's. Because encaps/decaps agree on the
+    * same `rootP`, each side can both compute its own outgoing tag and verify the peer's incoming one.
+    *
+    * Domain-separated from the seed: the tags mix the SAME root under DIFFERENT labels than any key the
+    * ratchet consumes, so publishing them reveals nothing about the seed (HMAC one-wayness). */
+  def pqConfirmTagResponder(pqContentRoot: Array[Byte]): Array[Byte] =
+    kdf.Kdf.hmacSha256(pqContentRoot, "ks/pq-confirm/r".getBytes(UTF_8))
+
+  /** The initiator's key-confirmation tag (label `"ks/pq-confirm/i"`) — see [[pqConfirmTagResponder]].
+    * The initiator returns this after it verifies the responder's `/r` tag; the responder constant-time
+    * verifies it before emitting `BuddyConfirmed`, so BOTH sides fail closed on any KEM tampering. */
+  def pqConfirmTagInitiator(pqContentRoot: Array[Byte]): Array[Byte] =
+    kdf.Kdf.hmacSha256(pqContentRoot, "ks/pq-confirm/i".getBytes(UTF_8))
 
   /** Initial chain key for the `from → to` direction; both parties derive the same one. */
   def chain0(contentRoot: Array[Byte], from: String, to: String): Array[Byte] =

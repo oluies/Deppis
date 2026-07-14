@@ -10,7 +10,7 @@ runtime. Messages are JSON; `apiVersion` is mandatory on every call.
 | Command | Args | Effect |
 |---|---|---|
 | `addBuddy` | `{ sharedSecret, role, pqPrekey?: bool, initiatorKemPublicKey?: base64 }` | Run add-friend handshake; returns `safetyNumber` to compare out of band, plus optional PQ pairing-prekey material (see below). |
-| `confirmBuddy` | `{ pairId, matched: bool, kemCiphertext?: base64, kemConfirmTag?: base64 }` | Confirm/reject pairing after safety-number comparison; the initiator carries the responder's `kemCiphertext` + `kemConfirmTag` here to key-confirm and complete the PQ prekey. |
+| `confirmBuddy` | `{ pairId, matched: bool, kemCiphertext?: base64, kemConfirmTag?: base64, initiatorConfirmTag?: base64 }` | Confirm/reject pairing after safety-number comparison. Initiator: carries the responder's `kemCiphertext` + `kemConfirmTag` to key-confirm, and its result returns `initiatorConfirmTag`. Responder: carries the initiator's `initiatorConfirmTag` here to verify before it confirms (bidirectional key confirmation). |
 | `removeBuddy` | `{ pairId }` | Remove buddy; stops delivery without leaking prior existence (FR-018). |
 | `sendMessage` | `{ pairId, plaintext }` | Frame + content-encrypt + enqueue for next round. |
 | `tick` | `{ roundId }` | Advance the client schedule: emit one frame (real or carrier) + retrieval. |
@@ -41,40 +41,45 @@ Because a KEM is asymmetric, the two devices exchange real, distinct key materia
    and returns `kemPublicKey` (base64). The app sends it to the peer out of band.
 2. **Responder** `addBuddy` with `initiatorKemPublicKey` (base64) → encapsulates to it, mixes the
    shared secret into its content root, seeds its ratchet now, and returns `kemCiphertext` (base64)
-   **plus a `kemConfirmTag` (base64)** — a key-confirmation tag over the mixed root.
+   **plus a `kemConfirmTag` (base64)** — the responder's `"ks/pq-confirm/r"` key-confirmation tag over
+   the mixed root. It stays in a **pending-confirm** state (parks the expected initiator `/i` tag) and
+   does NOT emit `buddyConfirmed` yet.
 3. **Initiator** `confirmBuddy` with `matched: true`, `kemCiphertext`, and `kemConfirmTag` (base64) →
    decapsulates, mixes the SAME shared secret into the SAME base content root, **constant-time verifies
-   its own recomputed tag against the responder's `kemConfirmTag`**, and only then seeds its (deferred)
-   ratchet. Both sides arrive at a byte-identical seed and interoperate.
+   its own recomputed `/r` tag against the responder's `kemConfirmTag`**, seeds its (deferred) ratchet,
+   emits `buddyConfirmed`, and **returns `initiatorConfirmTag` (base64)** — its own `"ks/pq-confirm/i"`
+   tag. The app relays it to the responder out of band.
+4. **Responder** `confirmBuddy` with `matched: true` and `initiatorConfirmTag` (base64) → **constant-time
+   verifies it against the parked expected `/i` tag** and only then emits `buddyConfirmed`. Both sides
+   arrive at a byte-identical seed and interoperate, and **both fail closed on any KEM tampering**.
 
 - The **safety number / pairId are UNCHANGED** — still derived symmetrically from the out-of-band
   secret; only the content root gains the KEM secret.
-- **Key confirmation (initiator-side):** ML-KEM has *implicit rejection* — a **same-length** tampered
-  `kemCiphertext` (or a substituted `kemPublicKey`) does NOT make decapsulation fail; it silently
-  yields a different shared secret. The `kemConfirmTag` closes this **on the initiator**: because the
-  tag is derived from the mixed root (which depends on the KEM shared secret), any tamper of the KEM
-  material changes the tag, so the **initiator's** constant-time comparison fails and its
-  `confirmBuddy` is refused with `pq_confirm_failed` (fail closed at pairing time) instead of
-  establishing a confirmed-but-dead pairing that has silently lost its PQ hardening.
-  - **Directionality caveat (honest labeling, Constitution IV):** confirmation is currently
-    **one-directional**. The **responder** encapsulates and confirms without verifying a tag from the
-    initiator, so if the initiator's `kemPublicKey` is tampered *in transit to the responder*, the
-    responder can still end up `Confirmed` with a dead ratchet — it only learns of the bad pairing by
-    never receiving decryptable traffic. The safety-number comparison (from the OOB secret) still
-    authenticates the *channel*, and the initiator always fails closed; but the responder-side
-    confirmed-but-dead state is NOT yet prevented. **Bidirectional key confirmation** (the initiator
-    returning its own tag for the responder to verify before it confirms) is a tracked follow-up.
-- **Fail closed:** once an initiator opts into `pqPrekey`, `confirmBuddy(matched: true)` WITHOUT both
-  `kemCiphertext` and `kemConfirmTag` is refused (`pq_prekey_required`), and a tag mismatch is refused
-  (`pq_confirm_failed`) — a PQ pairing never silently downgrades to the classical seed. In both cases
-  the parked prekey is retained so a legitimate retry can complete. A pairing with no KEM material on
-  either side is the classical (legacy / local-dev) path and is NON-PQ.
+- **Key confirmation (BIDIRECTIONAL — both sides fail closed):** ML-KEM has *implicit rejection* — a
+  **same-length** tampered `kemCiphertext` (or a substituted `kemPublicKey`) does NOT make
+  decapsulation fail; it silently yields a different shared secret. Two **domain-separated** tags close
+  this on **both** sides (each is an HMAC of the mixed root, which depends on the KEM shared secret, so
+  any tamper changes it): the responder returns its `"ks/pq-confirm/r"` tag (`kemConfirmTag`) and the
+  initiator verifies it; the initiator returns its `"ks/pq-confirm/i"` tag (`initiatorConfirmTag`) and
+  the responder verifies it before confirming. Distinct labels prevent a tag from being reflected as
+  the other direction's. Any tamper ⇒ a mismatch ⇒ `confirmBuddy` refused with `pq_confirm_failed`
+  (constant-time compare, fail closed at pairing time) on the affected side, instead of a
+  confirmed-but-dead pairing that has silently lost its PQ hardening. In particular, an initiator
+  `kemPublicKey` **tampered in transit to the responder** now makes the **responder** fail closed at
+  step 4 (the honest initiator cannot produce the responder's expected `/i` tag), closing the former
+  responder-side confirmed-but-dead gap.
+- **Fail closed:** once an initiator opts into `pqPrekey`, the initiator's `confirmBuddy(matched: true)`
+  WITHOUT both `kemCiphertext` and `kemConfirmTag`, and the responder's `confirmBuddy(matched: true)`
+  WITHOUT `initiatorConfirmTag`, are each refused (`pq_prekey_required`); a tag mismatch on either side
+  is refused (`pq_confirm_failed`) — a PQ pairing never silently downgrades to the classical seed. In
+  all cases the parked state is retained so a legitimate retry can complete. A pairing with no KEM
+  material on either side is the classical (legacy / local-dev) path and is NON-PQ.
 - **Argument-consistency (fail closed):** `addBuddy` rejects inconsistent PQ combinations with
   `invalid_arg` before the handshake — an Initiator given an `initiatorKemPublicKey`, or a Responder
   with `pqPrekey: true` but no `initiatorKemPublicKey` — so KEM material is never silently dropped
   into a non-PQ pairing.
-- `kemPublicKey` / `kemCiphertext` / `kemConfirmTag` are PUBLIC (a KEM public key, ciphertext, and a
-  one-way HMAC tag); no private key or shared secret ever crosses the boundary.
+- `kemPublicKey` / `kemCiphertext` / `kemConfirmTag` / `initiatorConfirmTag` are PUBLIC (a KEM public
+  key, ciphertext, and one-way HMAC tags); no private key or shared secret ever crosses the boundary.
 
 **HONEST LABELING (Constitution IV): this hardens ONLY the initial content root.** The ongoing
 per-message X25519 DH ratchet REMAINS CLASSICAL — every subsequent message key still comes from a

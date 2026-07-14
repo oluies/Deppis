@@ -102,10 +102,29 @@ const pqTamper = JSON.parse(
   pqInit.handle(`{"apiVersion":"1","command":"confirmBuddy","args":{"pairId":"${pqAdd.result.pairId}","matched":true,"kemCiphertext":"${tamperedCt}","kemConfirmTag":"${kemTag}"}}`)
 );
 assert.strictEqual(pqTamper.error.code, "pq_confirm_failed", "same-length ciphertext tamper fails closed");
-// With the correct ciphertext + tag the initiator completes and buddyConfirmed fires.
+// With the correct ciphertext + tag the initiator completes and buddyConfirmed fires; the result also
+// returns the initiator's /i confirmation tag for the app to relay to the responder.
 const pqConf = JSON.parse(
   pqInit.handle(`{"apiVersion":"1","command":"confirmBuddy","args":{"pairId":"${pqAdd.result.pairId}","matched":true,"kemCiphertext":"${kemCt}","kemConfirmTag":"${kemTag}"}}`)
 );
 assert.strictEqual(pqConf.events[0].event, "buddyConfirmed", "PQ initiator confirms with ciphertext + tag");
+const initTag = pqConf.result.initiatorConfirmTag;
+assert.ok(typeof initTag === "string" && initTag.length > 20, "initiator returns a base64 /i confirmation tag");
+// Bidirectional confirmation: the responder also fails closed. A matched confirm WITHOUT the initiator
+// tag is refused, a tampered tag fails closed, and the correct tag confirms the responder.
+const pqRespNoTag = JSON.parse(
+  pqResp.handle(`{"apiVersion":"1","command":"confirmBuddy","args":{"pairId":"${pqRespAdd.result.pairId}","matched":true}}`)
+);
+assert.strictEqual(pqRespNoTag.error.code, "pq_prekey_required", "responder confirm without the initiator tag refused");
+const itBuf = Buffer.from(initTag, "base64");
+itBuf[0] ^= 0x01;
+const pqRespTamper = JSON.parse(
+  pqResp.handle(`{"apiVersion":"1","command":"confirmBuddy","args":{"pairId":"${pqRespAdd.result.pairId}","matched":true,"initiatorConfirmTag":"${itBuf.toString("base64")}"}}`)
+);
+assert.strictEqual(pqRespTamper.error.code, "pq_confirm_failed", "tampered initiator tag fails closed on the responder");
+const pqRespConf = JSON.parse(
+  pqResp.handle(`{"apiVersion":"1","command":"confirmBuddy","args":{"pairId":"${pqRespAdd.result.pairId}","matched":true,"initiatorConfirmTag":"${initTag}"}}`)
+);
+assert.strictEqual(pqRespConf.events[0].event, "buddyConfirmed", "PQ responder confirms with the initiator's /i tag");
 
 console.log("engine-contract e2e: OK (bundle =", path.basename(bundle) + ")");

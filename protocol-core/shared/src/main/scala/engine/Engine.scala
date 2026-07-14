@@ -57,16 +57,25 @@ object EngineEvent:
 
 /** Result of `addBuddy` — the comparable safety number for out-of-band comparison. NEVER a private
   * key. `kemPublicKey`/`kemCiphertext`/`kemConfirmTag` are PUBLIC hybrid-KEM pairing-prekey material
-  * (public key, ciphertext, and a key-confirmation tag — none are secrets) the app carries out of band
-  * to the peer: an initiator ⇒ `kemPublicKey`; a PQ responder ⇒ `kemCiphertext` + `kemConfirmTag`
-  * (the tag authenticates the exchange — see `KeySchedule.pqConfirmTag`). All are absent on the
-  * classical (non-PQ) path. See [[Engine.addBuddy]]. */
+  * (public key, ciphertext, and the responder's `/r` key-confirmation tag — none are secrets) the app
+  * carries out of band to the peer: an initiator ⇒ `kemPublicKey`; a PQ responder ⇒ `kemCiphertext` +
+  * `kemConfirmTag` (the responder's `"ks/pq-confirm/r"` tag — see `KeySchedule.pqConfirmTagResponder`).
+  * All are absent on the classical (non-PQ) path. See [[Engine.addBuddy]]. */
 final case class AddBuddyResult(
     pairId: String,
     safetyNumber: String,
     kemPublicKey: Option[Array[Byte]] = None,
     kemCiphertext: Option[Array[Byte]] = None,
     kemConfirmTag: Option[Array[Byte]] = None
+)
+
+/** Result of `confirmBuddy`. On the PQ INITIATOR completion path it carries `initiatorConfirmTag` —
+  * the initiator's `"ks/pq-confirm/i"` tag (PUBLIC; see `KeySchedule.pqConfirmTagInitiator`) — which
+  * the app relays out of band to the responder so the responder can constant-time verify it and ALSO
+  * fail closed on KEM tampering (bidirectional confirmation, US7). Absent (`None`) on every other path
+  * (responder completion, classical, mismatch). NEVER key material. */
+final case class ConfirmResult(
+    initiatorConfirmTag: Option[Array[Byte]] = None
 )
 
 /** Per-round client decision from the schedule (`tick`). `kind`/`retrieve` only — no payload. */
@@ -96,6 +105,17 @@ final class Engine(
   // error path (Constitution II) — the map is the only place an initiator's un-completed prekey secret
   // lives, so wiping on removal from it is the whole forward-secrecy boundary for this state.
   private val pendingPq = mutable.Map.empty[String, PendingPq]
+  // Post-quantum pairing prekey (US7), RESPONDER side: a PQ responder `encaps`es and SEEDS its ratchet
+  // at `addBuddy` but stays in a PENDING-confirm state — it does NOT emit `BuddyConfirmed` until it has
+  // verified the INITIATOR's `"ks/pq-confirm/i"` tag. Until then it parks the EXPECTED initiator tag
+  // (`KeySchedule.pqConfirmTagInitiator(rootP)`, precomputed while `rootP` is live) here, keyed by
+  // pairId. This is the responder half of bidirectional confirmation: if an attacker swaps the
+  // initiator's `kemPublicKey` in transit, the responder encapsulates to the wrong key, so the real
+  // initiator can never reproduce this tag ⇒ the responder fails closed (`pq_confirm_failed`) instead
+  // of a "confirmed-but-dead" pairing. Wiped on completion / removeBuddy / safety-number mismatch (a
+  // tag mismatch RETAINS it for a legitimate retry). The parked tag is a one-way HMAC (not the seed),
+  // but is wiped anyway for uniformity with every other pairing secret.
+  private val pendingResponderTag = mutable.Map.empty[String, Array[Byte]]
   // Per-session cover-traffic key + counter. Cover (carrier) writes go to fresh, random-looking
   // tokens derived from this key, so a carrier round's store write is indistinguishable from a real
   // one (FR-012 cover traffic). The key never leaves the engine.
@@ -237,8 +257,11 @@ final class Engine(
     *     secret + base content root in `pendingPq`, DEFER ratchet seeding, and return `kemPublicKey`
     *     for the app to send to the peer out of band. The relationship is Pending with no runtime yet.
     *   - '''Responder''' given `initiatorKemPublicKey`: `encaps` to it, mix the shared secret into the
-    *     content root, seed the ratchet NOW, and return `kemCiphertext` for the app to return to the
-    *     initiator. The KEM shared secret is wiped after mixing.
+    *     content root, seed the ratchet NOW, and return `kemCiphertext` + the responder's `/r` confirm
+    *     tag for the app to return to the initiator. It stays in a PENDING-confirm state (parks the
+    *     expected initiator `/i` tag) and does NOT emit `BuddyConfirmed` until `confirmBuddy` verifies
+    *     the initiator's tag — so a `kemPublicKey` swapped in transit makes it fail closed rather than
+    *     confirm a dead ratchet (bidirectional confirmation). The KEM shared secret is wiped after mixing.
     *   - '''Classical (legacy / local-only)''': no KEM material ⇒ seed the ratchet from the classical
     *     content root exactly as before. This path is NON-PQ (the pairing seed is only as strong as
     *     the classical OOB secret); a PQ pairing must instead flow KEM material on both sides.
@@ -312,7 +335,11 @@ final class Engine(
         Left(EngineError("add_failed", reason))
 
   /** PQ responder add: `encaps` to the initiator's hybrid public key, fold the shared secret into the
-    * content root, seed the responder ratchet NOW, and return the ciphertext. `encaps` runs (and can
+    * content root, seed the responder ratchet NOW, and return the ciphertext + the responder's `/r`
+    * confirmation tag. The responder stays in a PENDING-confirm state (no `BuddyConfirmed` yet): it
+    * PARKS the expected initiator `/i` tag and defers final confirmation until `confirmBuddy` verifies
+    * the initiator's tag — so a `kemPublicKey` swapped in transit makes the responder fail closed
+    * rather than confirm a dead ratchet (bidirectional confirmation, US7). `encaps` runs (and can
     * reject a malformed/low-order peer key) BEFORE any book mutation, so a bad key adds nothing. */
   private def addResponderPq(
       init: Handshake.PairInit,
@@ -337,15 +364,21 @@ final class Engine(
           finally
             wipe(ss)
             wipe(contentRoot)
-        // Key-confirmation tag over the mixed root (the initiator will constant-time verify it before
-        // seeding — see completePqInitiator). Derived BEFORE `rootP` is consumed/wiped. PUBLIC (a
-        // domain-separated HMAC of the root that leaks nothing about the seed).
-        val confirmTag = KeySchedule.pqConfirmTag(rootP)
+        // Both confirmation tags, derived BEFORE `rootP` is consumed/wiped. PUBLIC (domain-separated
+        // HMACs of the root that leak nothing about the seed):
+        //   - `confirmTag` (the responder's `/r` tag) travels to the initiator, which verifies it.
+        //   - `expectedInitTag` (the initiator's `/i` tag) is PARKED so the responder can constant-time
+        //     verify the initiator's returned tag before it confirms (fail closed on a `kemPublicKey`
+        //     tampered in transit — the real initiator's `rootP`, hence its tag, would then differ).
+        val confirmTag = KeySchedule.pqConfirmTagResponder(rootP)
+        val expectedInitTag = KeySchedule.pqConfirmTagInitiator(rootP)
         book.add(rel) match
           case Right(nb) =>
             book = nb
             try runtime(init.pairId) = BuddyRuntime(BuddyRole.Responder, rootP)
             finally wipe(rootP) // chains seeded; the PQ content root must not linger
+            // Park the expected initiator tag; the responder stays Pending until it verifies it.
+            pendingResponderTag(init.pairId) = expectedInitTag
             Right(
               AddBuddyResult(
                 init.pairId,
@@ -355,7 +388,7 @@ final class Engine(
               )
             )
           case Left(reason) =>
-            wipe(rootP); wipe(addrKey)
+            wipe(rootP); wipe(addrKey); wipe(expectedInitTag)
             Left(EngineError("add_failed", reason))
 
   /** PQ initiator add: generate a hybrid-KEM keypair, PARK the secret + base content root, and DEFER
@@ -391,27 +424,39 @@ final class Engine(
   /** Confirm/reject a pairing after the out-of-band safety-number comparison. On match, emits
     * `buddyConfirmed`; on mismatch the relationship is removed and nothing is established.
     *
-    * For an initiator that opened a PQ pairing prekey (see `addBuddy`), the responder's
-    * `kemCiphertext` + `kemConfirmTag` are delivered HERE (they travel out of band alongside the
-    * safety-number comparison): on match the ciphertext is `decaps`-ed, folded into the content root,
-    * the tag is constant-time verified, and only then is the deferred ratchet seeded. Fail closed — a
-    * matched PQ pairing WITHOUT both the ciphertext and the tag is refused (it must not silently
-    * downgrade to the classical seed), and a tag mismatch (any tamper of the KEM material) is refused
-    * with `pq_confirm_failed`; the pending state is retained so a legitimate retry can complete. On
-    * mismatch the parked KEM secret is wiped and nothing is established. */
+    * ==Bidirectional PQ key confirmation (US7)==
+    * Confirmation is BIDIRECTIONAL — BOTH sides fail closed on any KEM tampering. The role is fixed by
+    * which parked state exists for `pairId`:
+    *   - '''INITIATOR''' (parked KEM secret): the responder's `kemCiphertext` + `kemConfirmTag` (the
+    *     `/r` tag) are delivered HERE. On match the ciphertext is `decaps`-ed, folded into the content
+    *     root, the responder's `/r` tag is constant-time verified, the deferred ratchet is seeded, and
+    *     the result carries the initiator's own `/i` tag (`initiatorConfirmTag`) for the app to relay
+    *     back to the responder.
+    *   - '''RESPONDER''' (parked expected `/i` tag; ratchet already seeded at addBuddy): the initiator's
+    *     `initiatorConfirmTag` is delivered HERE and constant-time verified against the parked expected
+    *     tag. Only on a match does the responder emit `BuddyConfirmed` — a `kemPublicKey` swapped in
+    *     transit yields a mismatching tag and is refused (`pq_confirm_failed`), so the responder never
+    *     lands in a confirmed-but-dead state.
+    *   - '''CLASSICAL''' (no parked state, ratchet seeded at addBuddy): confirm/reject as before.
+    *
+    * Fail closed — a matched PQ pairing missing the required tag(s) is refused (`pq_prekey_required`;
+    * it must not silently downgrade to the classical seed), and a tag mismatch is refused
+    * (`pq_confirm_failed`) with the parked state RETAINED so a legitimate retry can complete. On a
+    * safety-number mismatch the parked secret/tag is wiped and nothing is established. */
   def confirmBuddy(
       pairId: String,
       matched: Boolean,
       kemCiphertext: Option[Array[Byte]] = None,
-      kemConfirmTag: Option[Array[Byte]] = None
-  ): Either[EngineError, Unit] =
+      kemConfirmTag: Option[Array[Byte]] = None,
+      initiatorConfirmTag: Option[Array[Byte]] = None
+  ): Either[EngineError, ConfirmResult] =
     pendingPq.get(pairId) match
       case Some(pending) =>
         if !matched then
           pending.wipe()
           pendingPq.remove(pairId)
           book.confirm(pairId, matched) match
-            case Right(nb) => book = nb; Right(())
+            case Right(nb) => book = nb; Right(ConfirmResult())
             case Left(reason) => Left(EngineError("confirm_failed", reason))
         else
           (kemCiphertext, kemConfirmTag) match
@@ -424,38 +469,42 @@ final class Engine(
                 )
               )
       case None =>
-        // Responder (ratchet already seeded at addBuddy) or classical: no parked PQ state. Any stray
-        // `kemCiphertext` is ignored here — only an initiator with parked PQ state consumes one.
-        book.confirm(pairId, matched) match
-          case Right(nb) =>
-            if matched then
-              // Defense in depth (fail closed): a matched confirm MUST have a seeded ratchet — the
-              // responder/classical paths seed one at addBuddy. A Pending relationship with NO runtime
-              // and NO parked prekey is an un-completed PQ initiator (its prekey was aborted); refuse
-              // rather than confirm a buddy that could never send/receive. This also blocks any path
-              // where a PQ initiator could reach a silent non-PQ (classical) confirm.
-              if !runtime.contains(pairId) then
-                Left(EngineError("pq_prekey_required", "pairing not ready to confirm"))
-              else
-                book = nb
-                book
-                  .get(pairId)
-                  .foreach(r => emit(EngineEvent.BuddyConfirmed(r.pairId, r.safetyNumber)))
-                Right(())
-            else
-              // Mismatch is terminal (relationship now Removed): drop the buddy's runtime + outbox so no
-              // seeded ratchet — including a PQ-hardened responder seed — lingers past the rejected
-              // pairing (parallels removeBuddy's cleanup).
-              book = nb
-              runtime.remove(pairId)
-              outbox.remove(pairId)
-              Right(())
-          case Left(reason) => Left(EngineError("confirm_failed", reason))
+        pendingResponderTag.get(pairId) match
+          case Some(expectedInitTag) =>
+            completePqResponder(pairId, expectedInitTag, matched, initiatorConfirmTag)
+          case None =>
+            // Classical/legacy: no parked PQ state; the ratchet was seeded at addBuddy. Any stray KEM
+            // material is ignored here — only a parked PQ role consumes one.
+            book.confirm(pairId, matched) match
+              case Right(nb) =>
+                if matched then
+                  // Defense in depth (fail closed): a matched confirm MUST have a seeded ratchet — the
+                  // classical path seeds one at addBuddy. A Pending relationship with NO runtime and NO
+                  // parked prekey is an un-completed PQ initiator (its prekey was aborted); refuse
+                  // rather than confirm a buddy that could never send/receive. This also blocks any path
+                  // where a PQ initiator could reach a silent non-PQ (classical) confirm.
+                  if !runtime.contains(pairId) then
+                    Left(EngineError("pq_prekey_required", "pairing not ready to confirm"))
+                  else
+                    book = nb
+                    book
+                      .get(pairId)
+                      .foreach(r => emit(EngineEvent.BuddyConfirmed(r.pairId, r.safetyNumber)))
+                    Right(ConfirmResult())
+                else
+                  // Mismatch is terminal (relationship now Removed): drop the buddy's runtime + outbox so
+                  // no seeded ratchet lingers past the rejected pairing (parallels removeBuddy's cleanup).
+                  book = nb
+                  runtime.remove(pairId)
+                  outbox.remove(pairId)
+                  Right(ConfirmResult())
+              case Left(reason) => Left(EngineError("confirm_failed", reason))
 
   /** Complete an initiator PQ pairing prekey: `decaps` the responder's ciphertext, fold the recovered
     * shared secret into the base content root (identically to the responder's `encaps` path, so both
-    * sides seed a byte-identical ratchet), KEY-CONFIRM against the responder's tag, then seed the
-    * deferred initiator ratchet and confirm.
+    * sides seed a byte-identical ratchet), KEY-CONFIRM against the responder's `/r` tag, then seed the
+    * deferred initiator ratchet, confirm, and RETURN the initiator's own `/i` tag for the app to relay
+    * back to the responder (which verifies it before it confirms — bidirectional confirmation, US7).
     *
     * ==Key confirmation (the ML-KEM implicit-rejection defense)==
     * ML-KEM `decaps` does NOT throw on a tampered SAME-LENGTH ciphertext — it silently returns a
@@ -481,17 +530,22 @@ final class Engine(
       pending: PendingPq,
       ct: Array[Byte],
       expectedTag: Array[Byte]
-  ): Either[EngineError, Unit] =
+  ): Either[EngineError, ConfirmResult] =
     var ss: Array[Byte] = null
     var rootP: Array[Byte] = null
     try
       ss = HybridKem.decaps(ct, pending.kemSecret)
       rootP = KeySchedule.pqContentRoot(pending.baseContentRoot, ss)
-      // Verify key confirmation FIRST (constant time). A mismatch means the KEM material was tampered
-      // (or is for a different peer): reject, retain the parked prekey, seed/confirm nothing.
-      if !token.RetrievalToken.equalsCT(KeySchedule.pqConfirmTag(rootP), expectedTag) then
+      // Verify the responder's `/r` key-confirmation tag FIRST (constant time). A mismatch means the KEM
+      // material was tampered (or is for a different peer): reject, retain the parked prekey, seed/
+      // confirm nothing.
+      if !token.RetrievalToken.equalsCT(KeySchedule.pqConfirmTagResponder(rootP), expectedTag) then
         Left(EngineError("pq_confirm_failed", "KEM key confirmation failed"))
       else
+        // The initiator's own `/i` tag — the responder will constant-time verify it before IT confirms,
+        // so both sides fail closed. Computed while `rootP` is live (it is wiped in the `finally`). It is
+        // a one-way HMAC of the root (PUBLIC), returned to the caller to relay out of band.
+        val initiatorTag = KeySchedule.pqConfirmTagInitiator(rootP)
         // `book.confirm` is PURE (returns a new book, no mutation), so validate it BEFORE constructing
         // the ratchet: on a refusal we never build a throwaway `BuddyRuntime` that would strand live,
         // un-wiped ratchet keys (root/chain/header + a fresh X25519 private) with no erasure
@@ -509,13 +563,67 @@ final class Engine(
             // Success: the parked prekey is consumed — wipe + remove it now.
             pending.wipe()
             pendingPq.remove(pairId)
-            Right(())
+            Right(ConfirmResult(initiatorConfirmTag = Some(initiatorTag)))
           case Left(reason) =>
             Left(EngineError("confirm_failed", reason)) // retain pending for a legitimate retry
     catch case _: Throwable => Left(EngineError("pq_prekey_failed", "prekey completion failed"))
     finally
       if ss != null then wipe(ss)
       if rootP != null then wipe(rootP)
+
+  /** Complete a RESPONDER PQ pairing: the responder already `encaps`ed + seeded its ratchet at
+    * `addBuddy` and parked the EXPECTED initiator `/i` tag. Here it constant-time verifies the
+    * initiator's returned `initiatorConfirmTag` against that parked value before emitting
+    * `BuddyConfirmed`, so a `kemPublicKey` tampered in transit (⇒ the real initiator's tag differs)
+    * makes the responder fail closed instead of confirming a dead ratchet (bidirectional confirmation).
+    *
+    * Fail closed — a matched confirm WITHOUT the initiator tag is refused (`pq_prekey_required`), and a
+    * tag mismatch is refused (`pq_confirm_failed`) with the parked tag RETAINED for a legitimate retry.
+    * The ratchet is already seeded, so there is no runtime to construct; the tag check runs BEFORE the
+    * (pure) `book.confirm` is committed. On a safety-number mismatch (`matched == false`) the pairing is
+    * terminal: the parked tag is wiped and the seeded runtime/outbox dropped. */
+  private def completePqResponder(
+      pairId: String,
+      expectedInitTag: Array[Byte],
+      matched: Boolean,
+      initiatorConfirmTag: Option[Array[Byte]]
+  ): Either[EngineError, ConfirmResult] =
+    if !matched then
+      // Safety-number mismatch is terminal: wipe the parked tag and drop the seeded ratchet + outbox so
+      // nothing lingers past the rejected pairing (parallels the classical-mismatch/removeBuddy cleanup).
+      book.confirm(pairId, matched = false) match
+        case Right(nb) =>
+          book = nb
+          runtime.remove(pairId)
+          outbox.remove(pairId)
+          wipe(expectedInitTag)
+          pendingResponderTag.remove(pairId)
+          Right(ConfirmResult())
+        case Left(reason) => Left(EngineError("confirm_failed", reason))
+    else
+      initiatorConfirmTag match
+        case None =>
+          Left(EngineError("pq_prekey_required", "initiator confirmation tag required to confirm"))
+        case Some(gotTag) =>
+          // Constant-time verify the initiator's tag FIRST (before any book mutation). A mismatch ⇒ the
+          // KEM material was tampered (e.g. a swapped initiator `kemPublicKey`): reject and RETAIN the
+          // parked tag so a legitimate retry can complete.
+          if !token.RetrievalToken.equalsCT(gotTag, expectedInitTag) then
+            Left(EngineError("pq_confirm_failed", "KEM key confirmation failed"))
+          else
+            // `book.confirm` is pure — validate it, then commit + emit. The ratchet was already seeded
+            // at addBuddy, so there is no throwaway runtime to strand on a refusal.
+            book.confirm(pairId, matched = true) match
+              case Right(nb) =>
+                book = nb
+                book
+                  .get(pairId)
+                  .foreach(r => emit(EngineEvent.BuddyConfirmed(r.pairId, r.safetyNumber)))
+                wipe(expectedInitTag)
+                pendingResponderTag.remove(pairId)
+                Right(ConfirmResult())
+              case Left(reason) =>
+                Left(EngineError("confirm_failed", reason)) // retain the parked tag for a retry
 
   /** Remove a buddy. Stops future delivery (FR-018) without leaking prior existence — no event. Any
     * parked (un-completed) PQ pairing-prekey secret for this pair is wiped here too. */
@@ -526,6 +634,7 @@ final class Engine(
         outbox.remove(pairId)
         runtime.remove(pairId)
         pendingPq.remove(pairId).foreach(_.wipe())
+        pendingResponderTag.remove(pairId).foreach(wipe)
         Right(())
       case Left(reason) => Left(EngineError("remove_failed", reason))
 
