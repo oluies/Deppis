@@ -250,13 +250,16 @@ final class DoubleRatchet private (
               // untouched (the no-mutation-on-undecryptable invariant, dh-ratchet.md §6/§9).
               // A DH-step peek runs the ECDH against the header's ratchet key, which is PUBLIC and
               // attacker-supplied; a low-order / non-canonical peer key makes X25519.sharedSecret
-              // throw IllegalArgumentException uniformly on both platforms. Treat that like any other
-              // undecryptable frame — drop it, no state mutation (peekMessageKey mutates nothing). The
-              // branch is governed by the public peer key, not by any secret, so no secret-dependent
-              // timing is introduced (dh-ratchet.md §6/§9).
+              // throw `PeerKeyRejected` uniformly on both platforms. Treat that like any other
+              // undecryptable frame — drop it, no state mutation (peekMessageKey mutates nothing). We
+              // catch EXACTLY `PeerKeyRejected` (not any IllegalArgumentException) so an unrelated
+              // IllegalArgumentException from a genuine bug — e.g. corrupted key material reaching the
+              // KDF inside peekMessageKey — is NOT silently swallowed as a carrier. The branch is
+              // governed by the public peer key, not by any secret, so no secret-dependent timing is
+              // introduced (dh-ratchet.md §6/§9).
               val mkOpt =
                 try Some(peekMessageKey(dhPub, headerN, isDhStep))
-                catch case _: IllegalArgumentException => None
+                catch case _: x25519.PeerKeyRejected => None
               mkOpt match
                 case None => None // rejected peer ratchet key ⇒ carrier / not ours: no state change
                 case Some(mk) =>

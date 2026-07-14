@@ -29,50 +29,35 @@ object X25519:
   /** The raw public key for a raw private key (deterministic): `X25519(priv, base)`. */
   def publicKey(privateKey: Array[Byte]): Array[Byte] = sharedSecret(privateKey, BasePoint)
 
-  // Curve25519 field prime p = 2^255 - 19 (RFC 7748). A well-formed peer u-coordinate satisfies
-  // u < p after the unused top bit is masked; an out-of-range `p <= u < 2^255` encoding could
-  // otherwise be reduced differently by different peers, silently disagreeing on the DH leg — a
-  // cross-platform oracle. `scala.math.BigInt` so the check is byte-identical to the Scala.js build.
-  private val P25519: BigInt = (BigInt(1) << 255) - 19
-
-  /** Reject a non-canonical peer u-coordinate (`u >= p` after masking bit 255) with
-    * `IllegalArgumentException`. Pure validation over the PUBLIC, attacker-supplied peer bytes — no
-    * secret-dependent branch, no curve arithmetic (Constitution I/II). Identical logic to the
-    * Scala.js build so both platforms accept exactly the same encodings. */
-  private def requireCanonicalU(peerPublic: Array[Byte]): Unit =
-    require(peerPublic.length == KeyBytes, s"X25519 peer public key must be $KeyBytes bytes")
-    var u = BigInt(0)
-    var i = KeyBytes - 1
-    while i >= 0 do
-      val b = if i == KeyBytes - 1 then peerPublic(i) & 0x7f else peerPublic(i) & 0xff
-      u = (u << 8) | BigInt(b)
-      i -= 1
-    require(u < P25519, "X25519: non-canonical peer u-coordinate (>= p)")
-
   /** The 32-byte X25519 shared secret between our raw private key and a raw peer public key.
     *
     * Peer keys arrive in headers / ciphertexts and are attacker-controllable, so the acceptance set
     * and the rejection exception are UNIFORM across platforms (pinned by `X25519Spec` /
-    * `X25519JsSpec`), byte-for-byte identical to the Scala.js `@noble/curves` build on valid inputs:
+    * `X25519JsSpec` + the shared `X25519RejectionCrossSpec`), byte-for-byte identical to the Scala.js
+    * `@noble/curves` build on valid inputs:
     *   - a non-canonical encoding whose (bit-255-masked, little-endian) u-coordinate is `>= p` is
-    *     rejected up front by `requireCanonicalU` (`IllegalArgumentException`);
+    *     rejected up front by the shared `CanonicalU.requireCanonical` (`PeerKeyRejected`);
     *   - a degenerate / low-order peer key — one whose contributory check fails, i.e. would yield the
-    *     all-zero secret — is rejected: JCA raises `InvalidKeyException`, which we NORMALIZE to
-    *     `IllegalArgumentException` (the same type the JS build raises). The explicit all-zero check
-    *     is a backstop for any JCA provider that returns the zero secret instead of rejecting it.
-    * So callers (the classical `DoubleRatchet`, the hybrid `kem.HybridKem`) treat a rejected peer key
-    * uniformly on both platforms (an undecryptable / carrier frame). */
+    *     all-zero secret — is rejected: JCA raises `InvalidKeyException` from `doPhase`/`generateSecret`,
+    *     which we NORMALIZE to `PeerKeyRejected` (the same dedicated type the JS build raises). The
+    *     explicit all-zero check is a backstop for any JCA provider that returns the zero secret.
+    * A wrong-length PRIVATE key is a LOCAL key-management error, not a peer rejection: it is rejected
+    * up front with a plain `IllegalArgumentException`, and `privateFromRaw`/`ka.init` are kept OUTSIDE
+    * the peer-key try so a private-key `InvalidKeyException` propagates un-normalized (never mislabeled
+    * as a peer rejection). So callers (the classical `DoubleRatchet`, the hybrid `kem.HybridKem`) treat
+    * a rejected peer key uniformly on both platforms (an undecryptable / carrier frame). */
   def sharedSecret(privateKey: Array[Byte], peerPublic: Array[Byte]): Array[Byte] =
-    requireCanonicalU(peerPublic)
+    require(privateKey.length == KeyBytes, s"X25519 private key must be $KeyBytes bytes")
+    CanonicalU.requireCanonical(peerPublic)
+    val ka = KeyAgreement.getInstance("X25519")
+    ka.init(privateFromRaw(privateKey)) // OUTSIDE the try: a local-key failure stays un-normalized.
     val secret =
       try
-        val ka = KeyAgreement.getInstance("X25519")
-        ka.init(privateFromRaw(privateKey))
         ka.doPhase(publicFromRaw(peerPublic), true)
         ka.generateSecret()
       catch
         case e: java.security.InvalidKeyException =>
-          throw new IllegalArgumentException(s"X25519 peer key rejected: ${e.getMessage}", e)
+          throw new PeerKeyRejected(s"X25519 peer key rejected: ${e.getMessage}", e)
     // OR-accumulate every byte before the test (no short-circuit) so the all-zero scan is independent
     // of byte positions — Constitution II's constant-time discipline, even though the outcome here is
     // governed by the public, attacker-supplied peer key rather than our private scalar.
@@ -81,8 +66,7 @@ object X25519:
     while i < secret.length do
       acc |= secret(i) & 0xff
       i += 1
-    if acc == 0 then
-      throw new IllegalArgumentException("X25519: degenerate (all-zero) shared secret")
+    if acc == 0 then throw new PeerKeyRejected("X25519: degenerate (all-zero) shared secret")
     secret
 
   private def privateFromRaw(raw: Array[Byte]): PrivateKey =

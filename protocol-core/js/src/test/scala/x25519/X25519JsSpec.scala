@@ -6,7 +6,9 @@ import org.scalatest.funsuite.AnyFunSuite
   * (`X25519Spec`) produces, proving @noble ≡ JCA byte-for-byte so the double ratchet derives identical
   * DH shared secrets on both platforms. The JS project's test sources are wired to `js/src/test` only
   * (`build.sbt`), so shared specs do NOT run under Node — this explicit mirror is how the contract is
-  * pinned on JS, exactly like `AeadJsSpec` / `RandJsSpec`. */
+  * pinned on JS, exactly like `AeadJsSpec` / `RandJsSpec`. The peer-key REJECTION parity (small-order
+  * / non-canonical keys) is single-sourced in `x25519.X25519RejectionCrossSpec` (crosstest/, compiled
+  * into both builds), not duplicated here. */
 class X25519JsSpec extends AnyFunSuite:
 
   private def hex(s: String): Array[Byte] =
@@ -33,35 +35,3 @@ class X25519JsSpec extends AnyFunSuite:
     val (bPriv, bPub) = X25519.generateKeyPair()
     assert(aPub.length == X25519.KeyBytes && aPriv.length == X25519.KeyBytes)
     assert(X25519.sharedSecret(aPriv, bPub).sameElements(X25519.sharedSecret(bPriv, aPub)))
-
-  test(
-    "every small-order / non-canonical peer key is rejected with IllegalArgumentException on JS"
-  ):
-    // Mirror of the JVM parity assertion over the full set: @noble/curves' throw is normalized to
-    // IllegalArgumentException (and `u >= p` encodings are rejected up front), so the cross-platform
-    // "reject bad peer keys with the SAME exception type" contract holds under Node too.
-    val priv = hex("77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a")
-    smallOrderPoints.foreach: u =>
-      assertThrows[IllegalArgumentException](X25519.sharedSecret(priv, hex(u)))
-
-  test("a low-order (all-zero) AND a non-canonical (u = p) peer key both reject identically on JS"):
-    // The two distinct rejection paths, pinned explicitly and to the SAME exception type as the JVM:
-    //   - all-zero u (order-2, canonical): passes the u<p range check, rejected by the all-zero ECDH;
-    //   - u = p (edff…7f): rejected up front by the canonical `u < p` range check.
-    val priv = hex("77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a")
-    val lowOrderZero = hex("0000000000000000000000000000000000000000000000000000000000000000")
-    val nonCanonicalP = hex("edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f")
-    assertThrows[IllegalArgumentException](X25519.sharedSecret(priv, lowOrderZero))
-    assertThrows[IllegalArgumentException](X25519.sharedSecret(priv, nonCanonicalP))
-
-  // Same canonical small-order u-coordinates as the JVM `X25519Spec` (kept local — shared test sources
-  // do not compile into the JS project; see this file's header).
-  private val smallOrderPoints: Seq[String] = Seq(
-    "0000000000000000000000000000000000000000000000000000000000000000",
-    "0100000000000000000000000000000000000000000000000000000000000000",
-    "e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b800",
-    "5f9c95bca3508c24b1d0b1559c83ef5b04445cc4581c8e86d8224eddd09f1157",
-    "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
-    "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
-    "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"
-  )

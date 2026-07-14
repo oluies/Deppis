@@ -76,29 +76,6 @@ class DoubleRatchetJsSpec extends AnyFunSuite:
     assert(bob.decrypt(bad1).isEmpty)
     assert(bob.decrypt(w1).map(text).contains("m1"))
 
-  test(
-    "low-order / non-canonical peer ratchet header key dropped as undecryptable on JS (no crash)"
-  ):
-    // Mirror of the JVM assertion: a header sealed under the responder's bootstrap key `hka` (derived
-    // from the shared content root) but carrying an attacker-chosen low-order / non-canonical ratchet
-    // public key. `X25519.sharedSecret` throws IllegalArgumentException; `decrypt` must DROP it (None)
-    // with no state mutation — the cross-platform oracle, closed at the ratchet's DH primitive.
-    val root = contentRoot(9)
-    val hka = kdf.Kdf.hmacSha256(root, "dr/hdr/a".getBytes(UTF_8)) // == responder's initial nhkr
-    def malicious(dhPub: Array[Byte]): Array[Byte] =
-      val header = dhPub ++ Array.fill[Byte](8)(0) // PN=0, Ns=0
-      val nonce = Array.fill[Byte](12)(0x11.toByte)
-      val sealedHeader = aead.Aead.seal(hka, nonce, header)
-      val body = Array.fill[Byte](DoubleRatchet.WireSize - 12 - sealedHeader.length)(0x5a.toByte)
-      nonce ++ sealedHeader ++ body
-    val lowOrder = new Array[Byte](32) // all-zero u: order-2, canonical, all-zero ECDH
-    val nonCanonical =
-      val a = Array.fill[Byte](32)(0xff.toByte); a(0) = 0xed.toByte; a(31) = 0x7f.toByte; a
-    val bob = DoubleRatchet.initResponder(root)
-    assert(
-      bob.decrypt(malicious(lowOrder)).isEmpty,
-      "low-order peer ratchet key ⇒ dropped, no crash"
-    )
-    assert(bob.decrypt(malicious(nonCanonical)).isEmpty, "non-canonical peer ratchet key ⇒ dropped")
-    val alice = DoubleRatchet.initInitiator(root)
-    assert(bob.decrypt(alice.encrypt(inner("real"))).map(text).contains("real"))
+  // NOTE: the low-order / non-canonical peer ratchet-header-key rejection test is single-sourced
+  // cross-platform in `engine.DoubleRatchetRejectionCrossSpec` (crosstest/, run on both JVM and JS),
+  // not duplicated here.
