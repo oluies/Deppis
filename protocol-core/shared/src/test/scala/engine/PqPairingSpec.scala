@@ -422,6 +422,22 @@ class PqPairingSpec extends AnyFunSuite:
         .isLeft
     )
 
+  test("removeBuddy on a still-pending PQ responder clears the parked expected initiator tag"):
+    // The responder seeds its ratchet at addBuddy but stays Pending-confirm with a parked /i tag. After
+    // removeBuddy that parked tag must be gone, so a later completion with the GENUINE initiator tag
+    // cannot confirm (the pairing is terminal — parallels the initiator's parked-secret cleanup).
+    val s = pqSetup(FakeBackend())
+    val initTag = completeInitiator(s) // the genuine /i tag the responder would otherwise accept
+    assert(s.bob.buddyCount == 1)
+    assert(s.bob.removeBuddy(s.pid).isRight)
+    assert(s.bob.buddyCount == 0)
+    assert(
+      s.bob.confirmBuddy(s.pid, matched = true, initiatorConfirmTag = Some(initTag)).isLeft,
+      "after removeBuddy the parked responder tag is gone — even the genuine tag cannot confirm"
+    )
+    assert(s.bob.confirmedCount == 0)
+    assert(s.bob.drainEvents().isEmpty)
+
   test("a malformed KEM public key is rejected without adding the buddy (responder path)"):
     val bob = Engine()
     val bad = new Array[Byte](HybridKem.PublicKeyBytes) // all-zero ⇒ low-order X25519, rejected

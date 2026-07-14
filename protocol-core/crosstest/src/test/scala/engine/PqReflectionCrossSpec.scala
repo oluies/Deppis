@@ -60,10 +60,16 @@ class PqReflectionCrossSpec extends AnyFunSuite:
     assert(bob.confirmedCount == 1)
 
   test(
-    "REFLECTION: the INITIATOR rejects a /i-domain tag presented as the responder's kemConfirmTag"
+    "WRONG TAG: the INITIATOR rejects a /i-domain tag presented as the responder's kemConfirmTag"
   ):
-    // A `/i`-domain tag (from a real pairing) fed where the initiator expects the responder's `/r` tag:
-    // the initiator's constant-time /r compare fails closed (a /i value never satisfies a /r check).
+    // NOTE (honest scope): this pins WRONG-TAG rejection on the initiator side — a `/i`-domain tag from
+    // a DIFFERENT pairing (different `rootP`) fed where the initiator expects the responder's `/r` tag
+    // fails closed. It does NOT isolate domain separation on its own (the compare would also fail with
+    // the same HMAC label, because `rootP` differs). Domain separation itself is pinned by the two tests
+    // above: `!rTag.sameElements(iTag)` over the SAME `rootP`, and the responder rejecting its own `/r`
+    // tag where the `/i` tag is expected (same `rootP`, so ONLY the label differs). The initiator's own
+    // `rootP` is unreachable from a test (its `kemSecret` never leaves the engine), so a same-root
+    // initiator-side reflection cannot be constructed through the public API.
     val (_, _, _, iTag) = bothTags()
     val alice = Engine()
     val bob = Engine()
