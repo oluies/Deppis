@@ -27,7 +27,23 @@ private object Sha256Module extends js.Object:
 
 object Kdf:
   def hmacSha256(key: Array[Byte], info: Array[Byte]): Array[Byte] =
-    toBytes(HmacModule.hmac(Sha256Module.sha256, toU8(key), toU8(info)))
+    // Zero our own transient Uint8Array copies of the inputs once noble has read them. For secret
+    // callers (e.g. KeySchedule.pqContentRoot, which mixes the KEM shared secret into `info`) these
+    // copies are otherwise un-wiped heap duplicates of secret material (Constitution II); harmless
+    // for the public-label callers. noble.hmac consumes the inputs synchronously, so wiping after it
+    // returns does not affect the output.
+    val kU = toU8(key)
+    val iU = toU8(info)
+    try toBytes(HmacModule.hmac(Sha256Module.sha256, kU, iU))
+    finally
+      zero(kU)
+      zero(iU)
+
+  private def zero(u: Uint8Array): Unit =
+    var i = 0
+    while i < u.length do
+      u(i) = 0.toShort
+      i += 1
 
   private def toU8(a: Array[Byte]): Uint8Array =
     val u = new Uint8Array(a.length)
