@@ -107,8 +107,12 @@ class HybridKemCrossSpec extends AnyFunSuite:
     val (ct, ssEnc) = HybridKem.encaps(pub)
     val ctTop = ct.clone()
     ctTop(31) = (ctTop(31) | 0x80.toByte).toByte // set bit 255 on the ephemeral X25519 u-coordinate
-    assert(!ctTop.sameElements(ct), "byte 31 top bit must actually differ from the canonical encoding")
-    val ssDec = HybridKem.decaps(ctTop, secret) // MUST NOT throw ⇒ top-bit-set ephemeral is accepted
+    assert(
+      !ctTop.sameElements(ct),
+      "byte 31 top bit must actually differ from the canonical encoding"
+    )
+    // decaps MUST NOT throw ⇒ the top-bit-set ephemeral is accepted (masked), not rejected.
+    val ssDec = HybridKem.decaps(ctTop, secret)
     assert(
       !ssDec.sameElements(ssEnc),
       "the changed ephemeral encoding flows through the transcript rather than being re-canonicalized"
