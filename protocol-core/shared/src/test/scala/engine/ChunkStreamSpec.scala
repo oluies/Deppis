@@ -358,9 +358,9 @@ class ChunkStreamSpec extends AnyFunSuite with ScalaCheckPropertyChecks:
     val done = cs.drop(1).flatMap(c => ra.feed(c).toOption.get)
     assert(done.size == 1 && done.head.bytes.sameElements(bytes(ChunkCapacity * 3)))
 
-  test("fail closed: concurrent pending transfers are bounded (memory cap)"):
+  test("concurrent pending transfers are bounded: at the cap the OLDEST is evicted"):
     val ra = ChunkReassembler(maxPendingTransfers = 2)
-    // Three distinct keys, each opened with a non-completing first chunk.
+    // Two distinct keys, each opened with a non-completing first chunk.
     assert(
       ra.feed(Envelope.KemChunk(1, BuddyRole.Initiator, Part.Pub, 0, 2, bytes(ChunkCapacity)))
         == Right(None)
@@ -369,17 +369,64 @@ class ChunkStreamSpec extends AnyFunSuite with ScalaCheckPropertyChecks:
       ra.feed(Envelope.KemChunk(2, BuddyRole.Initiator, Part.Pub, 0, 2, bytes(ChunkCapacity)))
         == Right(None)
     )
+    assert(ra.pendingCount == 2)
+    // A third is ACCEPTED (never rejected) and evicts epoch 1, the oldest.
     assert(
       ra.feed(Envelope.KemChunk(3, BuddyRole.Initiator, Part.Pub, 0, 2, bytes(ChunkCapacity)))
-        == Left(ChunkError.TooManyTransfers)
+        == Right(None)
     )
-    // An already-open transfer keeps working — the cap sheds new keys, not live ones.
+    assert(ra.pendingCount == 2, "the cap still holds")
+    // Epoch 1 was evicted: its second chunk opens a FRESH transfer rather than completing.
     assert(
-      ra.feed(Envelope.KemChunk(1, BuddyRole.Initiator, Part.Pub, 1, 2, bytes(4)))
+      ra.feed(Envelope.KemChunk(1, BuddyRole.Initiator, Part.Pub, 1, 2, bytes(4))) == Right(None)
+    )
+    // Epoch 3 (newest, still resident) completes normally.
+    assert(
+      ra.feed(Envelope.KemChunk(3, BuddyRole.Initiator, Part.Pub, 1, 2, bytes(4)))
+        .toOption
+        .get
+        .exists(_.bytes.length == ChunkCapacity + 4)
+    )
+
+  test("a stale-epoch flood cannot permanently wedge a live rekey (self-healing cap)"):
+    // The peer picks the epochs. If the cap rejected the NEWEST, a peer that opens N transfers and
+    // never completes them would deny every future rekey for the process's lifetime, with no
+    // recovery short of abandonAll(). Evicting the oldest keeps a live rekey always serviceable.
+    val ra = ChunkReassembler(maxPendingTransfers = 4)
+    for e <- 100 until 140 do // 40 stale, never-completed transfers
+      assert(
+        ra.feed(Envelope.KemChunk(e, BuddyRole.Initiator, Part.Pub, 0, 2, bytes(ChunkCapacity)))
+          == Right(None)
+      )
+      assert(ra.pendingCount <= 4, s"cap breached at epoch $e")
+    // A genuine two-chunk rekey still completes immediately afterwards.
+    val obj = bytes(ChunkCapacity + 9, 6)
+    val cs = chunk(500, BuddyRole.Initiator, Part.Pub, obj).toOption.get.map(decodeChunk)
+    assert(ra.feed(cs(0)) == Right(None))
+    assert(
+      ra.feed(cs(1)).toOption.get.exists(_.bytes.sameElements(obj)),
+      "a live rekey must not be wedged by a stale flood"
+    )
+
+  test("abandonBefore(cutoff) reclaims every stale epoch in bulk, keeping current ones"):
+    // Phase 3 advances epochs monotonically, so everything older than the current epoch is stale by
+    // construction — and it cannot always enumerate the exact stale ids that abandon() requires.
+    val ra = ChunkReassembler(maxPendingTransfers = 16)
+    for e <- 1 to 6 do
+      ra.feed(Envelope.KemChunk(e, BuddyRole.Initiator, Part.Pub, 0, 2, bytes(ChunkCapacity))): Unit
+    assert(ra.pendingCount == 6)
+    assert(ra.abandonBefore(5) == 4, "epochs 1..4 are stale")
+    assert(ra.pendingCount == 2, "epochs 5 and 6 survive")
+    assert(ra.abandonBefore(5) == 0, "idempotent")
+    assert(ra.abandonBefore(Int.MinValue) == 0, "nothing is before the minimum epoch")
+    // The surviving current epoch still completes correctly.
+    assert(
+      ra.feed(Envelope.KemChunk(6, BuddyRole.Initiator, Part.Pub, 1, 2, bytes(2)))
         .toOption
         .get
         .isDefined
     )
+    assert(ra.abandonBefore(Int.MaxValue) == 1, "epoch 5 remains and is reclaimable")
 
   test("abandon(epoch) releases a stalled transfer's slot (doc §4.4 wipe-on-abort/timeout)"):
     val ra = ChunkReassembler(maxPendingTransfers = 2)
@@ -387,22 +434,55 @@ class ChunkStreamSpec extends AnyFunSuite with ScalaCheckPropertyChecks:
     ra.feed(Envelope.KemChunk(1, BuddyRole.Initiator, Part.Pub, 0, 2, bytes(ChunkCapacity))): Unit
     ra.feed(Envelope.KemChunk(2, BuddyRole.Initiator, Part.Pub, 0, 2, bytes(ChunkCapacity))): Unit
     assert(ra.pendingCount == 2)
-    // Without an abort path the cap would shut out every future rekey for the process's lifetime.
-    assert(
-      ra.feed(Envelope.KemChunk(3, BuddyRole.Initiator, Part.Pub, 0, 2, bytes(ChunkCapacity)))
-        == Left(ChunkError.TooManyTransfers)
-    )
     assert(ra.abandon(1) == 1)
     assert(ra.pendingCount == 1, "only the abandoned epoch is dropped")
-    // The slot is now free and a fresh rekey proceeds normally.
-    assert(
-      ra.feed(Envelope.KemChunk(3, BuddyRole.Initiator, Part.Pub, 0, 2, bytes(ChunkCapacity)))
-        == Right(None)
-    )
     // Epoch 2 was never touched by the abort and still completes correctly.
     val done = ra.feed(Envelope.KemChunk(2, BuddyRole.Initiator, Part.Pub, 1, 2, bytes(3)))
     assert(done.toOption.get.exists(_.bytes.length == ChunkCapacity + 3))
     assert(ra.abandon(999) == 0, "abandoning an unknown epoch is a no-op")
+    // The abort genuinely dropped epoch 1's state: chunk 1 alone no longer completes it, it opens
+    // a fresh pending transfer.
+    assert(
+      ra.feed(Envelope.KemChunk(1, BuddyRole.Initiator, Part.Pub, 1, 2, bytes(4))) == Right(None)
+    )
+
+  test("completion returns intact bytes even though the buffer is wiped on release"):
+    // Guards the ORDERING in the completion path: the object is copied out BEFORE the internal
+    // zeroing. If the wipe ever moved ahead of the copy (or `bytes` came to alias the slots), the
+    // caller would silently receive zeros — this pins that regression.
+    val original = bytes(ChunkCapacity * 2 + 7, 4)
+    val ra = ChunkReassembler()
+    val done = chunksOf(original).map(decodeChunk).flatMap(c => ra.feed(c).toOption.get)
+    assert(done.size == 1)
+    assert(done.head.bytes.sameElements(original), "wipe-on-release must not zero the result")
+    assert(done.head.bytes.exists(_ != 0.toByte), "sanity: the object is not all-zero anyway")
+
+  test("exactly-once is bounded by the completed-key window: an evicted key CAN re-deliver"):
+    // maxCompletedRemembered is the sole mechanism backing the documented exactly-once guarantee,
+    // so pin its known limit rather than leave it prose-only (an off-by-one in the FIFO trim would
+    // otherwise pass silently). Window = 1: completing epoch 2 evicts epoch 1's key.
+    val ra = ChunkReassembler(maxCompletedRemembered = 1)
+    val a = chunksOf(bytes(50, 1), epoch = 1).map(decodeChunk)
+    val b = chunksOf(bytes(50, 2), epoch = 2).map(decodeChunk)
+    assert(a.flatMap(c => ra.feed(c).toOption.get).size == 1)
+    // While epoch 1's key is still remembered, a replay is correctly suppressed.
+    assert(a.flatMap(c => ra.feed(c).toOption.get).isEmpty, "suppressed while remembered")
+    assert(b.flatMap(c => ra.feed(c).toOption.get).size == 1) // evicts epoch 1 from the window
+    // Epoch 1's key is now evicted: a replay re-delivers. This is the DOCUMENTED limit — upstream
+    // ARQ dedup makes it non-occurring in practice and Phase 3 ignores non-current epochs.
+    val replay = a.flatMap(c => ra.feed(c).toOption.get)
+    assert(replay.size == 1, "an evicted key re-delivers — the documented bound of exactly-once")
+    assert(replay.head.bytes.sameElements(bytes(50, 1)))
+
+  test("the completed-key window retains exactly maxCompletedRemembered keys (FIFO trim)"):
+    // Window = 2: completing epochs 2 and 3 evicts epoch 1 but must NOT evict 2 or 3 — an
+    // off-by-one in the trim (>= vs >) would show up here.
+    val ra = ChunkReassembler(maxCompletedRemembered = 2)
+    def obj(e: Int) = chunksOf(bytes(40, e), epoch = e).map(decodeChunk)
+    for e <- 1 to 3 do assert(obj(e).flatMap(c => ra.feed(c).toOption.get).size == 1)
+    assert(obj(3).flatMap(c => ra.feed(c).toOption.get).isEmpty, "epoch 3 still remembered")
+    assert(obj(2).flatMap(c => ra.feed(c).toOption.get).isEmpty, "epoch 2 still remembered")
+    assert(obj(1).flatMap(c => ra.feed(c).toOption.get).size == 1, "epoch 1 evicted ⇒ re-delivers")
 
   test("abandon does not resurrect a completed object (exactly-once survives an abort)"):
     val cs = chunksOf(bytes(300)).map(decodeChunk)

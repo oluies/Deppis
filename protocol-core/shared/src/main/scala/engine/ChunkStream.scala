@@ -103,7 +103,7 @@ object ChunkStream:
   /** Fixed, parameterless rejection reasons — fail closed, nothing attacker-controlled echoed. */
   enum ChunkError:
     case BadLength, UnknownType, BadEpoch, BadRole, BadPart, BadIndex, BadCount, BadDataLength,
-      NonZeroPadding, OversizeObject, CountMismatch, ConflictingChunk, TooManyTransfers
+      NonZeroPadding, OversizeObject, CountMismatch, ConflictingChunk
 
   /** A decoded control envelope. `data`/`tag` are the decoder's own copies (never aliases into the
     * input buffer). Constructed values fed to [[ChunkReassembler.feed]] are re-validated there. */
@@ -276,14 +276,24 @@ object ChunkStream:
   *     left intact, so a bad envelope cannot destroy a good transfer.
   *   - Bounded memory against attacker-influenceable fields: `count ≤ ChunkStream.MaxChunkCount`
   *     per transfer, at most `maxPendingTransfers` concurrent transfers, and a FIFO-bounded set of
-  *     `maxCompletedRemembered` completed keys. A duplicate of a key evicted from that window
-  *     could in principle start a fresh transfer — upstream ARQ dedup makes duplicates
-  *     non-occurring in practice, and Phase 3's epoch state machine ignores non-current epochs.
-  *   - Bounded in TIME by the caller: a stalled transfer is never evicted on its own, so Phase 3's
-  *     abort/timeout path must call [[abandon]] to release it (§4.4) — otherwise it would hold one
-  *     of the `maxPendingTransfers` slots for the process's lifetime.
+  *     `maxCompletedRemembered` completed keys.
+  *   - No permanent wedge: the peer picks the epochs, so at the cap the OLDEST pending transfer is
+  *     evicted rather than the new one rejected. Rejecting-the-newest would let a peer that opens
+  *     `maxPendingTransfers` transfers and never completes them deny every future rekey for the
+  *     process's lifetime. Eviction is self-healing — a live rekey always gets a slot — and Phase 3
+  *     should additionally call [[abandonBefore]] on each epoch advance for prompt, in-order
+  *     reclamation ([[abandon]] only helps when the caller still knows the exact stale epoch).
+  *   - Exactly-once is bounded by `maxCompletedRemembered` (16 by default): a duplicate of a key
+  *     evicted from that window would start a fresh transfer and could re-deliver. Upstream ARQ
+  *     dedup makes duplicates non-occurring in practice and Phase 3's epoch state machine ignores
+  *     non-current epochs, but the limit is real — it is pinned by test, not just described here.
   *
-  * Not thread-safe (mutable, single-owner) — same discipline as the rest of the engine state. */
+  * ONE INSTANCE PER PAIR (Phase 3: alongside the other per-pair ARQ state in `BuddyRuntime`). The
+  * key has no pair id, and the eviction policy above assumes a single peer supplies every chunk: a
+  * peer can then only evict its OWN stalled transfer. A reassembler SHARED across buddies would let
+  * one malicious peer evict another buddy's live transfer — turning a self-inflicted stall into a
+  * cross-buddy denial of service. Not thread-safe (mutable, single-owner) — same discipline as the
+  * rest of the engine state. */
 final class ChunkReassembler(
     maxPendingTransfers: Int = ChunkReassembler.DefaultMaxPendingTransfers,
     maxCompletedRemembered: Int = ChunkReassembler.DefaultMaxCompletedRemembered
@@ -298,8 +308,28 @@ final class ChunkReassembler(
     val slots: Array[Array[Byte]] = new Array[Array[Byte]](count)
     var received: Int = 0
 
-  private val pending = mutable.Map.empty[Key, Pending]
+  // Insertion-ordered so the cap can evict the OLDEST pending transfer rather than reject the
+  // newest — see `feed`. `mutable.LinkedHashMap` iterates in insertion order on both platforms.
+  private val pending = mutable.LinkedHashMap.empty[Key, Pending]
   private val completedKeys = mutable.ArrayDeque.empty[Key] // FIFO window, newest last
+
+  /** Zero a transfer's buffered chunks before dropping it, mirroring `Engine.wipe`
+    * (`Engine.scala:227`). The buffered material is PUBLIC (a KEM public key / ciphertext), so this
+    * is defensive rather than a secrecy requirement — it makes the release actually release, and
+    * keeps the invariant true if Phase 3 ever routes non-public bytes through this buffer. */
+  private def wipe(p: Pending): Unit =
+    var s = 0
+    while s < p.slots.length do
+      val slot = p.slots(s)
+      if slot != null then
+        var i = 0
+        while i < slot.length do
+          slot(i) = 0.toByte
+          i += 1
+      s += 1
+
+  private def release(key: Key): Unit =
+    pending.remove(key).foreach(wipe)
 
   /** Feed one KEM_CHUNK. `Right(Some(_))` exactly when this chunk completes its object;
     * `Right(None)` for an accepted-but-incomplete chunk or an exact duplicate; `Left` fail-closed
@@ -316,11 +346,19 @@ final class ChunkReassembler(
             case Some(p) if p.count != c.count => Left(ChunkError.CountMismatch)
             case Some(p) => store(key, p, c)
             case None =>
-              if pending.size >= maxPendingTransfers then Left(ChunkError.TooManyTransfers)
-              else
-                val p = new Pending(c.count)
-                pending(key) = p
-                store(key, p, c)
+              // At the cap, evict the OLDEST pending transfer rather than reject this one. The
+              // peer chooses the epochs, so rejecting-the-newest let a peer that opens
+              // `maxPendingTransfers` transfers and never completes them wedge every future rekey
+              // permanently — Phase 3 ignoring a stale epoch does not free a slot `feed` already
+              // allocated, and `abandon` needs the exact stale epoch to reclaim. Evicting the
+              // oldest is self-healing: a live rekey always gets a slot, and the worst a flood can
+              // do is stall its own transfer. Phase 3 should still call `abandonBefore` on each
+              // epoch advance for prompt, in-order reclamation.
+              if pending.size >= maxPendingTransfers then
+                pending.headOption.foreach((oldest, _) => release(oldest))
+              val p = new Pending(c.count)
+              pending(key) = p
+              store(key, p, c)
 
   private def store(
       key: Key,
@@ -344,29 +382,34 @@ final class ChunkReassembler(
             System.arraycopy(s, 0, bytes, off, s.length)
             off += s.length
           }
-          pending.remove(key)
+          release(key) // the bytes are copied out above; zero and drop the buffer
           completedKeys.append(key)
           if completedKeys.size > maxCompletedRemembered then completedKeys.removeHead(): Unit
           Right(Some(Completed(c.epoch, c.role, c.part, bytes)))
 
-  /** Drop every pending (incomplete) transfer for `epoch`, returning how many were dropped. A rekey
-    * attempt aborts as a whole — on timeout, on a failed confirmation, or when the epoch is
-    * abandoned — and the doc requires that attempt's state be released then (§4.4: "wipe on
-    * abort/timeout … so a stalled rekey does not leave [material] resident indefinitely"). Without
-    * this, a stalled transfer would hold a bounded pending slot for the process's lifetime and
-    * eventually shut out live rekeys with `TooManyTransfers`. Phase 3 calls this from its abort
-    * path; completed-key suppression is untouched, so a late duplicate of an already-yielded object
-    * still cannot re-deliver. */
-  def abandon(epoch: Int): Int =
-    val doomed = pending.keysIterator.filter(_.epoch == epoch).toVector
-    doomed.foreach(pending.remove)
-    doomed.size
+  /** Drop every pending (incomplete) transfer for `epoch`, zeroing its buffers, and return how many
+    * were dropped. A rekey attempt aborts as a whole — on timeout, on a failed confirmation, or
+    * when the epoch is abandoned — and the design doc requires the attempt's state be released then
+    * (§4.4: "wipe on abort/timeout … so a stalled rekey does not leave [material] resident
+    * indefinitely"). Phase 3 calls this from its abort path. Completed-key suppression is
+    * untouched, so a late duplicate of an already-yielded object still cannot re-deliver. */
+  def abandon(epoch: Int): Int = releaseWhere(_.epoch == epoch)
 
-  /** Drop ALL pending transfers (e.g. tearing a pair down). Completed-key suppression is retained. */
-  def abandonAll(): Int =
-    val n = pending.size
-    pending.clear()
-    n
+  /** Drop every pending transfer for an epoch STRICTLY BEFORE `cutoff` (zeroing buffers), returning
+    * how many were dropped. Phase 3 calls this on each epoch advance to reclaim in bulk: epochs are
+    * monotonic, so anything older than the current one is stale by construction and needs no
+    * enumeration. [[abandon]] can only reclaim an epoch whose exact id the caller still knows,
+    * which a stalled or never-tracked attempt may not be. */
+  def abandonBefore(cutoff: Int): Int = releaseWhere(_.epoch < cutoff)
+
+  /** Drop ALL pending transfers, zeroing buffers (e.g. tearing a pair down). Completed-key
+    * suppression is retained. */
+  def abandonAll(): Int = releaseWhere(_ => true)
+
+  private def releaseWhere(p: Key => Boolean): Int =
+    val doomed = pending.keysIterator.filter(p).toVector
+    doomed.foreach(release)
+    doomed.size
 
   /** Pending (incomplete) transfer count — observability for Phase 3's timeout logic and tests. */
   def pendingCount: Int = pending.size
