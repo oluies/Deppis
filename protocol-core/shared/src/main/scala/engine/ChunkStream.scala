@@ -5,10 +5,11 @@ import scala.collection.mutable
 /** Chunked control sub-stream over the stop-and-wait ARQ transport — Phase 2 of the continuous
   * post-quantum ratchet plan (`specs/001-metadata-private-messenger/design/continuous-pq-ratchet.md`
   * §3.1 chunk framing, §7 Phase 2). TRANSPORT ONLY: this module moves opaque bytes; it performs no
-  * crypto, mutates no ratchet state, and is NOT yet wired into `Engine`'s tick loop (that is Phase
-  * 3). Nothing here changes the wire frame: the envelope lives INSIDE the ARQ padded-payload region
-  * (`ArqFrame.PayloadBytes`), which is itself sealed inside the ratchet inner block, so every frame
-  * the store sees remains the same uniform 256 bytes (design doc §5; FR-012).
+  * crypto and mutates no ratchet state. Phase 3 wires it into `Engine`'s tick loop, where it carries
+  * the periodic rekey's KEM material as ordinary ARQ messages. Nothing here changes the wire frame:
+  * the envelope lives INSIDE the ARQ padded-payload region (`ArqFrame.PayloadBytes`), which is itself
+  * sealed inside the ratchet inner block, so every frame the store sees remains the same uniform 256
+  * bytes (design doc §5; FR-012).
   *
   * Envelope layout (fixed width = `ArqFrame.PayloadBytes` = 156, zero-padded after the fields):
   * {{{
@@ -27,10 +28,10 @@ import scala.collection.mutable
   * `EPOCH_COMMIT` additionally carries a 4-byte `anchor` the doc's §3.1 sketch ("type ‖ epoch ‖
   * role — fold now") does not name. It is the ROOT INDEX the fold applies to (`DoubleRatchet
   * .rootIndex`), which §4.2 requires the fold be "deterministically anchored to" so both sides
-  * derive the byte-identical `RK_epoch`. Sending it EXPLICITLY lets the receiver constant-check its
-  * own live root index against the committer's and REFUSE on a mismatch (`Engine`'s
-  * `epoch_anchor_mismatch`) instead of folding at the wrong position and diverging silently — i.e.
-  * it converts the doc's implicit ratchet-position assumption into a fail-closed check. The field
+  * derive the byte-identical `RK_epoch`. Sending it EXPLICITLY lets the receiver check its own live
+  * root index against the committer's and REFUSE on a mismatch (`Engine` records the fixed reason
+  * `pq_rekey_anchor_mismatch`) instead of folding at the wrong position and diverging silently —
+  * i.e. it converts the doc's implicit ratchet-position assumption into a fail-closed check. The field
   * is padding-space in the old layout, so `anchor = 0` re-encodes byte-identically to the Phase 2
   * vector; the pinned KAT in `ChunkStreamCrossSpec` is unchanged.
   *
@@ -460,8 +461,9 @@ object ChunkReassembler:
   * first (a chunk frame replaces what would otherwise be a cover write — zero marginal frames, and
   * the store sees the same one uniform write per round either way), and on busy rounds cede at
   * most a bounded fraction (≤ 1 in `busyStride`) to chunks so content is never starved (the doc's
-  * head-of-line caveat). Pure and engine-decoupled: Phase 3 wires it into the tick loop's write
-  * priority; nothing calls it yet. Inputs are booleans and a counter — no payload bytes, so
+  * head-of-line caveat). Pure and engine-decoupled: Phase 3 consults it from the tick loop when a
+  * new ARQ head opens (once per head rather than once per round — stop-and-wait pins one message
+  * across many rounds, so a per-round vote would not describe the lane share). Inputs are booleans and a counter — no payload bytes, so
   * nothing here can be secret-dependent (Constitution II). */
 object ChunkScheduler:
 

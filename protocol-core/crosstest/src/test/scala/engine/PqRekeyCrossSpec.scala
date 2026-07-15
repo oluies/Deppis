@@ -352,16 +352,80 @@ class PqRekeyCrossSpec extends AnyFunSuite:
     assert(sa.ratchetFolds == sb.ratchetFolds, s"the two sides fold in lockstep: $sa vs $sb")
     assert(sa.ratchetFolds >= 1, s"the held-open attempt did go on to fold: $sa")
 
-  test("a failed/absent rekey never strips a completed fold's hardening (§8.2)"):
+  test("stranding is OBSERVABLE: a peer that vanishes past the point of no return is reported"):
+    // §9 open question 5. Past the point of no return an attempt is never torn down, so a peer that
+    // disappears there leaves it resident — and because `maybeStartRekey` is gated on
+    // `rekey.isEmpty`, that pair silently stops rekeying for good. Holding beats diverging, but the
+    // condition must be reportable rather than only inferable from `epochsFolded` never advancing.
+    val p = pair()
+    warm(p, PqRekey.IdleMinSteps, from = 1): Unit
+    val mid = driveUntil(p, p.alice, from = 200)(s => s.inProgress && !s.abortSafe)
+    assert(mid.stalledRounds == 0, "not stranded yet — it is merely past the line")
+
+    // Bob vanishes: tick ONLY alice, well past the timeout.
+    val start = 2000L
+    for r <- start until start + 5 do p.alice.tick(r): Unit
+    assert(status(p.alice, p.pid).stalledRounds == 0, "still inside the timeout")
+    p.alice.tick(start + PqRekey.TimeoutRounds + 10): Unit
+
+    val s = status(p.alice, p.pid)
+    assert(s.lastAbort == "pq_rekey_stranded", s"stranding must be reported: $s")
+    assert(s.stalledRounds > PqRekey.TimeoutRounds, s"and quantified: $s")
+    assert(s.inProgress, "the attempt is HELD, not torn down (holding beats diverging)")
+    assert(s.aborts == 0, "a stranded attempt is not an abort")
+    // The honest cost, pinned: this pair will not rekey again.
+    assert(!status(p.alice, p.pid).abortSafe)
+    assert(s.epochsFolded == 0, "and no fold completed")
+
+    // The stall marker must not CLOBBER later diagnostics: `lastAbort` is the only surface here, so
+    // a fail-closed reason raised while stranded has to survive the next tick.
+    p.alice.injectControlForTest(p.pid, Array.fill[Byte](ChunkStream.EnvelopeBytes)(0x7f), 0L): Unit
+    assert(status(p.alice, p.pid).lastAbort == "pq_rekey_bad_envelope")
+    p.alice.tick(start + PqRekey.TimeoutRounds + 11): Unit
+    val later = status(p.alice, p.pid)
+    assert(
+      later.lastAbort == "pq_rekey_bad_envelope",
+      s"a later refusal must not be re-stamped away by the stall marker: $later"
+    )
+    assert(later.stalledRounds > PqRekey.TimeoutRounds, "while stalledRounds keeps counting")
+
+  test("a FAILED later rekey never strips a completed fold's hardening (§8.2)"):
+    // §8.2's "Aborted → PqEpoch": a rekey that fails after an earlier one succeeded must route back
+    // to the PRE-REKEY epoch — which is the ALREADY-HARDENED one — and never undo it.
     val p = pair()
     warm(p, PqRekey.IdleMinSteps, from = 1): Unit
     run(p, 200 until 700): Unit
-    val folded = status(p.alice, p.pid).epochsFolded
-    assert(folded >= 1)
-    // Remove the buddy on ONE side: its rekey state is wiped. The other side's completed fold count
-    // must not move — a fold, once committed, is never rolled back.
-    assert(status(p.bob, p.pid).epochsFolded >= 1)
-    assert(status(p.alice, p.pid).epochsFolded == folded)
+    val foldedA = status(p.alice, p.pid).epochsFolded
+    val ratchetA = status(p.alice, p.pid).ratchetFolds
+    assert(foldedA >= 1 && ratchetA >= 1, "a fold must have completed before we try to break one")
+
+    // Now actually FAIL a subsequent attempt. The cadence counter reset at the fold, so re-arm the
+    // trigger with fresh traffic, then drive the new attempt to its confirm phase and forge the
+    // responder's /r tag so the initiator refuses it.
+    warm(p, PqRekey.IdleMinSteps, from = 700): Unit
+    val mid = driveToConfirmPhase(p, p.alice, from = 900)
+    assert(mid.currentEpoch > 1, "this must be a LATER epoch than the one that folded")
+    val forged = ChunkStream.encode(
+      ChunkStream.Envelope.KemConfirm(
+        mid.currentEpoch,
+        BuddyRole.Responder,
+        Array.fill[Byte](ChunkStream.ConfirmTagBytes)(0x5a)
+      )
+    )
+    assert(p.alice.injectControlForTest(p.pid, forged, 1400L))
+    val after = status(p.alice, p.pid)
+    assert(after.lastAbort == "pq_rekey_confirm_failed", s"the later attempt must fail: $after")
+
+    // The decisive assertions: the FAILED attempt folded nothing new, and — the §8.2 property — it
+    // did not roll back the fold that had already committed.
+    assert(after.epochsFolded == foldedA, s"a failed rekey must not change the fold count: $after")
+    assert(after.ratchetFolds == ratchetA, s"nor un-apply a fold on the root: $after")
+    // And the hardening is still REAL, not just still counted: the pair keeps interoperating on the
+    // folded root. A stripped fold would have parted the two roots and stopped delivery.
+    val (a, b) = warm(p, 3, from = 1500)
+    assert(b.contains("a0"), s"a->b still delivers on the folded root: $b")
+    assert(a.contains("b0"), s"b->a still delivers on the folded root: $a")
+    assert(status(p.bob, p.pid).ratchetFolds >= 1, "and the responder's fold stands too")
 
   test("removeBuddy releases the rekey state (no resident KEM secret after teardown)"):
     val p = pair()

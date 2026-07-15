@@ -152,6 +152,12 @@ final case class RekeyStatus(
       * `Engine.safeToAbort`). False once the peer is committed to folding at the anchor — the window
       * in which a timeout or a hostile envelope must NOT dismantle the attempt. */
     abortSafe: Boolean,
+    /** Rounds an attempt has been held past `PqRekey.TimeoutRounds` while unable to abort (0 = not
+      * stranded). Nonzero means this pair has STOPPED REKEYING and will not resume: its PQ
+      * post-compromise window is no longer refreshing, though messaging is unaffected. This is the
+      * only observable for the §9-Q5 stranding residual — `lastAbort` also reads
+      * `pq_rekey_stranded`. */
+    stalledRounds: Long,
     foldArmed: Boolean,
     stepsSinceFold: Int,
     lastAbort: String
@@ -273,6 +279,10 @@ final class Engine(
     /** Inputs REJECTED while the attempt was held past its point of no return (`safeToAbort`) —
       * distinct from `rekeyAborts` (attempts actually torn down). */
     var rekeyRefusals: Int = 0
+
+    /** Rounds the current attempt has been held past its timeout while unable to abort (0 = not
+      * stranded). Surfaces the §9-Q5 stall that otherwise has no observable at all. */
+    var stalledRounds: Long = 0L
     var lastAbort: String = ""
 
     /** Release every rekey secret + buffer for this pair (buddy removal / rejected pairing). */
@@ -319,6 +329,10 @@ final class Engine(
       * see [[Engine.safeToAbort]] for why both sides need this and why it is the tag SEND, not its
       * ack, that draws the line. */
     var committed: Boolean = false
+
+    /** Set once this attempt has outlived `PqRekey.TimeoutRounds` while past its point of no return
+      * — i.e. it is being held for a peer that may never answer (see `maybeTimeoutRekey`). */
+    var stranded: Boolean = false
     def wipe(): Unit =
       if kemSecret != null then Engine.this.wipe(kemSecret)
       kemSecret = null
@@ -532,14 +546,33 @@ final class Engine(
   /** Bounded attempt lifetime (§4.4) — but never past the point of no return (see `safeToAbort`). */
   private def maybeTimeoutRekey(rt: BuddyRuntime, roundId: Long): Unit =
     rt.rekey.foreach { a =>
-      if safeToAbort(rt, a) && roundId - a.startRound > PqRekey.TimeoutRounds then
-        abortRekey(rt, "pq_rekey_timeout")
+      val overdue = roundId - a.startRound > PqRekey.TimeoutRounds
+      if safeToAbort(rt, a) then
+        if overdue then abortRekey(rt, "pq_rekey_timeout")
+      else if overdue then
+        // STRANDED (design §9 open question 5). Past the point of no return we deliberately never
+        // tear an attempt down, so a peer that disappears here leaves this attempt — and its 32-byte
+        // `ss` — resident for the pair's lifetime. The real cost is silent: `maybeStartRekey` is
+        // gated on `rekey.isEmpty`, so THIS PAIR STOPS REKEYING FOREVER and its PQ post-compromise
+        // window simply never refreshes again. Messaging is unaffected (the ratchet is untouched),
+        // which is why holding still beats diverging — but the condition must be REPORTABLE rather
+        // than only inferable from `epochsFolded` never advancing.
+        //
+        // `lastAbort` is written ONCE, on the transition into the stall — not every round. It is the
+        // only diagnostic surface here, so re-stamping it each tick would clobber any later
+        // fail-closed reason (a forged frame's `pq_rekey_confirm_failed`, say) within one round and
+        // hide it forever. `stalledRounds` keeps counting, so "how long" stays live either way.
+        if !a.stranded then
+          a.stranded = true
+          rt.lastAbort = "pq_rekey_stranded"
+        rt.stalledRounds = roundId - a.startRound
     }
 
   /** The rekey is done on this side: wipe `ss`, reclaim stale reassembly, restart the cadence. */
   private def completeRekey(rt: BuddyRuntime, a: RekeyAttempt): Unit =
     a.wipe()
     rt.rekey = None
+    rt.stalledRounds = 0L // a stranded attempt that finally landed is no longer stranded
     rt.reassembler.abandonBefore(a.epoch + 1): Unit
     rt.stepsSinceFold = 0
     rt.epochsFolded += 1
@@ -700,6 +733,17 @@ final class Engine(
             val anchor =
               rt.ratchet.rootIndex + 1 // our NEXT root = the peer's root after this frame
             if !rt.ratchet.armEpochFold(anchor, a.ss) then
+              // Defensive: the ratchet refused the arm (today only possible with an earlier fold
+              // still armed-but-unapplied). RELEASE THE ARQ SLOT but KEEP the Commit queued: the
+              // pending fold lands on this pair's next DH step, after which the retry succeeds.
+              // Without the release, `headSeq` stays consumed and `headWire` stays null, so every
+              // later round re-enters here, is refused again — past the point of no return
+              // `abortRekey` only records a refusal — and emits a cover write instead: the pair
+              // would stop sending content permanently, and since it then sends nothing, the peer
+              // never takes the DH step that would have cleared the pending fold. A silent,
+              // permanent stall. (The sibling `case _` below releases the slot for the same reason,
+              // but DROPS its item — that one is unretryable, this one is.)
+              releaseCtrlHeadSlot(rt)
               abortRekey(rt, "pq_rekey_anchor_unreachable")
               None
             else
@@ -714,16 +758,21 @@ final class Engine(
             // tear down that call would leave this Commit at the queue head, and the head would be
             // re-materialized, re-refused and re-dropped every round, wedging the pair on cover
             // writes forever.
-            dropCtrlHead(rt)
+            if rt.ctrl.nonEmpty then rt.ctrl = rt.ctrl.drop(1)
+            releaseCtrlHeadSlot(rt)
             abortRekey(rt, "pq_rekey_commit_stale")
             None
     }
 
-  /** Drop the in-flight control head and its queue entry, freeing the ARQ slot. The sequence number
-    * is simply abandoned: `isNewMessage` only requires a STRICTLY increasing `msgSeq`, so a gap is
-    * harmless to the peer's dedup. */
-  private def dropCtrlHead(rt: BuddyRuntime): Unit =
-    if rt.ctrl.nonEmpty then rt.ctrl = rt.ctrl.drop(1)
+  /** Release the in-flight control head's ARQ slot WITHOUT touching the queue, so the next round
+    * makes a fresh lane decision (and can re-materialize the same item). Every path that declines to
+    * produce bytes for a control head MUST call this: `headSeq` is already consumed by then and
+    * `headWire` is null, so leaving them set makes the round emit a cover write and the next round
+    * re-enter the same declining branch — forever.
+    *
+    * The abandoned sequence number is harmless: `ArqFrame.isNewMessage` only requires a STRICTLY
+    * increasing `msgSeq`, so a gap costs the peer's dedup nothing. */
+  private def releaseCtrlHeadSlot(rt: BuddyRuntime): Unit =
     rt.headSeq = ArqFrame.NoSeq
     rt.headWire = null
     rt.headIsCtrl = false
@@ -742,6 +791,7 @@ final class Engine(
         hasEpochSecret = rt.rekey.exists(_.ss != null),
         confirmExchanged = rt.rekey.exists(a => a.confirmSent || a.commitQueued),
         abortSafe = rt.rekey.exists(a => safeToAbort(rt, a)),
+        stalledRounds = if rt.rekey.exists(_.stranded) then rt.stalledRounds else 0L,
         foldArmed = rt.ratchet.epochFoldArmed,
         stepsSinceFold = rt.stepsSinceFold,
         lastAbort = rt.lastAbort
@@ -1335,9 +1385,23 @@ final class Engine(
                   confirmedSendable(pid).collect { case (rt, rel) if rt.ackOwed => (pid, rt, rel) }
               }
               .nextOption()
-            def submitWire(rt: BuddyRuntime, rel: BuddyRelationship, wire: Array[Byte]): Unit =
+            // `carriedAck` = does THIS wire actually carry our CURRENT `highRecv`? A freshly built
+            // frame always does. A retransmit of a cached wire only does while `headWireAck` still
+            // equals `highRecv` — and a CONTROL head is never re-encrypted (its EPOCH_COMMIT anchor
+            // is only valid at the position it was built at), so its cached wire keeps its
+            // build-time ack even after we receive more. Clearing `ackOwed` there would claim an ack
+            // we did not send; nothing compensates, since `ackTarget` skips control-pending pairs.
+            // It self-corrects today (the peer re-arms `ackOwed` by retransmitting), so this is
+            // latency, not deadlock — but the bookkeeping must still be true, or a change to the
+            // retransmit cadence would silently turn it into a lost ack.
+            def submitWire(
+                rt: BuddyRuntime,
+                rel: BuddyRelationship,
+                wire: Array[Byte],
+                carriedAck: Boolean
+            ): Unit =
               if t.submit(dirToken(rel.addrKey, rt.role, peerRole(rt.role), roundId), wire) then
-                rt.ackOwed = false // our outgoing frame carried our ack
+                if carriedAck then rt.ackOwed = false // this frame really did carry our ack
                 realSubmitted = true
                 if rel.peerNotifyLabel.nonEmpty then
                   realSignal = Some((rel.peerNotifyLabel, rel.addrKey))
@@ -1378,7 +1442,8 @@ final class Engine(
                   rt.headWireAck = rt.highRecv
                 }
                 // `ctrlHeadBytes` can abort the attempt (and drop this head) rather than emit bytes.
-                if rt.headWire != null then submitWire(rt, rel, rt.headWire)
+                if rt.headWire != null then
+                  submitWire(rt, rel, rt.headWire, carriedAck = rt.headWireAck == rt.highRecv)
                 else
                   coverCounter += 1
                   t.submit(
@@ -1388,10 +1453,14 @@ final class Engine(
               case None =>
                 ackTarget match
                   case Some((_, rt, rel)) =>
+                    // Encrypted FRESH every time, so it always carries the current ack.
                     submitWire(
                       rt,
                       rel,
-                      rt.ratchet.encrypt(ArqFrame.encode(rt.highRecv, ArqFrame.NoSeq, emptyPayload))
+                      rt.ratchet.encrypt(
+                        ArqFrame.encode(rt.highRecv, ArqFrame.NoSeq, emptyPayload)
+                      ),
+                      carriedAck = true
                     )
                   case None =>
                     coverCounter += 1
