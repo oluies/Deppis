@@ -41,27 +41,18 @@ import java.nio.charset.StandardCharsets.UTF_8
   * that ALSO strips the PQ hardening (design §4.2). So the two sides exchange these per-direction
   * tags and constant-time verify the peer's BEFORE any ratchet state moves.
   *
-  * ==What the tags are keyed on: the KEM SHARED SECRET, not `RK_epoch`==
-  * Read this before the Phase 5 formal analysis. Design §4.2 (and this module's own Phase 1
-  * scaladoc, when it shipped) describes the tags as computed "over the scratch folded root"
-  * `RK_epoch`. **Phase 3 keys them on the 32-byte hybrid-KEM shared secret `ss` itself**, and that
-  * is deliberate, not drift:
-  *
-  *   - `RK_epoch` is UNAVAILABLE while the tags are in flight. The fold is anchored to a root INDEX
-  *     because the two peers traverse one shared root chain but are never simultaneously on the same
-  *     root (`DoubleRatchet.rootIndex`); computing `RK_epoch` needs that anchor root, which neither
-  *     side holds until the commit — i.e. until after the tags have done their job.
-  *   - Exchanging the tags AFTER the fold instead would reintroduce the exact failure §4.2 exists to
-  *     prevent: a mismatched `ss` means the roots have already parted, so the tag frame would not
-  *     even decrypt — a silent "confirmed but dead" fork rather than an explicit refusal.
-  *   - Keying on `ss` loses nothing the tags are for. `ss` is precisely the value implicit rejection
-  *     makes uncertain, so an HMAC under it is exactly the key confirmation required; the
-  *     session/transcript binding that keying on `RK_epoch` would have added is already supplied by
-  *     the tags travelling inside the pair's authenticated, MK-sealed ratchet chain, and the anchor
-  *     binding by the explicit, re-checked `ChunkStream.Envelope.EpochCommit.anchor`.
-  *   - Publishing `HMAC(ss, label)` does not weaken the fold. `ss` is one-way-protected by HMAC, and
-  *     the fold uses `ss` as DATA under the independent, secret key `RK` — different role, different
-  *     key, and the labels are domain-separated from every other in the schedule.
+  * ==What the tags are keyed on: the KEM SHARED SECRET==
+  * `confirmTag{Initiator,Responder} = HMAC(ss, "dr/pq-epoch-confirm/{i,r}")` — keyed on the 32-byte
+  * hybrid-KEM epoch shared secret, NOT on the folded root. This is what design §4.2 specifies (see
+  * its "Amendment (Phase 3 implementation)" note, which carries the full reasoning and is what the
+  * Phase 5 model must follow). In short: the fold is anchored to a root INDEX because the two peers
+  * traverse one shared root chain but are never simultaneously on the same root
+  * (`DoubleRatchet.rootIndex`), so neither holds `RK_epoch` while the tags are in flight; and moving
+  * the exchange after the fold would reintroduce the very "confirmed but dead" fork the tags exist
+  * to prevent. `ss` is exactly the value implicit rejection makes uncertain, so an HMAC under it IS
+  * the required confirmation — with session binding supplied by the authenticated, MK-sealed chain
+  * the tags ride plus `ss` being fresh per attempt (§4.4), and ratchet-position binding by the
+  * explicit, re-checked `ChunkStream.Envelope.EpochCommit.anchor`.
   *
   * The parameter is therefore named `epochSecret`, not `rkEpoch`: the functions are plain
   * domain-separated HMACs over a 32-byte epoch key, and the length `require` cannot tell the two

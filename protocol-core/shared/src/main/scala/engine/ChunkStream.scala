@@ -31,9 +31,9 @@ import scala.collection.mutable
   * derive the byte-identical `RK_epoch`. Sending it EXPLICITLY lets the receiver check its own live
   * root index against the committer's and REFUSE on a mismatch (`Engine` records the fixed reason
   * `pq_rekey_anchor_mismatch`) instead of folding at the wrong position and diverging silently —
-  * i.e. it converts the doc's implicit ratchet-position assumption into a fail-closed check. The field
-  * is padding-space in the old layout, so `anchor = 0` re-encodes byte-identically to the Phase 2
-  * vector; the pinned KAT in `ChunkStreamCrossSpec` is unchanged.
+  * i.e. it converts the doc's implicit ratchet-position assumption into a fail-closed check. The
+  * field is padding-space in the old layout, so `anchor = 0` re-encodes byte-identically to the
+  * Phase 2 vector; the pinned KAT in `ChunkStreamCrossSpec` is unchanged.
   *
   * Control-vs-content discrimination (byte 0): user content occupies this same region via
   * `Frame.pad(msg, ArqFrame.PayloadBytes)`, whose first byte is the high byte of a big-endian
@@ -463,8 +463,8 @@ object ChunkReassembler:
   * most a bounded fraction (≤ 1 in `busyStride`) to chunks so content is never starved (the doc's
   * head-of-line caveat). Pure and engine-decoupled: Phase 3 consults it from the tick loop when a
   * new ARQ head opens (once per head rather than once per round — stop-and-wait pins one message
-  * across many rounds, so a per-round vote would not describe the lane share). Inputs are booleans and a counter — no payload bytes, so
-  * nothing here can be secret-dependent (Constitution II). */
+  * across many rounds, so a per-round vote would not describe the lane share). Inputs are booleans
+  * and a counter — no payload bytes, so nothing here can be secret-dependent (Constitution II). */
 object ChunkScheduler:
 
   /** What this round's single write should carry. `Content` covers both a queued head and an

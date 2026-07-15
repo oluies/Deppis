@@ -1,6 +1,13 @@
 # Design: Continuous post-quantum ratchet ("Option B") — chunked rekey inside the fixed frame
 
-**Status: DESIGN / RESEARCH ONLY. NOT IMPLEMENTED. NO PROTOCOL CODE CHANGES.**
+**Status: PHASES 1–3 IMPLEMENTED (PRs #83, #84, #85). NOT YET FORMALLY ANALYSED OR HUMAN-REVIEWED —
+Phase 5 is outstanding, so NO LABELING CHANGE: `DEV, NO METADATA PRIVACY` stands (§0, §6.3, §7).**
+
+> This document began as design-only and its body is still written in that voice ("proposed",
+> "must", "Phase 3 should"). Where the implementation and this text disagree, **the implementation
+> is authoritative and the text is a bug** — §4.2 carries one such correction already (the
+> confirmation-tag keying), marked as an amendment. Phase 5's model must be built from the amended
+> text plus the code, not from the original prose.
 
 This document designs a *continuous* (periodic) post-quantum re-keying of the **live** double
 ratchet, so that the harvest-now-decrypt-later (HNDL) exposure on the ongoing message stream — not just
@@ -8,9 +15,17 @@ the initial pairing — is closed. It is a design deliverable. Read the honesty 
 
 ## 0. Honest labeling up front (Constitution I / IV)
 
-- **Continuous PQ is NOT built.** The live content ratchet shipped in
-  `protocol-core/shared/src/main/scala/engine/DoubleRatchet.scala` **heals classically**: every ratchet
-  step mixes a fresh **X25519** shared secret and nothing else (`dhRatchet`, `DoubleRatchet.scala:389-421`).
+- **Continuous PQ is BUILT but NOT VERIFIED (updated at Phase 3).** As of PR #85 the live content
+  ratchet does fold a hybrid-KEM epoch secret into its root (`DoubleRatchet.armEpochFold` /
+  `EpochKdf.kdfEpoch`, driven by `Engine`'s periodic-rekey state machine). **This changes no claim
+  and no label.** The Phase 5 formal analysis — the `pq_post_compromise_security` lemma under a
+  breaks-CDH-but-not-ML-KEM attacker (§6.2), which is a *new model with a negative control*, not a
+  re-run — is the gate, and it is outstanding; so is human security review. Until both land, treat
+  the PQ post-compromise property as **unproven**, and `DEV, NO METADATA PRIVACY` stands (§6.3).
+  The paragraphs below describe the pre-Phase-3 baseline and remain the correct account of what the
+  fold was built to fix; between ratchet steps the DH ratchet still heals classically — every step
+  mixes a fresh **X25519** shared secret and nothing else (`dhRatchet`) — and it is the periodic
+  fold, not the step, that re-injects PQ entropy.
   **For a PQ-paired session** (the Option A prekey path was taken — enforceable end-to-end via
   `pqRequired`), the live stream is *already* safe against a purely **passive** harvest-now-decrypt-later
   adversary, because the ratchet root chains back by HMAC to the PQ-hardened seed, so no root is
@@ -346,14 +361,47 @@ the same, Constitution II).
   throws on a tampered same-length ciphertext, it silently returns a pseudo-random secret
   (`KeySchedule.scala:60-66`). So the epoch fold **must** carry a key-confirmation tag exactly like
   `pqConfirmTagResponder`/`pqConfirmTagInitiator` (`KeySchedule.scala:78-85`), domain-separated per
-  direction (`"dr/pq-epoch-confirm/r"` / `"…/i"`), constant-time compared before either side commits
-  `RK_epoch`. Without this, a tampered chunk silently forks the ratchet into a "confirmed but dead"
+  direction (`"dr/pq-epoch-confirm/r"` / `"…/i"`), constant-time compared **before either side commits
+  anything**. Without this, a tampered chunk silently forks the ratchet into a "confirmed but dead"
   state that *also* strips the PQ hardening — the exact failure mode Option A already defends at pairing
   time.
+- **The tags are keyed on the KEM shared secret `ss`, NOT on `RK_epoch`** (amended in Phase 3 — see
+  the note below):
+
+  ```
+  confirmTagInitiator = HMAC(ss, "dr/pq-epoch-confirm/i")
+  confirmTagResponder = HMAC(ss, "dr/pq-epoch-confirm/r")
+  ```
+
+  > **Amendment (Phase 3 implementation, PR #85).** This section originally specified the tags as
+  > computed "over the scratch folded root" `RK_epoch`. **That is not implementable, and the design
+  > was wrong — not the code.** `RK_epoch` requires the anchor root, and by the fold-anchor rule
+  > above the two peers are *never simultaneously on the same root*: they traverse one shared root
+  > chain but at offset positions (`dhRatchet` advances the root by two, so one side holds the odd
+  > roots and the other the even ones, alternating the lead). Neither side can therefore compute
+  > `RK_epoch` while the tags are in flight. Moving the exchange to *after* the fold instead would
+  > reintroduce precisely the failure this bullet exists to prevent: a mismatched `ss` means the
+  > roots have already parted, so the tag frame would not even decrypt — silent divergence rather
+  > than an explicit refusal.
+  >
+  > Keying on `ss` costs nothing the tags are for. `ss` is exactly the value implicit rejection makes
+  > uncertain, so an HMAC under it *is* the key confirmation required. The two bindings that keying
+  > on `RK_epoch` would have added are supplied elsewhere and must be checked there instead:
+  > - **session/transcript binding** — the tags travel inside the pair's authenticated, MK-sealed
+  >   ratchet chain, and `ss` is fresh per attempt (§4.4), so a tag cannot be replayed into another
+  >   session, pairing, or epoch;
+  > - **ratchet-position binding** — supplied by the explicit `anchor` on `EPOCH_COMMIT` (§3.1),
+  >   which the receiver re-checks against its own live root index and *refuses* on mismatch.
+  >
+  > Publishing `HMAC(ss, label)` does not weaken the fold: `ss` is one-way-protected by HMAC, and the
+  > fold consumes `ss` as *data* under the independent secret key `RK` — different role, different
+  > key, domain-separated labels. **Phase 5 must model this keying, not the original text.**
 - **Atomicity.** Mirror the receive-path discipline already in the ratchet (`decrypt` derives on a
   scratch copy and only commits mutations after the body AEAD verifies — `DoubleRatchet.scala:243-282`):
-  compute `RK_epoch` and the confirmation on scratch state; commit (and wipe the old `RK`) only after
-  the peer's tag verifies.
+  compute `RK_epoch` on scratch state and commit (wiping the old `RK`) only once the peer's tag has
+  verified. Because the tags are keyed on `ss` (above), the verification happens *strictly before* the
+  fold rather than on the scratch root, which is the stronger ordering: no ratchet state moves at all
+  on an unconfirmed epoch secret.
 
 ### 4.3 Hybrid composition — security ≥ max(classical, PQ)  (G1)
 
@@ -552,16 +600,22 @@ sequenceDiagram
         I-->>R: ARQ ack
     end
     I->>I: decaps → ss 32 B, then wipe the 2464-B keypair secret
-    Note over I,R: each side computes its per-direction confirm tag over the SCRATCH RK_epoch (§4.2)
+    Note over I,R: per-direction confirm tags are keyed on ss — HMAC of ss with dr/pq-epoch-confirm slash i or r (§4.2 amendment). NOT on RK_epoch — neither peer holds the anchor root yet
+    R->>S: KEM_CONFIRM frame — responder tag /r (ordinary ARQ message, follows the ct chunks)
+    S->>I: same 256-B frame
+    I-->>R: ARQ ack
+    I->>I: constant-time verify /r — mismatch aborts here, nothing folded, retry stays possible
     I->>S: KEM_CONFIRM frame — initiator tag /i (ordinary ARQ message)
     S->>R: same 256-B frame
     R-->>I: ARQ ack
-    R->>S: KEM_CONFIRM frame — responder tag /r (ordinary ARQ message)
+    R->>R: constant-time verify /i — both sides have now proven the same ss
+    Note over I,R: only now may either side commit. The responder is the COMMITTER: it arms the fold at its OWN NEXT root index and names that index in the commit
+    R->>R: ARM fold at anchor = own rootIndex + 1, then wipe ss
+    R->>S: EPOCH_COMMIT frame — epoch + anchor (ordinary ARQ message)
     S->>I: same 256-B frame
-    I-->>R: ARQ ack
-    Note over I,R: both constant-time verify the peer tag — fold only on match, else abort with no strip
-    I->>I: RK_epoch = HMAC of RK with dr/pq-epoch ‖ ss — atomic, on tag-verify
-    R->>R: RK_epoch = HMAC of RK with dr/pq-epoch ‖ ss
+    I->>I: after processing this frame I sits EXACTLY on anchor — re-check rootIndex == anchor, else refuse
+    I->>I: RK_epoch = HMAC of RK with dr/pq-epoch ‖ ss — atomic, at the anchor, then wipe ss
+    R->>R: applies its armed fold at the same anchor on its next DH step
     Note over I,R: subsequent DH steps ratchet from the PQ-hardened RK_epoch
 ```
 
@@ -569,6 +623,14 @@ sequenceDiagram
 
 "NoPqPcs" below = passive-HNDL-safe via the Option A seed, but no PQ post-compromise healing yet.
 "Aborted" returns to the pre-rekey epoch state, retaining any prior fold's hardening (never strips it).
+
+`Committed` is the **point of no return** (added in Phase 3): the instant a side puts its OWN
+confirmation tag on the wire, the peer may act on it, so from there the attempt is never torn down —
+a timeout or a hostile frame is *refused* (nothing folds; the attempt is held) rather than allowed to
+diverge the chains or strand the peer. See `Engine.safeToAbort`. The residual is §9 Q5: a peer that
+vanishes past this line leaves the attempt held for the pair's lifetime, so that pair stops rekeying
+(messaging is unaffected — the ratchet is untouched). That is reported, not silent:
+`RekeyStatus.strandedAttemptAgeRounds` / `lastAbort = "pq_rekey_stranded"`.
 
 ```mermaid
 stateDiagram-v2
@@ -578,8 +640,11 @@ stateDiagram-v2
     Rekeying --> Rekeying: stream and reassemble KEM chunks over ARQ (ARQ retransmits until acked, so a lost chunk stays here)
     Rekeying --> Aborted: rekey timeout (bounded per §4.4, wipe keypair secret)
     Rekeying --> Confirming: both sides hold hybrid ss (32 B)
-    Confirming --> Aborted: tag mismatch or timeout (fail closed, wipe keypair secret)
-    Confirming --> PqEpoch: per-direction confirm tags verify then fold RK_epoch (atomic)
+    Confirming --> Aborted: tag mismatch, before our own tag is sent (fail closed, wipe every secret)
+    Confirming --> Committed: our own per-direction tag keyed on ss goes on the wire — the peer may now act on it
+    Committed --> Committed: hostile or malformed frame — REFUSED, nothing folds, attempt held (tearing down here would diverge or strand the peer)
+    Committed --> Stranded: peer vanishes past the timeout — attempt held, pair stops rekeying, reported via strandedAttemptAgeRounds
+    Committed --> PqEpoch: peer tag verified, then fold at the EPOCH_COMMIT anchor (atomic, both sides at the same root index)
     Aborted --> NoPqPcsEpoch: retry if no prior fold had completed
     Aborted --> PqEpoch: retry if a prior fold had completed (prior PQ hardening retained, not stripped)
     PqEpoch --> [*]

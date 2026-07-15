@@ -142,6 +142,9 @@ final case class RekeyStatus(
     /** The in-flight attempt's epoch id, or 0 when none. PUBLIC transport metadata (it rides the
       * control envelope), never key material. */
     currentEpoch: Int,
+    /** The round the in-flight attempt opened on (-1 when none) — the base the `PqRekey
+      * .TimeoutRounds` bound is measured from. A public round id, never key material. */
+    attemptStartRound: Long,
     /** Whether the in-flight attempt has reached its epoch shared secret — a PHASE bit (which the
       * peer already knows from the traffic it sent us), not a fact about any key's bytes. */
     hasEpochSecret: Boolean,
@@ -152,12 +155,15 @@ final case class RekeyStatus(
       * `Engine.safeToAbort`). False once the peer is committed to folding at the anchor — the window
       * in which a timeout or a hostile envelope must NOT dismantle the attempt. */
     abortSafe: Boolean,
-    /** Rounds an attempt has been held past `PqRekey.TimeoutRounds` while unable to abort (0 = not
-      * stranded). Nonzero means this pair has STOPPED REKEYING and will not resume: its PQ
-      * post-compromise window is no longer refreshing, though messaging is unaffected. This is the
-      * only observable for the §9-Q5 stranding residual — `lastAbort` also reads
-      * `pq_rekey_stranded`. */
-    stalledRounds: Long,
+    /** TOTAL age in rounds of a STRANDED attempt — `roundId - startRound`, so it is `≥
+      * PqRekey.TimeoutRounds` whenever it is nonzero (0 = not stranded). Named for what it holds:
+      * this is the attempt's whole lifetime, not the excess over the timeout, because "this attempt
+      * has been alive N rounds" is what a human diagnosing a stall wants next to `startRound`.
+      *
+      * Nonzero means this pair has STOPPED REKEYING and will not resume: its PQ post-compromise
+      * window is no longer refreshing, though messaging is unaffected. With `lastAbort =
+      * "pq_rekey_stranded"` this is the only observable for the §9-Q5 stranding residual. */
+    strandedAttemptAgeRounds: Long,
     foldArmed: Boolean,
     stepsSinceFold: Int,
     lastAbort: String
@@ -280,9 +286,9 @@ final class Engine(
       * distinct from `rekeyAborts` (attempts actually torn down). */
     var rekeyRefusals: Int = 0
 
-    /** Rounds the current attempt has been held past its timeout while unable to abort (0 = not
-      * stranded). Surfaces the §9-Q5 stall that otherwise has no observable at all. */
-    var stalledRounds: Long = 0L
+    /** TOTAL age in rounds (`roundId - startRound`) of the current attempt once it is stranded;
+      * 0 when not stranded. Surfaces the §9-Q5 stall that otherwise has no observable at all. */
+    var strandedAttemptAgeRounds: Long = 0L
     var lastAbort: String = ""
 
     /** Release every rekey secret + buffer for this pair (buddy removal / rejected pairing). */
@@ -425,16 +431,14 @@ final class Engine(
   // for.
   //
   // CONFIRM-BEFORE-COMMIT (§4.2, ML-KEM implicit rejection). Both per-direction tags are verified
-  // constant-time BEFORE any ratchet state moves, so a tampered/mismatched epoch secret aborts with
-  // an explicit reason and leaves the pre-rekey epoch fully usable — never a "confirmed but dead"
-  // fork, never a stripped prior hardening. DEVIATION, stated honestly: the doc keys the tags on
-  // `RK_epoch`. That is unachievable before the fold here — computing `RK_epoch` needs the anchor
-  // root, which by the paragraph above neither side holds while the tags are in flight. We therefore
-  // key the SAME vetted per-direction tags on the hybrid-KEM shared secret itself, which is the
-  // value key confirmation exists to confirm; the session/transcript binding that keying on
-  // `RK_epoch` would have added is already supplied by the tags travelling inside this pair's
-  // authenticated, MK-sealed ratchet chain, and the anchor binding by the explicit, re-checked
-  // `EPOCH_COMMIT.anchor`.
+  // constant-time BEFORE any ratchet state moves, so a tampered/mismatched epoch secret is refused
+  // with an explicit reason and leaves the pre-rekey epoch fully usable — never a "confirmed but
+  // dead" fork, never a stripped prior hardening. The tags are keyed on the hybrid-KEM shared secret
+  // (`HMAC(ss, "dr/pq-epoch-confirm/{i,r}")`), which is what §4.2 specifies as amended for Phase 3 —
+  // `RK_epoch` is unavailable at tag time for the reason in the paragraph above, and the bindings it
+  // would have carried come from the authenticated MK-sealed chain the tags ride, `ss` being fresh
+  // per attempt (§4.4), and the explicit, re-checked `EPOCH_COMMIT.anchor`. See `EpochKdf`'s object
+  // doc and design §4.2 for the full argument.
 
   /** Fold-cadence trigger (design §3.3 option (c)): the `PqRekey.StepCeiling` ceiling, taken
     * OPPORTUNISTICALLY earlier on a round this pair would otherwise spend on a cover write — where
@@ -561,18 +565,18 @@ final class Engine(
         // `lastAbort` is written ONCE, on the transition into the stall — not every round. It is the
         // only diagnostic surface here, so re-stamping it each tick would clobber any later
         // fail-closed reason (a forged frame's `pq_rekey_confirm_failed`, say) within one round and
-        // hide it forever. `stalledRounds` keeps counting, so "how long" stays live either way.
+        // hide it forever. The age below keeps counting, so "how long" stays live either way.
         if !a.stranded then
           a.stranded = true
           rt.lastAbort = "pq_rekey_stranded"
-        rt.stalledRounds = roundId - a.startRound
+        rt.strandedAttemptAgeRounds = roundId - a.startRound
     }
 
   /** The rekey is done on this side: wipe `ss`, reclaim stale reassembly, restart the cadence. */
   private def completeRekey(rt: BuddyRuntime, a: RekeyAttempt): Unit =
     a.wipe()
     rt.rekey = None
-    rt.stalledRounds = 0L // a stranded attempt that finally landed is no longer stranded
+    rt.strandedAttemptAgeRounds = 0L // a stranded attempt that finally landed is no longer stranded
     rt.reassembler.abandonBefore(a.epoch + 1): Unit
     rt.stepsSinceFold = 0
     rt.epochsFolded += 1
@@ -788,10 +792,12 @@ final class Engine(
         refusals = rt.rekeyRefusals,
         inProgress = rt.rekey.isDefined,
         currentEpoch = rt.rekey.map(_.epoch).getOrElse(0),
+        attemptStartRound = rt.rekey.map(_.startRound).getOrElse(-1L),
         hasEpochSecret = rt.rekey.exists(_.ss != null),
         confirmExchanged = rt.rekey.exists(a => a.confirmSent || a.commitQueued),
         abortSafe = rt.rekey.exists(a => safeToAbort(rt, a)),
-        stalledRounds = if rt.rekey.exists(_.stranded) then rt.stalledRounds else 0L,
+        strandedAttemptAgeRounds =
+          if rt.rekey.exists(_.stranded) then rt.strandedAttemptAgeRounds else 0L,
         foldArmed = rt.ratchet.epochFoldArmed,
         stepsSinceFold = rt.stepsSinceFold,
         lastAbort = rt.lastAbort

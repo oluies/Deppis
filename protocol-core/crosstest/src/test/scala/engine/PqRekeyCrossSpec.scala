@@ -164,9 +164,11 @@ class PqRekeyCrossSpec extends AnyFunSuite:
 
   /** Drive a pair to the point where `side` holds its epoch shared secret (i.e. it has encapsed or
     * decapsed) and is waiting on a confirmation — the phase the §4.2 tag check guards. */
-  private def driveUntil(p: Pair, side: Engine, from: Int)(
+  /** As [[driveUntil]], but also reports the round the drive stopped on, so a test can derive its
+    * own round arithmetic from the run rather than from a literal. */
+  private def driveUntilAt(p: Pair, side: Engine, from: Int)(
       ready: RekeyStatus => Boolean
-  ): RekeyStatus =
+  ): (RekeyStatus, Long) =
     var round = from
     while round < from + 900 && !ready(status(side, p.pid)) do
       p.alice.tick(round.toLong): Unit
@@ -176,7 +178,11 @@ class PqRekeyCrossSpec extends AnyFunSuite:
       round += 1
     val s = status(side, p.pid)
     assert(ready(s), s"the test must reach the phase it targets, got $s")
-    s
+    (s, round.toLong - 1)
+
+  private def driveUntil(p: Pair, side: Engine, from: Int)(
+      ready: RekeyStatus => Boolean
+  ): RekeyStatus = driveUntilAt(p, side, from)(ready)._1
 
   private def driveToConfirmPhase(p: Pair, side: Engine, from: Int): RekeyStatus =
     driveUntil(p, side, from)(_.hasEpochSecret)
@@ -359,18 +365,31 @@ class PqRekeyCrossSpec extends AnyFunSuite:
     // condition must be reportable rather than only inferable from `epochsFolded` never advancing.
     val p = pair()
     warm(p, PqRekey.IdleMinSteps, from = 1): Unit
-    val mid = driveUntil(p, p.alice, from = 200)(s => s.inProgress && !s.abortSafe)
-    assert(mid.stalledRounds == 0, "not stranded yet — it is merely past the line")
+    val (mid, driveEnd) = driveUntilAt(p, p.alice, from = 200)(s => s.inProgress && !s.abortSafe)
+    assert(mid.strandedAttemptAgeRounds == 0, "not stranded yet — it is merely past the line")
 
-    // Bob vanishes: tick ONLY alice, well past the timeout.
-    val start = 2000L
-    for r <- start until start + 5 do p.alice.tick(r): Unit
-    assert(status(p.alice, p.pid).stalledRounds == 0, "still inside the timeout")
-    p.alice.tick(start + PqRekey.TimeoutRounds + 10): Unit
+    // Derive the round arithmetic from the ATTEMPT, not from literals: the stall fires strictly
+    // when `roundId - startRound > TimeoutRounds`, so these two rounds straddle that boundary
+    // exactly, whatever `TimeoutRounds` is set to and wherever the drive happened to start.
+    val insideAt = mid.attemptStartRound + PqRekey.TimeoutRounds // age == bound ⇒ NOT yet overdue
+    val strandedAt = insideAt + 1 // age > bound ⇒ overdue
+    assert(
+      insideAt > driveEnd,
+      s"precondition: the drive (ended $driveEnd) must finish before the timeout could fire at " +
+        s"$insideAt — lower PqRekey.TimeoutRounds than the drive length and this test needs rework"
+    )
+
+    // Bob vanishes: tick ONLY alice.
+    p.alice.tick(insideAt): Unit
+    assert(status(p.alice, p.pid).strandedAttemptAgeRounds == 0, "still inside the timeout")
+    p.alice.tick(strandedAt): Unit
 
     val s = status(p.alice, p.pid)
     assert(s.lastAbort == "pq_rekey_stranded", s"stranding must be reported: $s")
-    assert(s.stalledRounds > PqRekey.TimeoutRounds, s"and quantified: $s")
+    assert(
+      s.strandedAttemptAgeRounds == strandedAt - mid.attemptStartRound,
+      s"the reported age is the attempt's TOTAL age in rounds: $s"
+    )
     assert(s.inProgress, "the attempt is HELD, not torn down (holding beats diverging)")
     assert(s.aborts == 0, "a stranded attempt is not an abort")
     // The honest cost, pinned: this pair will not rekey again.
@@ -381,13 +400,16 @@ class PqRekeyCrossSpec extends AnyFunSuite:
     // a fail-closed reason raised while stranded has to survive the next tick.
     p.alice.injectControlForTest(p.pid, Array.fill[Byte](ChunkStream.EnvelopeBytes)(0x7f), 0L): Unit
     assert(status(p.alice, p.pid).lastAbort == "pq_rekey_bad_envelope")
-    p.alice.tick(start + PqRekey.TimeoutRounds + 11): Unit
+    p.alice.tick(strandedAt + 1): Unit
     val later = status(p.alice, p.pid)
     assert(
       later.lastAbort == "pq_rekey_bad_envelope",
       s"a later refusal must not be re-stamped away by the stall marker: $later"
     )
-    assert(later.stalledRounds > PqRekey.TimeoutRounds, "while stalledRounds keeps counting")
+    assert(
+      later.strandedAttemptAgeRounds == strandedAt + 1 - mid.attemptStartRound,
+      "while the reported age keeps counting"
+    )
 
   test("a FAILED later rekey never strips a completed fold's hardening (§8.2)"):
     // §8.2's "Aborted → PqEpoch": a rekey that fails after an earlier one succeeded must route back
