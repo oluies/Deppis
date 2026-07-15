@@ -60,14 +60,25 @@ import scala.collection.mutable
   *
   * ==Honest scope==
   * Green here is NOT a PQ claim: it says the mechanism survives a lossy network without diverging.
-  * The `pq_post_compromise_security` property is Phase 5's formal analysis under an attacker model
-  * no test here represents. `DEV, NO METADATA PRIVACY` stands. */
+  * The `pq_post_compromise_security` property lives in the Phase 5 formal analysis
+  * (`design/formal-analysis/ratchet-pq-epoch.spthy`, landed in #87), under a
+  * classical-compromise-plus-CRQC attacker that no test here represents — and that model assumes an
+  * authentic rekey channel, which no test can supply either. `DEV, NO METADATA PRIVACY` stands: the
+  * remaining gate is human security review, not this suite. */
 class PqRekeyModelSpec extends AnyFunSuite with ScalaCheckPropertyChecks:
 
-  /** A network that eats live frames: swallows a `retrieve` that would have delivered, one in
-    * `dropOneIn` (0 = clean). `retrieve` has already consumed the frame from the store, so the
-    * frame is gone for good and ARQ must recover it — a genuine loss, and `lost` counts exactly
-    * how many happened rather than how often we tried. */
+  /** A network that eats live frames: swallows a `retrieve` that would have returned one, one in
+    * `dropOneIn` (0 = clean). `retrieve` has already consumed the frame from the store, so it is
+    * gone for good and ARQ must recover it.
+    *
+    * `lost` counts LIVE FRAMES SWALLOWED — content, control, or ack-only — not "deliveries
+    * prevented". Every `Some` here really is a live frame the peer wrote under the pair's
+    * directional token (a cover read uses a `cover-read` token nothing is written under and always
+    * returns `None` — `Engine.scala:1602-1603`), so the count can never be inflated by cover
+    * traffic, which is the failure the old `store.remove` metric had. But it is not a delivery
+    * count: the frame may be an ack, or a cached content retransmit the ratchet rejects. Stating it
+    * as "deliveries prevented" would overclaim by exactly the margin that made the old metric
+    * untrustworthy. */
   private final class Lossy(inner: RoundTransport, rng: scala.util.Random) extends RoundTransport:
     var dropOneIn: Int = 0
     var lost: Int = 0
@@ -123,18 +134,37 @@ class PqRekeyModelSpec extends AnyFunSuite with ScalaCheckPropertyChecks:
     * appearing to cover the idle/opportunistic trigger. Warming with `IdleMinSteps` content
     * messages first is what makes the silent phase actually exercise it (measured: 1 fold).
     *
-    * The nonzero range is bounded BELOW on purpose. The transport is strict stop-and-wait — one
-    * message in flight, ~12 rounds each, fewer under loss — so a cadence faster than that outruns
-    * delivery and builds a backlog the recovery phase cannot drain. Then "the message I sent never
-    * arrived" is a statement about QUEUE DEPTH, not about the ratchet: it fires on a healthy pair
-    * and on a broken one alike, so it cannot tell them apart. (An earlier revision of this test had
-    * exactly that bug and two mutations "failed" through the flake rather than through the
-    * property.) A cadence of >= 15 sustains traffic for the whole phase without saturating, which
-    * is what keeps the busy-trigger and chunk-contention paths covered. */
-  private val genCadence: Gen[Int] = Gen.oneOf(Gen.const(0), Gen.choose(15, 40))
+    * WEIGHTED, not uniform. `Gen.oneOf(const(0), choose(...))` picks between the two GENERATORS
+    * 50/50, which would spend half the state space on the silent pair — and the silent pair reaches
+    * neither the busy trigger nor `ChunkScheduler`'s `busyStride` contention (`decide` never sees
+    * `contentPending`), so half the runs would skip the paths this suite's doc claims. That is the
+    * coverage hole the send-cap revision was rejected for, re-entering through weights instead of
+    * through the loop. 1:5 keeps the idle probe as the deliberate single case it honestly is. */
+  private val genCadence: Gen[Int] = Gen.frequency(1 -> Gen.const(0), 5 -> Gen.choose(5, 40))
+
+  /** Messages allowed in flight per direction — a SLIDING WINDOW, which is what actually bounds the
+    * backlog.
+    *
+    * The transport is strict stop-and-wait (~12 rounds/message, worse under loss, worse again when
+    * the chunk lane takes a head), so an ungated cadence outruns delivery and builds a backlog the
+    * recovery phase cannot drain. Then "the message I sent never arrived" is a statement about
+    * QUEUE DEPTH, not the ratchet: it fires on a healthy pair and a broken one alike, so it cannot
+    * tell them apart. An earlier revision had exactly that bug — two mutations "failed" through the
+    * flake rather than through the property.
+    *
+    * A cadence floor alone does not fix it: the backlog scales with the loss rate too, so any fixed
+    * "cadence >= N plus a generous drain budget" merely BETS that the estimate holds at the worst
+    * generated combination. This window bounds in-flight work directly, independently of both
+    * `sendEvery` and `dropOneIn`. Measured at the worst combination the generator can produce
+    * (`sendEvery = 5` with `dropOneIn = 2`, i.e. a saturated channel losing half its live frames):
+    * in-flight peaks at exactly 4, the residual backlog is 4, and the drain reaches quiescence in
+    * 61 rounds against the 600-round cap — so the cap is a safety net rather than the argument, and
+    * traffic still runs the whole phase (109 messages sent, 363 rounds of rekey/content
+    * contention). */
+  private val Window = 4
 
   private val genScript: Gen[(Int, Int, Long)] = for {
-    dropOneIn <- Gen.choose(2, 9) // swallow 1 live delivery in k
+    dropOneIn <- Gen.choose(2, 9) // swallow 1 live frame in k
     sendEvery <- genCadence
     seed <- Gen.choose(0L, Long.MaxValue)
   } yield (dropOneIn, sendEvery, seed)
@@ -142,6 +172,7 @@ class PqRekeyModelSpec extends AnyFunSuite with ScalaCheckPropertyChecks:
   test("model: a rekey over a lossy network never diverges the pair (§7 Phase 4)"):
     var totalFolds = 0
     var totalLost = 0
+    var totalContended = 0
     forAll(genScript, minSuccessful(6)) { case (dropOneIn, sendEvery, seed) =>
       val rng = new scala.util.Random(seed)
       val p = pair(rng)
@@ -170,17 +201,34 @@ class PqRekeyModelSpec extends AnyFunSuite with ScalaCheckPropertyChecks:
         "warm-up must arm the cadence trigger, or the adversarial phase tests nothing"
       )
 
-      // ADVERSARIAL: the network eats live deliveries while the rekey runs.
+      // ADVERSARIAL: the network eats live frames while the rekey runs. Sends are windowed (see
+      // `Window`), so traffic continues for the whole phase without the backlog running away.
       p.lossy(dropOneIn)
       val advStart = round
-      var sent = 0
+      var aSent = 0
+      var bSent = 0
+      var contended = 0
+      def aInFlight = aSent - gotB.count(_.startsWith("m"))
+      def bInFlight = bSent - gotA.count(_.startsWith("n"))
       while round < advStart + 660 do
         if sendEvery > 0 && (round - advStart) % sendEvery == 0 then
-          p.alice.sendMessage(p.pid, s"a$sent"): Unit
-          p.bob.sendMessage(p.pid, s"b$sent"): Unit
-          sent += 1
+          if aInFlight < Window then
+            p.alice.sendMessage(p.pid, s"m$aSent"): Unit
+            aSent += 1
+          if bInFlight < Window then
+            p.bob.sendMessage(p.pid, s"n$bSent"): Unit
+            bSent += 1
+        // Measure the busy/contention path rather than assuming it: a rekey in progress WHILE
+        // content is queued is exactly when `ChunkScheduler.decide` has to arbitrate the head.
+        if sendEvery > 0 && aInFlight > 0 && status(p.alice, p.pid).inProgress then contended += 1
         tick(): Unit
       assert(p.lost > 0, "the network must actually have eaten live frames")
+      // Anti-vacuity for the BUSY paths specifically: without this, a generator or scheduler change
+      // could quietly reduce every case to the idle pair and the suite would stay green while the
+      // contention this spec claims to cover went untested.
+      if sendEvery > 0 then
+        assert(contended > 0, "a busy case must contend: a rekey in flight while content is queued")
+        totalContended += contended
       totalLost += p.lost
 
       // RECOVERY: a clean network. First DRAIN to quiescence, so the probe below measures the
@@ -235,3 +283,4 @@ class PqRekeyModelSpec extends AnyFunSuite with ScalaCheckPropertyChecks:
     // deliveries (not attempts to lose one) — the metric an earlier revision got wrong.
     assert(totalFolds > 0, "the model must actually fold under loss, or it proves nothing")
     assert(totalLost > 0, "and the network must actually have eaten live frames")
+    assert(totalContended > 0, "and must have exercised the busy/contention path, not only idle")

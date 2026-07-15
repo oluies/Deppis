@@ -477,7 +477,6 @@ class DoubleRatchetModelSpec extends AnyFunSuite with ScalaCheckPropertyChecks:
       lead <- Gen.choose(0, 20).flatMap(Gen.listOfN(_, genRekeyOp))
       tail <- Gen.choose(0, 20).flatMap(Gen.listOfN(_, genRekeyOp))
     } yield (lead, tail)
-    var refused = 0
     forAll(gen) { case (lead, tail) =>
       val w = World()
       lead.foreach(_(w))
@@ -503,7 +502,6 @@ class DoubleRatchetModelSpec extends AnyFunSuite with ScalaCheckPropertyChecks:
       )
       val foldsBefore = w.alice.epochFoldsApplied
       w.drain()
-      refused += 1
       assert(w.attempt.isEmpty, "the mismatched attempt must have been torn down")
       assert(
         w.alice.epochFoldsApplied == foldsBefore && !w.alice.epochFoldArmed,
@@ -525,4 +523,7 @@ class DoubleRatchetModelSpec extends AnyFunSuite with ScalaCheckPropertyChecks:
         "and the retry leaves both sides in lockstep"
       )
     }
-    assert(refused > 0, "the model must actually reach the confirmation with a mismatched secret")
+    // No cross-iteration counter here on purpose: "the model actually reached the confirmation with
+    // a mismatched secret" is now guaranteed PER ITERATION by the `assert(w.attempt.isDefined, …)`
+    // above, so a `refused > 0` tally could no longer fail for anything this property cares about —
+    // it would only assert that `forAll` ran at least one case, while reading like coverage.
