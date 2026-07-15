@@ -47,6 +47,23 @@ class CliSpec extends AnyFunSuite:
     assert(out("pairId").str != Handshake.init(secret).pairId)
     assert(out("safetyNumber").str != Handshake.init(secret).safetyNumber)
 
+  test("pcore handshake-init FAILS LOUD on a typo'd pqRequired key (no silent classical fallback)"):
+    // `pqRequired` is a security intent flag: a misspelling must be rejected, never silently ignored
+    // (which would emit the classical, non-PQ derivation). Unknown keys ⇒ Left, not a silent fallback.
+    val secret = b64e("out-of-band-secret".getBytes(UTF_8))
+    val misspelled =
+      Pcore.run("handshake-init", s"""{"sharedSecret":"$secret","pq_required":true}""")
+    assert(
+      misspelled.isLeft,
+      "a misspelled pqRequired key must be rejected, not silently classical"
+    )
+    // Sanity: the same object with the CORRECT key is accepted and yields the PQ-required derivation.
+    val ok = Pcore
+      .run("handshake-init", s"""{"sharedSecret":"$secret","pqRequired":true}""")
+      .toOption
+      .get
+    assert(ok("pairId").str == Handshake.init("out-of-band-secret".getBytes(UTF_8), true).pairId)
+
   test("pcore retrieval-token mirrors RetrievalToken.derive"):
     val key = Array.tabulate(32)(_.toByte)
     val in = s"""{"key":"${b64e(key)}","senderId":"alice","receiverId":"bob","counter":7}"""

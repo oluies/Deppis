@@ -37,6 +37,16 @@ object Pcore:
           // threaded into the derivation so the CLI emits the SAME pairId/safetyNumber the engine does
           // for a PQ-required pairing; omitting it (or false) reproduces the classical values byte for
           // byte (backward compatible).
+          //
+          // FAIL LOUD on a typo'd key: `pqRequired` is a SECURITY intent flag, so a misspelling
+          // (`pq_required`, `pqrequired`, …) must NOT silently fall back to the classical derivation
+          // (the silent-non-PQ failure mode). Reject any key outside the accepted set rather than
+          // ignoring it (Left, consistent with the CLI's existing malformed-input handling). Scoped to
+          // this CLI input only — EngineCodec's lenient codec is a separate, pre-existing pattern.
+          val allowed = Set("sharedSecret", "pqRequired")
+          val unknown = j.obj.keysIterator.filterNot(allowed).toVector.sorted
+          if unknown.nonEmpty then
+            throw IllegalArgumentException(s"unknown arg(s): ${unknown.mkString(", ")}")
           val pqRequired = j.obj.get("pqRequired").exists(_.bool)
           val pi = Handshake.init(b64d(j("sharedSecret").str), pqRequired)
           Right(
