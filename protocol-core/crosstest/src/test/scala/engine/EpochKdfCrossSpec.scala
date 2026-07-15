@@ -15,9 +15,10 @@ import org.scalatest.funsuite.AnyFunSuite
   * still passed. */
 class EpochKdfCrossSpec extends AnyFunSuite:
 
-  // Mask to unsigned before formatting: Scala.js `"%02x".format(negativeByte)` sign-extends to
-  // "ffffffXX" (the JVM Formatter does not), so mask explicitly for cross-platform-stable hex.
-  private def toHex(a: Array[Byte]): String = a.map(b => "%02x".format(b & 0xff)).mkString
+  // Hex via PqTestKit.hex — same `engine` package + same crosstest root, so it is already in scope
+  // and already carries the unsigned-mask fix (Scala.js sign-extends "%02x".format(negativeByte) to
+  // "ffffffXX"). One hex helper per package: a second copy is exactly the drift crosstest prevents.
+  private def toHex(a: Array[Byte]): String = PqTestKit.hex(a)
 
   private def fill(n: Int, v: Int): Array[Byte] = Array.fill(n)(v.toByte)
 
@@ -60,6 +61,18 @@ class EpochKdfCrossSpec extends AnyFunSuite:
         .epochConfirmTagResponder(rkEpoch)
         .sameElements(EpochKdf.epochConfirmTagResponder(rkEpoch))
     )
+
+  test("the fold MOVES the root: kdfEpoch(rk, ss) != rk"):
+    // The property Phase 3's security argument rests on — a degenerate fold that returned `rk`
+    // (or ignored `ss`) would leave the epoch un-hardened. Mirrors PqPairingJsSpec's
+    // `!pqContentRoot(base, ss).sameElements(base)` check for the pairing-time fold.
+    assert(!EpochKdf.kdfEpoch(rk, ss).sameElements(rk))
+
+  test("KeyBytes matches the hybrid KEM's shared-secret width (documented invariant, enforced)"):
+    // EpochKdf.KeyBytes is a bare literal whose scaladoc claims equality with the KEM output width.
+    // Pin it: if the hybrid combiner's width ever changes, fail HERE rather than as a runtime
+    // IllegalArgumentException from kdfEpoch in Phase 3.
+    assert(EpochKdf.KeyBytes == kem.HybridKem.SharedSecretBytes)
 
   test("independence: a different KEM shared secret yields a different folded root"):
     assert(!EpochKdf.kdfEpoch(rk, ss).sameElements(EpochKdf.kdfEpoch(rk, fill(32, 0x23))))
