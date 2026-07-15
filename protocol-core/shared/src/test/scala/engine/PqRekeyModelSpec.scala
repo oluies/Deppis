@@ -283,9 +283,12 @@ class PqRekeyModelSpec extends AnyFunSuite with ScalaCheckPropertyChecks:
       assert(sb.ratchetFolds <= sb.epochsFolded + 1, s"a fold applies at most once per epoch: $sb")
       totalFolds += sa.ratchetFolds
     }
-    // ANTI-VACUITY, and ONLY what has no per-iteration counterpart. Everything asserted inside the
-    // loop is relative (folds within +-1 of each other, at most one fold per epoch) and so holds on
-    // a run that never folded at all, which is what `totalFolds` pins. `busyCases` guards the
+    // ANTI-VACUITY, and ONLY what has no per-iteration counterpart. The two FOLD assertions inside
+    // the loop are relative (folds within +-1 of each other, at most one fold per epoch) and so hold
+    // on a run that never folded at all, which is what `totalFolds` pins. (The rest of the loop's
+    // assertions are absolute — `lost > 0`, the delivery probes, the dedup checks, the drain — and
+    // would fail on a broken run regardless of `totalFolds`; this block is not their backstop and
+    // must not be read as one.) `busyCases` guards the
     // generator WEIGHTS — a revision that let the silent pair own half the state space is exactly
     // what happened once — and claims nothing more; the class doc records the lane arbitration this
     // suite does NOT pin.
