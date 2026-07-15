@@ -125,7 +125,10 @@ object DoubleRatchet:
       hks = Some(hka),
       hkr = None,
       nhks = nhks,
-      nhkr = nhkb
+      nhkr = nhkb,
+      // One `kdfRk` has already run above (rk0 → rk), so this side starts at root index 1 — the
+      // responder starts at 0 holding rk0. Both traverse the SAME root chain (see `rootIndex`).
+      rootIdx0 = 1
     )
 
   /** Responder ("Bob"): holds the deterministic bootstrap key pair and CANNOT send until it has
@@ -145,7 +148,8 @@ object DoubleRatchet:
       hks = None,
       hkr = None,
       nhks = nhkb,
-      nhkr = hka
+      nhkr = hka,
+      rootIdx0 = 0 // holds rk0 itself — the root chain's origin (see `rootIndex`)
     )
 
 /** A live double-ratchet session for ONE buddy. Single-threaded by contract (one engine per client).
@@ -160,7 +164,8 @@ final class DoubleRatchet private (
     private var hks: Option[Array[Byte]], // sending header key
     private var hkr: Option[Array[Byte]], // receiving header key
     private var nhks: Array[Byte], // next sending header key (always defined)
-    private var nhkr: Array[Byte] // next receiving header key (always defined)
+    private var nhkr: Array[Byte], // next receiving header key (always defined)
+    rootIdx0: Int // this side's starting position on the shared root chain (see `rootIndex`)
 ):
   import DoubleRatchet.*
   import aead.Aead
@@ -177,6 +182,86 @@ final class DoubleRatchet private (
     val keys = mutable.LinkedHashMap.empty[Int, Array[Byte]] // N -> message key
   private val skippedEpochs = mutable.ArrayBuffer.empty[SkippedEpoch]
   private var skippedCount = 0 // total stashed keys across all epochs (bounded by MaxSkipStore)
+
+  // ---- Continuous-PQ epoch fold (design/continuous-pq-ratchet.md §4, §7 Phase 3) ---------------
+  //
+  // WHY AN INDEX. The two peers traverse ONE shared root chain rk0, rk1, rk2, … — every root is
+  // `kdfRk(rk_{i-1}, dh_i)` over a DH output BOTH sides compute — but they traverse it at DIFFERENT
+  // times and are never simultaneously at the same root: `dhRatchet` advances the root by two per
+  // step, so one side sits on the odd roots and the other on the even ones, alternating the lead.
+  // "Fold the current root" is therefore NOT a shared instruction. The only well-defined shared
+  // anchor is a root INDEX, which both sides pass through (some indices only transiently, mid-
+  // `dhRatchet`). So the fold is armed for an index and applied by `advanceRoot` exactly when the
+  // chain reaches it — identically on both sides, giving the byte-identical `RK_epoch` §4.2 demands.
+  //
+  // WHAT ARMING IS NOT. Arming is NOT the confirmation gate: `Engine` constant-time verifies the
+  // peer's per-direction `EpochKdf.epochConfirmTag*` BEFORE it ever calls `armEpochFold`, so no
+  // ratchet state moves on an unconfirmed epoch secret (§4.2 fail-closed). `armEpochFold` itself
+  // fails closed on an index the chain has already passed (an un-appliable fold), mutating nothing.
+  private final class PendingFold(val anchor: Int, val ss: Array[Byte])
+  private var pendingFold: Option[PendingFold] = None
+  private var rootIdx: Int = rootIdx0
+  private var foldsApplied: Int = 0
+
+  /** This side's position on the SHARED root chain (see above). PUBLIC metadata: it counts DH steps,
+    * is derivable from the frames the peer has seen, and reveals nothing about any key. */
+  def rootIndex: Int = rootIdx
+
+  /** How many epoch folds this ratchet has committed — observability for the engine + tests. */
+  def epochFoldsApplied: Int = foldsApplied
+
+  /** True while a fold is armed but not yet reached (its anchor is still ahead on the chain). */
+  def epochFoldArmed: Boolean = pendingFold.isDefined
+
+  /** Arm the epoch fold `RK ← EpochKdf.kdfEpoch(RK, ss)` at root index `anchor` (design §4.1/§4.2).
+    *
+    * `anchor == rootIndex` applies it NOW (the receiver of an `EPOCH_COMMIT`: after processing that
+    * frame it sits exactly on the committer's anchor); `anchor > rootIndex` defers it to
+    * [[advanceRoot]] (the committer: it arms its own NEXT index and reaches it on its next DH step).
+    * `anchor < rootIndex` is un-appliable — the chain has passed it — so it FAILS CLOSED: returns
+    * `false`, mutates nothing, and retains no copy of `ss` (the caller wipes its own).
+    *
+    * Takes a private CLONE of `ss` so the caller's wipe cannot blank an armed fold, and wipes that
+    * clone the moment the fold commits (or is disarmed) — §4.4's "wipe on completion / abort". */
+  def armEpochFold(anchor: Int, ss: Array[Byte]): Boolean =
+    require(ss.length == EpochKdf.KeyBytes, s"epoch secret ${ss.length} != ${EpochKdf.KeyBytes}")
+    if anchor < rootIdx || pendingFold.isDefined then false
+    else
+      pendingFold = Some(new PendingFold(anchor, ss.clone()))
+      applyPendingFold() // anchor == rootIdx ⇒ fold now
+      true
+
+  /** Drop an armed-but-unapplied fold, wiping its epoch-secret clone (abort / timeout / teardown,
+    * §4.4). Safe to call unconditionally; a fold already COMMITTED is not undone (a completed fold's
+    * hardening is never stripped — design §8.2 "Aborted → PqEpoch"). */
+  def disarmEpochFold(): Unit =
+    pendingFold.foreach(f => wipe(f.ss))
+    pendingFold = None
+
+  /** Commit the armed fold iff the chain has just reached its anchor. ATOMIC, mirroring `decrypt`'s
+    * scratch-compute / commit-on-verify discipline: `EpochKdf.kdfEpoch` runs to completion on a
+    * SCRATCH array first, and only a fully-derived `RK_epoch` replaces the live root — the old root
+    * and the epoch secret are wiped only after that swap, so no path can leave a half-folded root.
+    * The branch is on a public counter, never on key material (Constitution II). */
+  private def applyPendingFold(): Unit =
+    pendingFold match
+      case Some(f) if f.anchor == rootIdx =>
+        val folded = EpochKdf.kdfEpoch(rk, f.ss) // scratch — no instance state touched yet
+        wipe(rk) // the pre-fold root is retired: it must not survive the fold (Constitution II)
+        rk = folded
+        wipe(f.ss)
+        pendingFold = None
+        foldsApplied += 1
+      case _ => ()
+
+  /** The ONLY path that advances the shared root chain: retire the old root, take `newRk` as root
+    * `rootIndex + 1`, and apply an epoch fold armed for that index. Every `kdfRk` result in
+    * `dhRatchet` flows through here, so an armed anchor can never be silently skipped. */
+  private def advanceRoot(newRk: Array[Byte]): Unit =
+    wipe(rk)
+    rk = newRk
+    rootIdx += 1
+    applyPendingFold()
 
   /** True once a sending chain exists (the initiator from the start; the responder after its first
     * received message). The engine must not call `encrypt` / `encryptPending` while this is false. */
@@ -403,16 +488,18 @@ final class DoubleRatchet private (
     val dhRecv = X25519.sharedSecret(dhsPriv, peerPub)
     val (rk1, ckrNew, nhkrNew) = kdfRk(rk, dhRecv)
     wipe(dhRecv)
-    wipe(rk)
-    rk = rk1
+    // Both new roots go through `advanceRoot`, which retires the old root AND applies an epoch fold
+    // armed for the index just reached. The mid-step root (rk1) is a real, shared chain position —
+    // the peer holds it PERSISTENTLY while we only pass through it — so it must be foldable here or
+    // the two sides would fold at different positions and diverge (see the `rootIndex` note).
+    advanceRoot(rk1)
     ckr = Some(ckrNew)
     nhkr = nhkrNew
     val (newPriv, newPub) = X25519.generateKeyPair()
     val dhSend = X25519.sharedSecret(newPriv, peerPub)
     val (rk2, cksNew, nhksNew) = kdfRk(rk, dhSend)
     wipe(dhSend)
-    wipe(rk)
-    rk = rk2
+    advanceRoot(rk2)
     wipe(dhsPriv)
     dhsPriv = newPriv
     dhsPub = newPub

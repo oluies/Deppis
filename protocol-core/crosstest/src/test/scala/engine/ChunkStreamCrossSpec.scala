@@ -83,11 +83,22 @@ class ChunkStreamCrossSpec extends AnyFunSuite:
         )
       case other => fail(s"KEM_CONFIRM vector must decode: $other")
 
-  test("EPOCH_COMMIT byte layout is pinned: type|epoch(4 BE)|role|pad"):
-    val enc = encode(Envelope.EpochCommit(0x7fffffff, BuddyRole.Initiator))
+  test("EPOCH_COMMIT byte layout is pinned: type|epoch(4 BE)|role|anchor(4 BE)|pad"):
+    // Phase 3 added the 4-byte fold `anchor` in what was padding space, so the Phase 2 vector for
+    // anchor = 0 is byte-identical — the pin below is the SAME string as before this field existed.
+    val enc = encode(Envelope.EpochCommit(0x7fffffff, BuddyRole.Initiator, 0))
     val expected = "03" + "7fffffff" + "01" + "00" * (156 - 6)
     assert(toHex(enc) == expected)
-    assert(decode(hex(expected)) == Right(Envelope.EpochCommit(0x7fffffff, BuddyRole.Initiator)))
+    assert(decode(hex(expected)) == Right(Envelope.EpochCommit(0x7fffffff, BuddyRole.Initiator, 0)))
+    // A nonzero anchor: the field is big-endian at offsets 6..9, padding from 10 on.
+    val anchored = encode(Envelope.EpochCommit(1, BuddyRole.Responder, 0x01020304))
+    val expectedAnchored = "03" + "00000001" + "02" + "01020304" + "00" * (156 - 10)
+    assert(toHex(anchored) == expectedAnchored)
+    assert(
+      decode(hex(expectedAnchored)) == Right(
+        Envelope.EpochCommit(1, BuddyRole.Responder, 0x01020304)
+      )
+    )
 
   test("the chunk splitter's frame counts match the doc's rekey budget on both platforms"):
     // Doc §3.1: hybrid pubkey 1216 B ⇒ 9 chunks, hybrid ciphertext 1120 B ⇒ 8 chunks.
@@ -109,7 +120,7 @@ class ChunkStreamCrossSpec extends AnyFunSuite:
     assert(toHex(done.head.bytes) == toHex(obj))
 
   test("fail-closed decoding is identical on both platforms"):
-    val good = encode(Envelope.EpochCommit(1, BuddyRole.Initiator))
+    val good = encode(Envelope.EpochCommit(1, BuddyRole.Initiator, 0))
     assert(decode(good.dropRight(1)) == Left(ChunkError.BadLength))
     assert(decode(good.updated(0, 0x09.toByte)) == Left(ChunkError.UnknownType))
     assert(decode(good.updated(5, 0x00.toByte)) == Left(ChunkError.BadRole))

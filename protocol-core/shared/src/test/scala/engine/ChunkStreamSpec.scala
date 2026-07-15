@@ -38,7 +38,7 @@ class ChunkStreamSpec extends AnyFunSuite with ScalaCheckPropertyChecks:
     assert(EnvelopeBytes == ArqFrame.PayloadBytes)
     assert(ChunkCapacity == ArqFrame.PayloadBytes - ChunkHeaderBytes)
     assert(ChunkHeaderBytes + ChunkCapacity <= ArqFrame.PayloadBytes)
-    val env = encode(Envelope.EpochCommit(0, BuddyRole.Initiator))
+    val env = encode(Envelope.EpochCommit(0, BuddyRole.Initiator, 0))
     assert(env.length == ArqFrame.PayloadBytes)
     // The real proof that nothing about the frame changes: ARQ accepts it at its exact width.
     val inner = ArqFrame.encode(0L, 0L, env)
@@ -48,7 +48,7 @@ class ChunkStreamSpec extends AnyFunSuite with ScalaCheckPropertyChecks:
     val all = Seq(
       Envelope.KemChunk(3, BuddyRole.Initiator, Part.Pub, 0, 1, bytes(10)),
       Envelope.KemConfirm(3, BuddyRole.Responder, bytes(ConfirmTagBytes)),
-      Envelope.EpochCommit(3, BuddyRole.Initiator)
+      Envelope.EpochCommit(3, BuddyRole.Initiator, 0)
     )
     all.foreach(e => assert(encode(e).length == EnvelopeBytes, s"$e"))
 
@@ -72,7 +72,7 @@ class ChunkStreamSpec extends AnyFunSuite with ScalaCheckPropertyChecks:
     Seq(
       Envelope.KemChunk(1, BuddyRole.Initiator, Part.Pub, 0, 1, bytes(5)),
       Envelope.KemConfirm(1, BuddyRole.Initiator, bytes(ConfirmTagBytes)),
-      Envelope.EpochCommit(1, BuddyRole.Initiator)
+      Envelope.EpochCommit(1, BuddyRole.Initiator, 0)
     ).foreach { e =>
       val enc = encode(e)
       assert(isControl(enc), s"$e must be recognized as control")
@@ -99,7 +99,7 @@ class ChunkStreamSpec extends AnyFunSuite with ScalaCheckPropertyChecks:
           assert(g.epoch == 7 && g.role == role && g.tag.sameElements(tag))
         case other => fail(s"KEM_CONFIRM round-trip: $other")
       assert(
-        decode(encode(Envelope.EpochCommit(9, role))) == Right(Envelope.EpochCommit(9, role))
+        decode(encode(Envelope.EpochCommit(9, role, 0))) == Right(Envelope.EpochCommit(9, role, 0))
       )
     // The empty object: exactly one chunk, zero data (canonical form).
     val empty = chunksOf(Array.emptyByteArray)
@@ -110,8 +110,8 @@ class ChunkStreamSpec extends AnyFunSuite with ScalaCheckPropertyChecks:
   test("epoch survives the full non-negative Int range (BE, unsigned reassembly)"):
     for e <- Seq(0, 1, 255, 256, 65535, 0x00ffffff, Int.MaxValue) do
       assert(
-        decode(encode(Envelope.EpochCommit(e, BuddyRole.Initiator))) ==
-          Right(Envelope.EpochCommit(e, BuddyRole.Initiator))
+        decode(encode(Envelope.EpochCommit(e, BuddyRole.Initiator, 0))) ==
+          Right(Envelope.EpochCommit(e, BuddyRole.Initiator, 0))
       )
 
   test("the decoder returns COPIES, never aliases into the caller's buffer"):
@@ -221,7 +221,7 @@ class ChunkStreamSpec extends AnyFunSuite with ScalaCheckPropertyChecks:
     val c = base.clone(); f(c); c
 
   test("fail closed: wrong width (truncated or oversize) rejects"):
-    val good = encode(Envelope.EpochCommit(1, BuddyRole.Initiator))
+    val good = encode(Envelope.EpochCommit(1, BuddyRole.Initiator, 0))
     assert(decode(good.dropRight(1)) == Left(ChunkError.BadLength))
     assert(decode(good :+ 0.toByte) == Left(ChunkError.BadLength))
     assert(decode(Array.emptyByteArray) == Left(ChunkError.BadLength))
@@ -229,16 +229,16 @@ class ChunkStreamSpec extends AnyFunSuite with ScalaCheckPropertyChecks:
     assert(!isControl(good.dropRight(1)))
 
   test("fail closed: unknown type tag rejects (no partial trust)"):
-    val good = encode(Envelope.EpochCommit(1, BuddyRole.Initiator))
+    val good = encode(Envelope.EpochCommit(1, BuddyRole.Initiator, 0))
     for t <- Seq(0x04, 0x05, 0x7f, 0x80, 0xfe, 0xff) do
       assert(decode(corrupt(good)(_(0) = t.toByte)) == Left(ChunkError.UnknownType), s"tag $t")
 
   test("fail closed: a negative epoch (high bit set) rejects rather than wrapping"):
-    val good = encode(Envelope.EpochCommit(1, BuddyRole.Initiator))
+    val good = encode(Envelope.EpochCommit(1, BuddyRole.Initiator, 0))
     assert(decode(corrupt(good)(_(1) = 0x80.toByte)) == Left(ChunkError.BadEpoch))
 
   test("fail closed: an unknown role or part byte rejects"):
-    val commit = encode(Envelope.EpochCommit(1, BuddyRole.Initiator))
+    val commit = encode(Envelope.EpochCommit(1, BuddyRole.Initiator, 0))
     assert(decode(corrupt(commit)(_(5) = 0x00)) == Left(ChunkError.BadRole))
     assert(decode(corrupt(commit)(_(5) = 0x03)) == Left(ChunkError.BadRole))
     val c = encode(Envelope.KemChunk(1, BuddyRole.Initiator, Part.Pub, 0, 1, bytes(4)))
@@ -325,8 +325,26 @@ class ChunkStreamSpec extends AnyFunSuite with ScalaCheckPropertyChecks:
       decode(corrupt(confirm)(a => a(6 + ConfirmTagBytes) = 1)) ==
         Left(ChunkError.NonZeroPadding)
     )
-    val commit = encode(Envelope.EpochCommit(1, BuddyRole.Initiator))
-    assert(decode(corrupt(commit)(a => a(6) = 1)) == Left(ChunkError.NonZeroPadding))
+    val commit = encode(Envelope.EpochCommit(1, BuddyRole.Initiator, 0))
+    // Padding starts AFTER the 4-byte anchor (offsets 6..9) — see the EPOCH_COMMIT layout.
+    assert(decode(corrupt(commit)(a => a(10) = 1)) == Left(ChunkError.NonZeroPadding))
+    assert(
+      decode(corrupt(commit)(a => a(EnvelopeBytes - 1) = 1)) == Left(ChunkError.NonZeroPadding)
+    )
+
+  test("fail closed: a negative EPOCH_COMMIT anchor (high bit set) rejects rather than wrapping"):
+    // The anchor is a root INDEX; a negative one could never match a live `rootIndex`, so reject it
+    // at the decoder rather than letting it reach the engine's anchor check as a wrapped value.
+    val commit = encode(Envelope.EpochCommit(1, BuddyRole.Initiator, 7))
+    assert(decode(commit) == Right(Envelope.EpochCommit(1, BuddyRole.Initiator, 7)))
+    assert(decode(corrupt(commit)(_(6) = 0x80.toByte)) == Left(ChunkError.BadAnchor))
+
+  test("the EPOCH_COMMIT anchor round-trips the full non-negative Int range"):
+    for a <- Seq(0, 1, 2, 255, 256, 65535, 0x00ffffff, Int.MaxValue) do
+      assert(
+        decode(encode(Envelope.EpochCommit(4, BuddyRole.Responder, a))) ==
+          Right(Envelope.EpochCommit(4, BuddyRole.Responder, a))
+      )
 
   test("fail closed: an oversize object is refused by the splitter"):
     assert(

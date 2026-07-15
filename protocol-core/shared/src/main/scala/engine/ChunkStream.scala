@@ -15,7 +15,7 @@ import scala.collection.mutable
   * KEM_CHUNK:    type(1)=0x01 ‖ epoch(4 BE) ‖ role(1) ‖ part(1) ‖ idx(1) ‖ count(1) ‖
   *               dataLen(2 BE) ‖ data(≤145) ‖ zero pad
   * KEM_CONFIRM:  type(1)=0x02 ‖ epoch(4 BE) ‖ role(1) ‖ tag(32) ‖ zero pad
-  * EPOCH_COMMIT: type(1)=0x03 ‖ epoch(4 BE) ‖ role(1) ‖ zero pad
+  * EPOCH_COMMIT: type(1)=0x03 ‖ epoch(4 BE) ‖ role(1) ‖ anchor(4 BE) ‖ zero pad
   * }}}
   * The design doc sketches a 9-byte KEM_CHUNK header (⇒ 147 data bytes) and calls the final byte
   * budget "an implementation detail"; this implementation adds an explicit 2-byte big-endian
@@ -23,6 +23,16 @@ import scala.collection.mutable
   * unambiguous without trusting zero-padding — an 11-byte header, 145 data bytes per chunk. The
   * doc's frame counts are unchanged: hybrid pubkey 1216 B ⇒ ⌈1216/145⌉ = 9 frames, ciphertext
   * 1120 B ⇒ 8 frames, ~19 frames per full rekey.
+  *
+  * `EPOCH_COMMIT` additionally carries a 4-byte `anchor` the doc's §3.1 sketch ("type ‖ epoch ‖
+  * role — fold now") does not name. It is the ROOT INDEX the fold applies to (`DoubleRatchet
+  * .rootIndex`), which §4.2 requires the fold be "deterministically anchored to" so both sides
+  * derive the byte-identical `RK_epoch`. Sending it EXPLICITLY lets the receiver constant-check its
+  * own live root index against the committer's and REFUSE on a mismatch (`Engine`'s
+  * `epoch_anchor_mismatch`) instead of folding at the wrong position and diverging silently — i.e.
+  * it converts the doc's implicit ratchet-position assumption into a fail-closed check. The field
+  * is padding-space in the old layout, so `anchor = 0` re-encodes byte-identically to the Phase 2
+  * vector; the pinned KAT in `ChunkStreamCrossSpec` is unchanged.
   *
   * Control-vs-content discrimination (byte 0): user content occupies this same region via
   * `Frame.pad(msg, ArqFrame.PayloadBytes)`, whose first byte is the high byte of a big-endian
@@ -84,7 +94,8 @@ object ChunkStream:
   // `DoubleRatchet.InnerSize`, so pin it here: if the inner block ever narrowed, this fails loudly
   // at load rather than turning a strict decode into an out-of-bounds read on attacker input.
   require(
-    EnvelopeBytes >= ChunkHeaderBytes && EnvelopeBytes >= 6 + ConfirmTagBytes,
+    EnvelopeBytes >= ChunkHeaderBytes && EnvelopeBytes >= 6 + ConfirmTagBytes &&
+      EnvelopeBytes >= 6 + 4,
     s"envelope $EnvelopeBytes too narrow for the fixed control fields"
   )
   require(ChunkCapacity >= 1, "a KEM_CHUNK must carry at least one payload byte")
@@ -103,7 +114,7 @@ object ChunkStream:
   /** Fixed, parameterless rejection reasons — fail closed, nothing attacker-controlled echoed. */
   enum ChunkError:
     case BadLength, UnknownType, BadEpoch, BadRole, BadPart, BadIndex, BadCount, BadDataLength,
-      NonZeroPadding, OversizeObject, CountMismatch, ConflictingChunk
+      NonZeroPadding, OversizeObject, CountMismatch, ConflictingChunk, BadAnchor
 
   /** A decoded control envelope. `data`/`tag` are the decoder's own copies (never aliases into the
     * input buffer). Constructed values fed to [[ChunkReassembler.feed]] are re-validated there. */
@@ -117,7 +128,11 @@ object ChunkStream:
         data: Array[Byte]
     )
     case KemConfirm(epoch: Int, role: BuddyRole, tag: Array[Byte])
-    case EpochCommit(epoch: Int, role: BuddyRole)
+
+    /** "Fold now" — `anchor` is the `DoubleRatchet.rootIndex` the epoch fold applies to (see the
+      * object doc). The sender arms it as its OWN next root index; the receiver, after processing
+      * this frame, is at exactly that index and folds immediately, refusing on any mismatch. */
+    case EpochCommit(epoch: Int, role: BuddyRole, anchor: Int)
 
   /** True iff a full-width ARQ padded payload holds a control envelope (nonzero byte 0) rather
     * than `Frame.pad`'ed user content. Phase 3's receive path branches on this. */
@@ -173,10 +188,15 @@ object ChunkStream:
         putEpoch(epoch)
         out(5) = roleByte(role)
         System.arraycopy(tag, 0, out, 6, ConfirmTagBytes)
-      case Envelope.EpochCommit(epoch, role) =>
+      case Envelope.EpochCommit(epoch, role, anchor) =>
+        require(anchor >= 0, s"anchor $anchor < 0")
         out(0) = TagEpochCommit
         putEpoch(epoch)
         out(5) = roleByte(role)
+        out(6) = ((anchor >>> 24) & 0xff).toByte
+        out(7) = ((anchor >>> 16) & 0xff).toByte
+        out(8) = ((anchor >>> 8) & 0xff).toByte
+        out(9) = (anchor & 0xff).toByte
     out
 
   /** Strict decode of a full-width padded payload. Fail-closed: any malformation rejects with a
@@ -233,8 +253,11 @@ object ChunkStream:
             }
           case TagEpochCommit =>
             role.flatMap { r =>
-              if !zeroPaddedFrom(6) then Left(ChunkError.NonZeroPadding)
-              else Right(Envelope.EpochCommit(epoch, r))
+              val anchor = ((padded(6) & 0xff) << 24) | ((padded(7) & 0xff) << 16) |
+                ((padded(8) & 0xff) << 8) | (padded(9) & 0xff)
+              if anchor < 0 then Left(ChunkError.BadAnchor) // high bit set ⇒ never a root index
+              else if !zeroPaddedFrom(10) then Left(ChunkError.NonZeroPadding)
+              else Right(Envelope.EpochCommit(epoch, r, anchor))
             }
           case _ => Left(ChunkError.UnknownType)
 
