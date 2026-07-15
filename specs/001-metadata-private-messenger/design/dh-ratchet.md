@@ -292,13 +292,32 @@ plus the engine-level E2E in `engine.RoundTransportSpec`:
   invariants — correctness, atomicity/no-mutation-on-undecryptable, single-use, out-of-order
   completeness — over *random* op interleavings with shrinking;
 - a **Tamarin symbolic model** (`ratchet.spthy`) — **machine-checked**: message secrecy + PCS verified
-  against a Dolev-Yao attacker (Tamarin 1.12.0);
+  against a Dolev-Yao attacker (Tamarin 1.12.0); since continuous-PQ Phase 5 it also carries the **epoch
+  fold**, and `pcs_with_epoch_fold` confirms a heal *plus* a fold still heals (goal **G1** — the fold
+  costs no classical PCS);
 - a **Tamarin unbounded model** (`ratchet-unbounded.spthy`) — **machine-checked**: PCS *and* forward
   secrecy hold across an arbitrarily long ratchet chain *given* per-step secret unguessability (reuse +
-  induction, no proof oracle); the composition with the bounded model is argued, not machine-linked; and
+  induction, no proof oracle); the composition with the bounded model is argued, not machine-linked.
+  Since Phase 5 the epoch fold is a **second kind of root input**, and PCS/FS are additionally verified
+  **across epoch boundaries**;
 - a **Tamarin observational-equivalence model** (`unlinkability.spthy`, `--diff`) — **machine-checked**:
   the store cannot link two frames of one sending chain, with a cleartext-header negative control that
-  correctly falsifies. See `formal-analysis/README.md` and the repo-root `CRYPTO_PROOF.md`.
+  correctly falsifies. It re-verifies unchanged under continuous PQ (the fold touches no wire format).
+  **Per-frame only**: Tamarin has no notion of length, timing or volume, so the rekey **traffic
+  pattern** is *not* covered — see `formal-analysis/README.md` §6; and
+- a **Tamarin PQ model** (`ratchet-pq-epoch.spthy`) with **two controls** — **machine-checked**: after an
+  epoch fold, post-compromise secrecy survives a **CRQC** (an adversary given a compromised pre-fold root
+  *and* every X25519 discrete log). Shown **non-vacuous** by `ratchet-pq-epoch-nofold.spthy`, which is
+  the same model minus the fold and **falsifies**. **Bounded by an authentic-rekey-channel assumption**:
+  `ratchet-pq-epoch-hijack.spthy` drops it and *finds* an active post-compromise hijack — the standard
+  PCS caveat, but it means the claim is PQ-PCS against an adversary **passive on the rekey exchange**,
+  and must not be quoted otherwise. **Read `formal-analysis/README.md` §5.3 before citing this result.**
+
+See `formal-analysis/README.md` and the repo-root `CRYPTO_PROOF.md`.
+
+> **These are inputs to a human security review, not a substitute for one, and none of them changes any
+> label**: `DEV, NO METADATA PRIVACY` stands (Constitution I/IV; `formal-analysis/README.md`
+> "Labeling status after Phase 5").
 
 ---
 
