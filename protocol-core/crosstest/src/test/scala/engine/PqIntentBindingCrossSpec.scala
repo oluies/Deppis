@@ -36,6 +36,26 @@ class PqIntentBindingCrossSpec extends AnyFunSuite:
     )
     assert(bob.buddyCount == 0, "a stripped-key pqRequired responder must add nothing")
 
+  test(
+    "STRIP DEFENSE: pqRequired wins the error code even if pqPrekey is (mis)set on the responder"
+  ):
+    // Error-code precedence: the `pqRequired` strip check runs BEFORE the `pqPrekey` arg-consistency
+    // check, so a stripped key with `pqRequired = true` surfaces as `pq_prekey_required` (the "peer's PQ
+    // key was stripped" UX) rather than the generic `invalid_arg` — even when a caller also (mis)set the
+    // initiator-only `pqPrekey` flag on the responder. Both fail closed; this pins the code an app matches.
+    val bob = Engine()
+    assert(
+      bob.addBuddy(
+        secret("oob"),
+        BuddyRole.Responder,
+        initiatePqPrekey = true,
+        pqRequired = true
+      ) == Left(
+        EngineError("pq_prekey_required", "PQ intent set but no initiator KEM public key arrived")
+      )
+    )
+    assert(bob.buddyCount == 0)
+
   test("STRIP DEFENSE: WITHOUT pqRequired the same stripped delivery still demotes (control)"):
     // Control that isolates the fix: with `pqRequired = false` (the pre-change default) a responder that
     // receives no KEM material is indistinguishable from a genuinely-classical pairing, so it still adds
@@ -62,6 +82,51 @@ class PqIntentBindingCrossSpec extends AnyFunSuite:
       .get
     assert(aRes.pairId != bRes.pairId, "flipped intent ⇒ different pairId")
     assert(aRes.safetyNumber != bRes.safetyNumber, "flipped intent ⇒ different safety number")
+
+  test(
+    "PQ-INTENT BINDING (mirror): attacker downgrades the INITIATOR — responder still fails closed"
+  ):
+    // The mirror of the responder-flip test: the attacker controls the INITIATOR direction. An initiator
+    // driven classically (`pqRequired = false`) produces NO kemPublicKey; the responder expected PQ
+    // (`pqRequired = true`), so on the stripped/absent key it fails closed — the downgrade cannot land.
+    val alice = Engine()
+    val aRes =
+      alice.addBuddy(secret("oob"), BuddyRole.Initiator).toOption.get // classical: no KEM key
+    assert(aRes.kemPublicKey.isEmpty, "a classical initiator emits no KEM public key")
+    val bob = Engine()
+    assert(
+      bob.addBuddy(secret("oob"), BuddyRole.Responder, pqRequired = true) == Left(
+        EngineError("pq_prekey_required", "PQ intent set but no initiator KEM public key arrived")
+      )
+    )
+    assert(bob.buddyCount == 0)
+    // If the attacker instead FORWARDS a FORGED KEM key (so the responder does not fail closed), the
+    // responder derives under pqRequired=true while the honest classical initiator derived under false —
+    // the safety numbers diverge, so the out-of-band comparison catches the downgrade.
+    val forgedKey = Engine()
+      .addBuddy(secret("oob"), BuddyRole.Initiator, pqRequired = true)
+      .toOption
+      .get
+      .kemPublicKey
+      .get
+    val bForged = Engine()
+    val bRes = bForged
+      .addBuddy(
+        secret("oob"),
+        BuddyRole.Responder,
+        initiatorKemPublicKey = Some(forgedKey),
+        pqRequired = true
+      )
+      .toOption
+      .get
+    assert(
+      aRes.pairId != bRes.pairId,
+      "downgraded initiator vs pqRequired responder ⇒ different pairId"
+    )
+    assert(
+      aRes.safetyNumber != bRes.safetyNumber,
+      "downgraded initiator vs pqRequired responder ⇒ different safety number (OOB comparison catches it)"
+    )
 
   test("FULL PQ pairing with pqRequired=true on BOTH sides completes and a message round-trips"):
     // The honest case: both sides agree on the PQ intent, so they derive the SAME safety number AND run

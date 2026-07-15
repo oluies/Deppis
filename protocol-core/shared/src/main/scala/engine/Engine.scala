@@ -313,16 +313,19 @@ final class Engine(
     //   - a Responder that sets `pqPrekey` must also supply the initiator's KEM public key to encaps to.
     else if role == BuddyRole.Initiator && initiatorKemPublicKey.isDefined then
       Left(EngineError("invalid_arg", "initiator must not be given a KEM public key"))
-    else if role == BuddyRole.Responder && initiatePqPrekey && initiatorKemPublicKey.isEmpty then
-      Left(EngineError("invalid_arg", "responder pqPrekey requires the initiator KEM public key"))
     // STRIP-DOWNGRADE DEFENSE (fail closed): a responder that expected PQ (`pqRequired = true`) but
     // received NO `initiatorKemPublicKey` refuses rather than seeding a classical pairing. This is the
     // key removal an attacker performs to silently demote the responder to non-PQ; with the intent bound
-    // to the (authenticated) OOB pairing, its absence is now detectable and terminal.
+    // to the (authenticated) OOB pairing, its absence is now detectable and terminal. Checked BEFORE the
+    // `pqPrekey` arg-consistency guard below so that when `pqRequired` is set, a stripped key ALWAYS
+    // surfaces as `pq_prekey_required` (the "peer's PQ key was stripped" UX) — even if a caller also
+    // (mis)set the initiator-only `pqPrekey` flag on the responder, which would otherwise win invalid_arg.
     else if role == BuddyRole.Responder && pqRequired && initiatorKemPublicKey.isEmpty then
       Left(
         EngineError("pq_prekey_required", "PQ intent set but no initiator KEM public key arrived")
       )
+    else if role == BuddyRole.Responder && initiatePqPrekey && initiatorKemPublicKey.isEmpty then
+      Left(EngineError("invalid_arg", "responder pqPrekey requires the initiator KEM public key"))
     else
       // Bind the PQ intent into the derivation (domain-separated; byte-identical when false), so a MITM
       // flipping the bit on one side yields a mismatching safety number (OOB comparison fails).

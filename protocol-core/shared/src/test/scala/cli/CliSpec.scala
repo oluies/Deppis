@@ -18,13 +18,34 @@ class CliSpec extends AnyFunSuite:
 
   // ---- Pcore ----
 
-  test("pcore handshake-init mirrors Handshake.init"):
+  test("pcore handshake-init mirrors Handshake.init (default pqRequired=false, classical)"):
     val secret = "out-of-band-secret".getBytes(UTF_8)
     val out = Pcore.run("handshake-init", s"""{"sharedSecret":"${b64e(secret)}"}""").toOption.get
     val want = Handshake.init(secret)
     assert(out("pairId").str == want.pairId)
     assert(out("safetyNumber").str == want.safetyNumber)
     assert(b64d(out("pairKey").str).sameElements(want.pairKey))
+    // Explicit pqRequired=false must be byte-identical to the default (backward compatible).
+    val outFalse = Pcore
+      .run("handshake-init", s"""{"sharedSecret":"${b64e(secret)}","pqRequired":false}""")
+      .toOption
+      .get
+    assert(outFalse("pairId").str == want.pairId)
+    assert(outFalse("safetyNumber").str == want.safetyNumber)
+
+  test("pcore handshake-init threads pqRequired=true (PQ-intent binding, US7)"):
+    val secret = "out-of-band-secret".getBytes(UTF_8)
+    val out = Pcore
+      .run("handshake-init", s"""{"sharedSecret":"${b64e(secret)}","pqRequired":true}""")
+      .toOption
+      .get
+    val want = Handshake.init(secret, pqRequired = true)
+    assert(out("pairId").str == want.pairId)
+    assert(out("safetyNumber").str == want.safetyNumber)
+    assert(b64d(out("pairKey").str).sameElements(want.pairKey))
+    // The PQ-required derivation DIFFERS from the classical one (the bit is bound into the safety number).
+    assert(out("pairId").str != Handshake.init(secret).pairId)
+    assert(out("safetyNumber").str != Handshake.init(secret).safetyNumber)
 
   test("pcore retrieval-token mirrors RetrievalToken.derive"):
     val key = Array.tabulate(32)(_.toByte)

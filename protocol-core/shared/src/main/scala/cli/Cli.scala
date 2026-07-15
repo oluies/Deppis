@@ -33,7 +33,12 @@ object Pcore:
       val j = if in.trim.isEmpty then ujson.Obj() else ujson.read(in)
       sub match
         case "handshake-init" =>
-          val pi = Handshake.init(b64d(j("sharedSecret").str))
+          // Optional `pqRequired` (bool, default false) — the authenticated OOB PQ intent (US7). It is
+          // threaded into the derivation so the CLI emits the SAME pairId/safetyNumber the engine does
+          // for a PQ-required pairing; omitting it (or false) reproduces the classical values byte for
+          // byte (backward compatible).
+          val pqRequired = j.obj.get("pqRequired").exists(_.bool)
+          val pi = Handshake.init(b64d(j("sharedSecret").str), pqRequired)
           Right(
             ujson.Obj(
               "pairId" -> pi.pairId,
