@@ -4,12 +4,19 @@ Two complementary efforts strengthen the **human security review** the Constitut
 amendment* requires before the hand-assembled ratchet (`engine.DoubleRatchet`) could ever back a build
 that drops the `DEV, NO METADATA PRIVACY` label. They attack two different questions:
 
+> **Companion document.** The repo-root [`CRYPTO_PROOF.md`](../../../../CRYPTO_PROOF.md) is the
+> narrative assurance story (what is proven, what it rests on, what is out of scope). **This README is
+> the artifact-level detail.** Both are updated together; where they overlap, the prover output quoted
+> here is the source of truth.
+
 | Question | Artifact | Status |
 |---|---|---|
 | **Does the *implementation* hold its invariants under every reachable op sequence?** | `engine.DoubleRatchetModelSpec` (ScalaCheck stateful model) | ✅ runs in CI (JVM), green |
-| **Does the *design* provide message secrecy + PCS against a Dolev-Yao attacker?** | `ratchet.spthy` (Tamarin symbolic model, bounded) | ✅ **machine-checked** — all 4 lemmas verified (Tamarin 1.12.0) |
-| **Do PCS + FS hold across *arbitrarily many* steps, *given* per-step secret unguessability?** | `ratchet-unbounded.spthy` (Tamarin, unbounded loop) | ✅ **machine-checked** — PCS + FS verified (reuse/induction, no oracle); composition with §2 is argued, not machine-linked |
+| **Does the *design* provide message secrecy + PCS against a Dolev-Yao attacker?** | `ratchet.spthy` (Tamarin symbolic model, bounded) | ✅ **machine-checked** — all 6 lemmas verified (Tamarin 1.12.0), epoch fold included |
+| **Do PCS + FS hold across *arbitrarily many* steps, *given* per-step secret unguessability?** | `ratchet-unbounded.spthy` (Tamarin, unbounded loop) | ✅ **machine-checked** — PCS + FS verified, incl. **across epoch folds** (reuse/induction, no oracle); composition with §2 is argued, not machine-linked |
 | **Can the store *link* two frames of one chain? (header unlinkability)** | `unlinkability.spthy` (Tamarin `--diff`) + negative control | ✅ **machine-checked** — observational equivalence verified; cleartext control falsifies |
+| **Does the PQ epoch fold restore post-compromise security against a *CRQC*?** | `ratchet-pq-epoch.spthy` + **`-nofold` negative control** (§5) | ✅ **machine-checked, non-vacuous** — verified; the no-fold control **falsifies**. **Bounded by an authentic-rekey-channel assumption — see §5.3** |
+| **Is a ~19-frame rekey burst distinguishable? (traffic pattern)** | — | ⚠️ **NOT FORMALLY DISCHARGED** — reduced to an engine invariant and argued in §6; **no model covers it**, and Tamarin structurally cannot |
 
 This split mirrors the Constitution's own layering. **Primitives** (X25519, HMAC-SHA256,
 ChaCha20-Poly1305) are delegated to vetted libraries — we *inherit* their verification (the same
@@ -73,12 +80,25 @@ lemma needed — the model is bounded to two steps so it closes automatically; `
 required):
 
 ```
-executable               (exists-trace): verified (7 steps)
-pcs_premise_reachable    (exists-trace): verified (6 steps)   # PCS premise is reachable ⇒ non-vacuous
-message_secrecy          (all-traces):   verified (37 steps)
-post_compromise_security (all-traces):   verified (16 steps)
+executable                   (exists-trace): verified (7 steps)
+pcs_premise_reachable        (exists-trace): verified (8 steps)   # PCS premise reachable ⇒ non-vacuous
+message_secrecy              (all-traces):   verified (41 steps)
+post_compromise_security     (all-traces):   verified (21 steps)
+epoch_fold_premise_reachable (exists-trace): verified (9 steps)   # NEW (Phase 5)
+pcs_with_epoch_fold          (all-traces):   verified (7 steps)   # NEW (Phase 5)
 All wellformedness checks were successful.
 ```
+
+**Phase 5 update — the epoch fold is now in this model.** The `B_epoch_fold` / `B_send2_pq` rules fold a
+PQ epoch secret into the live root of the healed chain, and the last two lemmas are new. **All four
+original lemmas still verify.** Their step counts *moved* (`message_secrecy` 37→41,
+`post_compromise_security` 16→21, `pcs_premise_reachable` 6→8) purely because the model grew two rules —
+the properties are unchanged. `pcs_with_epoch_fold` is design §6.1's "a heal *plus* an epoch fold still
+heals": its point is **not** that the fold adds strength here (against this file's classical attacker it
+cannot — PCS already held) but that inserting the fold **does not break** the healing already proved
+(design goal **G1**). **Nothing in `ratchet.spthy` is a post-quantum result** — its attacker is the
+classical Dolev-Yao attacker for whom CDH *holds*, so the fold is merely one more unguessable secret to
+it. The PQ claim lives in §5.
 
 (The proof is **message secrecy + PCS**, not forward secrecy — there is no FS lemma here. The model has
 one message per chain root, so within-chain FS is not what Tamarin checks; FS rests on the one-way KDF
@@ -162,12 +182,34 @@ expresses exactly the two facts the ratchet relies on while avoiding the non-ter
 term-deconstruction regress a literal `kdfRK(rk,~s)` term causes under an unbounded loop.
 
 ```
-tamarin-prover ratchet-unbounded.spthy --prove          # ~0.1 s, no oracle, no --auto-sources
-  executable / multi_step_reachable (exists-trace): verified      # sanity: the Step loop CAN chain
-  heal_secret_secret / root_secrecy / step_input_is_root          # reuse + induction helpers, verified
-  post_compromise_security (all-traces): verified                 # UNBOUNDED PCS (given the above)
-  forward_secrecy          (all-traces): verified                 # UNBOUNDED FS, under modeled one-wayness
+tamarin-prover ratchet-unbounded.spthy --prove          # ~0.16 s, no oracle, no --auto-sources
+  executable                           (exists-trace): verified (4 steps)
+  multi_step_reachable                 (exists-trace): verified (4 steps)   # sanity: Step CAN chain
+  fold_in_chain_reachable              (exists-trace): verified (8 steps)   # NEW: step -> FOLD -> step
+  heal_secret_secret                   (all-traces):   verified (56 steps)  # reuse helper
+  root_secrecy                         (all-traces):   verified (81 steps)  # reuse + induction helper
+  step_input_is_root                   (all-traces):   verified (10 steps)  # reuse + induction helper
+  fold_input_is_root                   (all-traces):   verified (10 steps)  # NEW helper
+  post_compromise_security             (all-traces):   verified (8 steps)   # UNBOUNDED PCS
+  forward_secrecy                      (all-traces):   verified (5 steps)   # UNBOUNDED FS
+  post_compromise_security_across_fold (all-traces):   verified (8 steps)   # NEW: PCS ACROSS AN EPOCH
+  forward_secrecy_across_fold          (all-traces):   verified (5 steps)   # NEW: FS ACROSS AN EPOCH
 ```
+
+**Phase 5 update — the epoch fold is a first-class root input here.** Design §6.1 required this model to
+"model both step-DH and epoch-KEM inputs and show FS/PCS across epoch boundaries". The new `EpochFold`
+rule does exactly that: structurally it is the same shape as `Step` (`root' = one-way(root, fresh
+secret)`), which is *why* the induction still closes — `!Mix` and `Derive` are agnostic to *which* kind
+of secret was mixed, so every root, step-born or fold-born, is covered by the same arguments. It
+interleaves freely with `Step`, so the lemmas range over chains with arbitrarily many folds at arbitrary
+positions (including none); `fold_in_chain_reachable` witnesses step→fold→step.
+
+**All seven original lemmas still verify.** Step counts *moved* (`heal_secret_secret` 9→56,
+`root_secrecy` 18→81, `executable` 3→4, `step_input_is_root` 9→10) because every root is now reachable by
+two rules rather than one, so the induction has a second case everywhere — the properties are unchanged,
+and PCS/FS still close at 8/5. **Again: no post-quantum claim lives here.** No attacker in this file
+breaks CDH; `~ss` is just another unguessable secret. These lemmas say the fold *preserves* the chain's
+existing FS/PCS — adding it breaks nothing. The PQ claim is §5's alone.
 
 The `reuse` + `use_induction` helper lemmas are the standard technique that closes the unbounded loop
 *without* a proof oracle. **Forward secrecy** here holds *because the KDF is modeled as one-way* (encoded
@@ -175,6 +217,207 @@ by omitting an inverse `Derive` rule): the lemma validates that the key *schedul
 under that assumption — it does not prove the KDF's one-wayness itself (that is the primitive's property,
 delegated). Message confidentiality is the standard corollary: a message under `msgK(rk)` with perfect
 AEAD is confidential iff its root `rk` is secret, which is exactly `root_secrecy`.
+
+---
+
+## 5. PQ post-compromise security of the epoch fold — `ratchet-pq-epoch.spthy` (+ 2 controls)
+
+This is the **continuous-PQ-ratchet Phase 5 gate** (`design/continuous-pq-ratchet.md` §6.2, §7). It is
+a **new model under a new attacker**, not a re-run: every lemma in §2/§4 is proved against a Dolev-Yao
+attacker for whom **CDH holds**, and the entire purpose of the epoch fold is to defend an attacker for
+whom it does **not** (a CRQC).
+
+### 5.1 Why the obvious lemma would have been worthless
+
+The tempting statement — *"under an adversary that breaks X25519 but not ML-KEM, a post-fold message
+stays secret"* — is **vacuous**. Option A's pairing seed already binds every root to the pairing ML-KEM
+secret, so that adversary can never compute any root **fold or no fold**; the lemma would verify
+identically on a build with the fold deleted. It would distinguish nothing.
+
+So the model instead reproduces the exact gap of design §1.2 — the one thing that spends the seed's
+protection:
+
+1. **`Reveal_root`** — a classical **state compromise** of a *live, pre-fold* root. The revealed root
+   already embeds the pairing seed, so the seed's hardening is spent; only entropy mixed in *afterward*
+   can help. (No rule ever reveals a *post*-fold root, so the lemma cannot be discharged by revealing
+   its own target.)
+2. **`Reveal_dh`** — the **CRQC**: the adversary is handed every X25519 ratchet *exponent*. Granting the
+   exponents is granting the discrete logs, so it rebuilds `('g'^~a)^~b` itself — CDH is broken **for it
+   alone**, while the ML-KEM arm (the `asymmetric-encryption` builtin: no inverse, no deconstruction)
+   stays hard. This is how "breaks CDH but not ML-KEM" is expressed in a tool whose `dh` builtin has no
+   CDH switch.
+
+The adversary is thereby handed the pre-fold root *and* every classical secret after it, so it computes
+every root the classical ratchet produces. `anchor_root_is_compromised` **proves that** (`exists-trace`,
+verified): the adversary really does compute the last root before the fold. The fold is the only thing
+left standing.
+
+### 5.2 The negative control is the result
+
+A green tick on the fold model means **nothing** by itself. `ratchet-pq-epoch-nofold.spthy` is the same
+model with **one line changed** — verify that mechanically, since a control that drifted from the model
+it controls would prove nothing:
+
+```bash
+diff <(sed -n '/^begin/,$p' ratchet-pq-epoch.spthy) \
+     <(sed -n '/^begin/,$p' ratchet-pq-epoch-nofold.spthy)
+#   -        rkf = kdfEpoch(rkn, ~ss)
+#   +        rkf = rkn                   # *** THE FOLD IS REMOVED ***
+```
+
+**Measured** (`tamarin-prover 1.12.0` + Maude 3.5.1; all wellformedness checks pass in both):
+
+```
+tamarin-prover ratchet-pq-epoch.spthy --prove                    # ~0.44s
+  executable                  (exists-trace): verified (3 steps)
+  pq_pcs_premise_reachable    (exists-trace): verified (6 steps)   # reveal+CRQC+send IS reachable
+  epoch_secret_secret         (all-traces):   verified (4 steps)
+  anchor_root_is_compromised  (exists-trace): verified (8 steps)   # the pre-fold root IS broken
+  pq_post_compromise_security (all-traces):   verified (8 steps)   # *** THE CRUX ***
+
+tamarin-prover ratchet-pq-epoch-nofold.spthy --prove              # ~0.40s   NEGATIVE CONTROL
+  pq_post_compromise_security (all-traces):   falsified - found trace (7 steps)   # *** EXPECTED RED ***
+  (executable / pq_pcs_premise_reachable / epoch_secret_secret / anchor_root_is_compromised: verified,
+   3 / 6 / 4 / 8 steps — identical to the fold model)
+```
+
+The control **falsifies**, and the trace Tamarin returns is precisely the §1.2 gap: revealed pre-fold
+root + broken CDH ⇒ the adversary walks the classical chain forward and reads the message. **The fold is
+load-bearing, and the lemma is therefore non-vacuous.** Note `epoch_secret_secret` still *verifies* in
+the control — the epoch secret is still unguessable there, it is simply never mixed into anything. Only
+the falsified lemma beside it reveals that a secret you don't fold in buys you nothing.
+
+> **Running the prover materially fixed this model, again.** The first draft used a free function
+> `kemct/2` and pattern-matched `ss` out of it. **All five lemmas "verified"** — while Tamarin's
+> message-derivation check **failed** (`Rule Epoch_decaps_verify: Failed to derive Variable(s): ss`) and
+> warned *"the analysis results might be wrong"*. That was unintended pattern matching: the rule
+> extracted a value from a term nothing can invert. Those green ticks were discarded, not shipped; the
+> KEM was remodelled on the `asymmetric-encryption` builtin (a KEM *is* PKE of a fresh random secret)
+> with the tag check as an explicit `Eq` restriction. Same lesson as the circular header key in §2.
+
+### 5.3 What this does NOT prove — the assumption that bounds it
+
+**`ratchet-pq-epoch.spthy` assumes an *authentic* rekey channel (its abstraction A1).** The KEM
+ciphertext and both confirmation tags are `Out()`-put — so the result genuinely holds against an
+adversary *holding* them — but they are **delivered** over `Auth_*` facts, modelling the MK-sealed
+ratchet chain the chunks ride inside (design §4.2's session/transcript binding).
+
+**That assumption is in tension with the very compromise the lemma models**, and this PR does not paper
+over it. An adversary that revealed a live root can derive that chain's message keys and therefore
+**forge the seal**. `ratchet-pq-epoch-hijack.spthy` removes A1 — sealing the control frames under
+`msgK(rk)` explicitly, exactly as the implementation does — and **finds the attack**:
+
+```
+tamarin-prover ratchet-pq-epoch-hijack.spthy --prove              # ~1.3s
+  executable                  (exists-trace): verified  (13 steps)  # honest rekey, NO compromise
+  pq_active_hijack_witness    (exists-trace): verified  (23 steps)  # *** THE ATTACK IS FOUND ***
+  pq_post_compromise_security (all-traces):   falsified (14 steps)  # the A1-free statement
+```
+
+The adversary suppresses the responder's ciphertext and injects its own, `aenc('evil', pk(ek))`, sealed
+under the compromised chain's key. ML-KEM's implicit rejection means decaps doesn't throw; **the
+confirmation tag does not save it** — the tag proves knowledge of `ss`, and the attacker genuinely
+*knows* `'evil'`, so `confirmTag('evil','r')` verifies. The fold completes, is confirmed, and hardens
+nothing. It needs **both** the revealed root (to forge the seal) *and* the CRQC (to compute the anchor
+root) — neither alone suffices.
+
+**This is not a new vulnerability and not a finding against the implementation.** It is the standard,
+well-known caveat on post-compromise security: an *active* adversary holding session state can MITM from
+that moment on, and no fresh key material re-injected into a hijacked session heals it, because the
+adversary controls what "fresh" material the victim accepts. Signal's DH PCS carries the identical
+caveat; the fold neither creates nor cures it. It is also **not a defect in `EpochKdf`**: no tag keyed on
+`ss` can distinguish "the peer knows `ss`" from "the attacker chose `ss`". Deppis's **existing** classical
+PCS results (§2, §4) sit behind the same assumption — they model a *reveal*, not an *injection*.
+
+It is recorded here because **design §6.2's proposed lemma text does not state it**, and a reader could
+otherwise over-read the green tick. **The property actually proved is:**
+
+> PQ post-compromise security against an adversary that is **active before** the rekey (it compromised
+> the state) and **passive on** the rekey exchange itself — including one that holds the KEM ciphertext
+> and both confirmation tags.
+
+That is a real and useful property — it is exactly the *harvest-then-go-quiet* adversary, and the
+realistic HNDL threat. It is **not** "PQ-PCS against any post-compromise adversary" and must never be
+quoted as such.
+
+### 5.4 Other abstractions (in the model header as A1–A5)
+
+- **A2 — one shared root chain, roles abstracted.** The real peers traverse one chain at *offset*
+  positions and are never simultaneously on the same root — the whole reason the fold is anchored to a
+  root **index** and the tags cannot be keyed on `RK_epoch` (§4.2 amendment;
+  `DoubleRatchet.scala:186-208`). The model collapses this to one chain object, so it **assumes** rather
+  than proves that both sides derive the byte-identical `RK_epoch` at the anchor. That is a
+  liveness/agreement property, exercised by Phase 4's tests, **not** here.
+- **A3 — chunking is transport.** The ~9-frame pubkey / ~8-frame ciphertext transfers are single atomic
+  messages; ARQ/loss/reorder are discharged by the ARQ property tests.
+- **A4 — not modelled:** the ~19-frame traffic pattern (§6 below), the rekey state machine's
+  `Committed`/`Stranded` liveness (design §8.2), key wiping, and all side-channel/constant-time
+  properties (Constitution II — out of scope for *every* Tamarin artifact here).
+- **A5 — bounded:** one compromise, one rekey, one anchor step, one post-fold send. The unbounded
+  structural half is §4, which now carries the fold; the two are **not mechanically composed**.
+
+---
+
+## 6. Traffic pattern of the ~19-frame rekey burst — **NOT formally discharged**
+
+Design §5 and §9 Q3 ask whether a rekey — a burst of ~19 frames — is distinguishable under the
+cover-traffic model. **This PR does not discharge that question, and does not claim to.** What follows is
+the honest reduction, with the boundary marked.
+
+### 6.1 What Tamarin covers here — and a limit worth stating plainly
+
+`unlinkability.spthy` **re-verifies unchanged**, as expected: the epoch fold changes no wire format (KEM
+material rides the MK-sealed *inner block*, never the header; the header is still
+`DHs.pub(32) ‖ PN(4) ‖ Ns(4)` and the frame is still 256 B).
+
+```
+tamarin-prover --diff unlinkability.spthy           --prove   # Observational_equivalence: verified (2315 steps), ~2.7s
+tamarin-prover --diff unlinkability-cleartext.spthy --prove   # falsified (10 steps)  ← negative control still has teeth
+```
+
+But note what that result **is not**. **Tamarin's symbolic terms have no length, no timing, and no
+count.** So `unlinkability.spthy` does *not* prove the 256-byte size uniformity that §5's frame-level
+argument rests on — that is a **code invariant** (`Frame.Size = 256`, `Frame.scala:3-11`) plus tests, not
+a Tamarin result. Tamarin proves that *given* two frames the attacker cannot correlate their sealed
+contents. Length equality is an input to that, not an output. A rekey-chunk frame being
+indistinguishable from a content frame follows from the same argument **only because** both are 256 B
+and both seal an opaque inner block — and the first of those two facts lives in the code, not the model.
+
+### 6.2 The reduction (argued, grounded in the engine)
+
+The burst is unobservable **iff** rekey frames obey the same per-round budget as content frames. The
+engine's FR-012 invariants make each round's observable **constant by construction**:
+
+| Per-round observable | Mechanism | Code |
+|---|---|---|
+| Exactly **one 256-B store write** | idle rounds write a **cover frame**; a rekey chunk *replaces* that write under the pair's round token (design §3.1 a-i) | `Engine.scala:1338-1350` ("Exactly ONE store write per round … one same-shaped 256-byte write per round either way (active/idle uniform)") |
+| Exactly **one notify signal** | real to a peer, or a **decoy** to a per-client `voidNotifyLabel` nobody fetches | `Engine.scala:221-226`, `:1477-1480` |
+| Exactly **one retrieve** | **cover reads** under a `coverKey`-derived token when there is nothing to fetch | `Engine.scala:1491-1493`, `:1602-1603` |
+| Exactly **one digest fetch** | one PING digest fetch per round | `Engine.scala:1336-1337` |
+
+If those hold, then **the store's per-round view is identical whether the pair is idle, chatting, or
+rekeying** — so there is no "run of busy rounds" to observe in the first place, and the ~19-frame burst
+has no signature. Under (a-i) a chunk write *replaces* a cover write; under the invariant, replacement is
+not observable.
+
+### 6.3 What is therefore NOT covered — read this before quoting §6.2
+
+- **No model checks any of this.** §6.2 is an *argument over code invariants*, not a machine-checked
+  result. It is exactly as strong as those invariants, and their enforcement for *rekey* frames
+  specifically is an implementation property verified by tests, not by anything in this directory.
+- **Tamarin structurally cannot discharge it.** Timing, volume, round-counting and message length are
+  all outside its symbolic model. Discharging this properly needs a different formalism (a quantitative
+  / probabilistic traffic model), not another `.spthy`. That is unbudgeted work, not a small edit.
+- **Scheduler perturbation is the live risk.** The argument fails the moment a rekey causes a round to
+  deviate — an extra write, a delayed notify, a skipped cover read. Design §3.1's (a-ii) multiplexer and
+  the head-of-line tradeoff (§9 Q2) are exactly where that could creep in.
+- **Endpoint-observable latency is out of scope entirely.** A rekey occupying the single stop-and-wait
+  in-flight slot delays user messages (§9 Q2). That is invisible to the *store* under the invariant, but
+  it is not nothing — it is simply not a property any artifact here models.
+- **The `Ns`/`MaxSkip` interaction (§9 Q5) is unexamined** by every model here.
+
+**Bottom line: design §9 Q3 remains OPEN.** The per-frame half is machine-checked (and unchanged); the
+timing/volume half is argued from engine invariants and **not verified**.
 
 ---
 
@@ -188,3 +431,46 @@ AEAD is confidential iff its root `rk` is secret, which is exactly `root_secrecy
   not substitutes — signs off, and the side-channel/constant-time properties (Constitution II) are not
   in scope of either artifact: on the JVM they are not achievable at the bytecode level and are left to
   the vetted native primitives and the Rust sidecar (documented in dh-ratchet.md §9).
+
+### Labeling status after Phase 5 (Constitution IV)
+
+**`DEV, NO METADATA PRIVACY` stands. This PR changes no label and no label literal** (`Privacy.scala`
+is untouched). Design §6.3 gates any labeling change on formal analysis **and** human security review.
+Phase 5 delivers **only the first**; the second is a human's call and cannot be discharged from inside
+this work.
+
+**What the proofs now support** — and the precise wording that is defensible:
+
+> For a session that completes an epoch fold, a message sent after the fold retains post-compromise
+> secrecy **against a CRQC**, even though a live pre-fold root was compromised and every X25519 secret
+> is known to the adversary — **provided that adversary did not actively inject into the rekey
+> exchange itself**. Machine-checked, symbolically, and shown non-vacuous by a negative control that
+> falsifies without the fold.
+
+**What they do NOT support** (each of these would be an overclaim):
+
+1. **Not** PQ-PCS against an *active* post-compromise adversary — §5.3 *finds that attack* and it is
+   real (though a standard, well-known PCS caveat, not a defect in this implementation).
+2. **Not** any *metadata-privacy* claim. The rekey traffic pattern (design §9 Q3) is **not discharged**
+   (§6) and Tamarin structurally cannot discharge it. The unlinkability result is per-frame only, and
+   even its size-uniformity premise is a code invariant, not a Tamarin output.
+3. **Not** an implementation claim. Every result here is about the **design**, symbolically. That the
+   shipped `EpochKdf`/`DoubleRatchet` faithfully realize the modelled fold is the job of the ScalaCheck
+   model + KATs (§1), and abstraction **A2** in particular *assumes* the both-sides-same-`RK_epoch`
+   agreement rather than proving it.
+4. **Not** proof of the primitives. ML-KEM is idealized as an independent hard problem; symbolic
+   models say nothing about ML-KEM's actual cryptanalytic standing.
+5. **Not** side-channel/constant-time coverage (Constitution II) — out of scope for every artifact here.
+
+**What a labeling change would still require, beyond this PR:**
+
+- **Human security review** of these models — *especially* whether abstraction **A1** (§5.3) is an
+  acceptable assumption for the threat model actually being claimed, since it is the single load-bearing
+  assumption under the headline result.
+- A **decision on design §9 Q3** (traffic pattern): either a quantitative traffic model, or an explicit,
+  reviewed acceptance of the §6.2 argument-from-invariants with its residuals.
+- A **decision on §9 Q1** (cadence `N`) — it bounds the PQ-PCS window and is a threat-model call, not a
+  code default.
+- Resolution of the **default-pairing** question: `addBuddy` still defaults to the **classical** path
+  (`Engine.scala:302-303`), so a fold's benefit depends on which pairing path ran (design §6.3).
+- The **Constitution I** construction-amendment review of the hand-assembled construction as a whole.

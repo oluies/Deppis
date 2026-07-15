@@ -23,17 +23,31 @@ theory DeppisRatchetUnbounded
   unguessability of the step secret `~s` itself is the CDH fact discharged in ratchet.spthy.
 
   Run:  tamarin-prover ratchet-unbounded.spthy --prove
-  VERIFICATION STATUS: MACHINE-CHECKED — all lemmas VERIFIED (tamarin-prover 1.12.0, ~0.1s, no oracle
+  VERIFICATION STATUS: MACHINE-CHECKED — all lemmas VERIFIED (tamarin-prover 1.12.0, ~0.16s, no oracle
   / no --auto-sources):
-      executable               (exists-trace): verified (3 steps)
-      multi_step_reachable     (exists-trace): verified (4 steps)   -- sanity: the Step loop CAN chain
+      executable                           (exists-trace): verified (4 steps)
+      multi_step_reachable                 (exists-trace): verified (4 steps)  -- sanity: Step CAN chain
                                                                     -- (unbounded coverage comes from the
                                                                     --  use_induction all-traces lemmas)
-      heal_secret_secret       (all-traces):   verified (9 steps)
-      root_secrecy             (all-traces):   verified (18 steps)
-      step_input_is_root       (all-traces):   verified (9 steps)
-      post_compromise_security (all-traces):   verified (8 steps)   -- UNBOUNDED PCS
-      forward_secrecy          (all-traces):   verified (5 steps)   -- UNBOUNDED FS (one-wayness)
+      fold_in_chain_reachable              (exists-trace): verified (8 steps)  -- step -> FOLD -> step
+      heal_secret_secret                   (all-traces):   verified (56 steps)
+      root_secrecy                         (all-traces):   verified (81 steps)
+      step_input_is_root                   (all-traces):   verified (10 steps)
+      fold_input_is_root                   (all-traces):   verified (10 steps)
+      post_compromise_security             (all-traces):   verified (8 steps)  -- UNBOUNDED PCS
+      forward_secrecy                      (all-traces):   verified (5 steps)  -- UNBOUNDED FS (one-wayness)
+      post_compromise_security_across_fold (all-traces):   verified (8 steps)  -- PCS ACROSS AN EPOCH
+      forward_secrecy_across_fold          (all-traces):   verified (5 steps)  -- FS ACROSS AN EPOCH
+
+  CONTINUOUS-PQ EPOCH FOLD (Phase 5, design/continuous-pq-ratchet.md §6.1: the model "must model both
+  step-DH and epoch-KEM inputs and show FS/PCS across epoch boundaries"). The `EpochFold` rule adds the
+  second kind of root input and four lemmas are new. All SEVEN original lemmas still verify with the
+  fold present; their step counts MOVED (executable 3 -> 4, heal_secret_secret 9 -> 56, root_secrecy
+  18 -> 81, step_input_is_root 9 -> 10) because the search space grew — every root is now reachable by
+  two rules rather than one, so the induction has a second case everywhere. The properties themselves
+  are unchanged, and PCS/FS still close at 8/5 steps.
+  *** NOTHING IN THIS FILE IS A POST-QUANTUM RESULT *** — see the scope note on the EpochFold rule.
+  The PQ claim is ratchet-pq-epoch.spthy's, with its negative control.
   The `reuse`/`use_induction` helper lemmas (root_secrecy, step_input_is_root, heal_secret_secret) are
   the standard technique that lets the proof close automatically over the unbounded loop without a proof
   oracle (the literal `kdfRK(rk,~s)` term version does NOT terminate under Tamarin's heuristics — this
@@ -56,6 +70,29 @@ rule Step:
   --[ Step(rk, ~rk2), Heal(~s, rk), Root(~rk2) ]->
     [ St_Root(~rk2)
     , !Mix(~rk2, rk, ~s)
+    , !Revealable(rk) ]
+
+// ONE EPOCH FOLD — the continuous-PQ addition (design/continuous-pq-ratchet.md §4.1; implemented as
+// EpochKdf.kdfEpoch, applied by DoubleRatchet.advanceRoot/applyPendingFold at the root-index anchor).
+// This is the SECOND KIND OF ROOT INPUT design §6.1 says the unbounded model must carry: alongside the
+// per-step DH secret `~s`, a fold consumes the current root and an epoch KEM secret `~ss` to produce
+// the next root. Structurally it is the same shape as `Step` — root' = one-way(root, fresh secret) —
+// which is exactly WHY the induction still closes: `!Mix` and the `Derive` rule below are agnostic to
+// WHICH kind of secret was mixed, so every root on the chain, step-born or fold-born, is covered by the
+// same `root_secrecy` / FS / PCS arguments. Repeatable and freely interleavable with `Step`, so the
+// lemmas range over chains with arbitrarily many folds at arbitrary positions (including none).
+//
+// NOTE ON SCOPE: this models the fold's PLACE IN THE KEY SCHEDULE, not the PQ threat model. Here `~ss`
+// is just another unguessable secret; the model does not distinguish a CRQC from a classical attacker
+// (no lemma here breaks CDH). The claim that `~ss` specifically resists a quantum adversary — the
+// entire point of the fold — is ratchet-pq-epoch.spthy's, with its negative control. What this file
+// adds is that folding does not DAMAGE the unbounded FS/PCS the chain already had (design §6.1's
+// "must show FS/PCS across epoch boundaries").
+rule EpochFold:
+    [ St_Root(rk), Fr(~rk2), Fr(~ss) ]
+  --[ Fold(rk, ~rk2), Heal(~ss, rk), Root(~rk2) ]->
+    [ St_Root(~rk2)
+    , !Mix(~rk2, rk, ~ss)
     , !Revealable(rk) ]
 
 // Adversary FORWARD-derives a new root from the old root AND the step secret (the KDF is computable
@@ -87,6 +124,14 @@ lemma multi_step_reachable:
   exists-trace
   "Ex a b c #i #j. Step(a, b)@i & Step(b, c)@j & i < j"
 
+// Sanity / non-vacuity for the fold lemmas: an EPOCH FOLD is reachable IN THE MIDDLE of an ordinary
+// ratchet chain — step, then fold, then step — so the fold-crossing lemmas below quantify over a
+// scenario that actually occurs, and the fold genuinely interleaves with DH stepping rather than
+// sitting at some unreachable corner of the model.
+lemma fold_in_chain_reachable:
+  exists-trace
+  "Ex a b c d #i #j #k. Step(a, b)@i & Fold(b, c)@j & Step(c, d)@k & i < j & j < k"
+
 // The per-step healing secret is never learned by the adversary (fresh, never output). [reuse] so the
 // secrecy lemmas can cut every `Derive` branch (Derive needs the step secret, which the adversary lacks).
 lemma heal_secret_secret [reuse]:
@@ -103,6 +148,11 @@ lemma root_secrecy [reuse]:
 // tracing the root's origin backward through the chain (the search that otherwise does not terminate).
 lemma step_input_is_root [reuse, use_induction]:
   "All rk rk2 #i. Step(rk, rk2)@i ==> (Ex #j. Root(rk)@j & j < i)"
+
+// The same structural fact for the EPOCH FOLD: a fold's input root was created earlier, by Init, a
+// prior step, or a prior fold. Hands forward_secrecy_across_fold the `Root(rk)` fact it needs.
+lemma fold_input_is_root [reuse, use_induction]:
+  "All rk rk2 #i. Fold(rk, rk2)@i ==> (Ex #j. Root(rk)@j & j < i)"
 
 // POST-COMPROMISE SECURITY (unbounded): for ANY step in an arbitrarily long chain, revealing the
 // PRE-heal root rk does not expose the POST-heal root rk2 (unless rk2 itself is later revealed). Holds
@@ -122,6 +172,39 @@ lemma post_compromise_security:
 lemma forward_secrecy [use_induction]:
   "All rk rk2 #h #r.
      ( Step(rk, rk2)@h
+     & RevealCK(rk2)@r
+     & not (Ex #r2. RevealCK(rk)@r2) )
+     ==> not (Ex #k. K(rk)@k)"
+
+// ---------------------------------------------------------------------------------------------
+// FS + PCS ACROSS AN EPOCH BOUNDARY (design §6.1: the unbounded model "must model both step-DH and
+// epoch-KEM inputs and show FS/PCS across epoch boundaries"). These are the fold-crossing mirrors of
+// the two lemmas above, and they are what makes the epoch fold a first-class root input here rather
+// than a rule nothing quantifies over.
+//
+// READ THE SCOPE NOTE ON THE `EpochFold` RULE BEFORE QUOTING THESE. They say the fold PRESERVES the
+// chain's existing FS/PCS — i.e. adding the fold breaks nothing — under the SAME modelled
+// unguessability of the mixed secret that `heal_secret_secret` gives every other step. They do NOT
+// say the fold provides POST-QUANTUM security: no attacker in this file breaks CDH. The PQ claim is
+// ratchet-pq-epoch.spthy's alone, and only alongside its negative control.
+// ---------------------------------------------------------------------------------------------
+
+// PCS ACROSS THE FOLD: revealing the PRE-fold root does not expose the POST-fold root. (In the PQ
+// model this is the property that matters against a CRQC; here it is the classical statement that the
+// fold heals at least as well as a DH step does.)
+lemma post_compromise_security_across_fold:
+  "All rk rk2 #h #r.
+     ( Fold(rk, rk2)@h
+     & RevealCK(rk)@r
+     & not (Ex #r2. RevealCK(rk2)@r2) )
+     ==> not (Ex #k. K(rk2)@k)"
+
+// FS ACROSS THE FOLD: revealing the POST-fold root does not expose the PRE-fold root it was folded
+// from — so an epoch boundary does not become a backward-leaking seam in the chain. Same one-wayness
+// modelling caveat as `forward_secrecy` above (encoded by the absence of an inverse Derive rule).
+lemma forward_secrecy_across_fold [use_induction]:
+  "All rk rk2 #h #r.
+     ( Fold(rk, rk2)@h
      & RevealCK(rk2)@r
      & not (Ex #r2. RevealCK(rk)@r2) )
      ==> not (Ex #k. K(rk)@k)"

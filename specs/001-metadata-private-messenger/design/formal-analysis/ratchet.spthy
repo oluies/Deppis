@@ -5,12 +5,28 @@ theory DeppisDoubleRatchet
 
   ============================================================================================
   VERIFICATION STATUS: MACHINE-CHECKED — all lemmas VERIFIED.
-    tamarin-prover 1.12.0 + Maude 3.5.1:  `tamarin-prover ratchet.spthy --prove`
-      executable               (exists-trace): verified (7 steps)
-      message_secrecy          (all-traces):   verified (37 steps)
-      post_compromise_security (all-traces):   verified (16 steps)
+    tamarin-prover 1.12.0 + Maude 3.5.1:  `tamarin-prover ratchet.spthy --prove`   (~0.8s)
+      executable                   (exists-trace): verified (7 steps)
+      pcs_premise_reachable        (exists-trace): verified (8 steps)
+      message_secrecy              (all-traces):   verified (41 steps)
+      post_compromise_security     (all-traces):   verified (21 steps)
+      epoch_fold_premise_reachable (exists-trace): verified (9 steps)
+      pcs_with_epoch_fold          (all-traces):   verified (7 steps)
     All wellformedness checks pass; no `sorry`/oracle/reuse lemma needed (the model is bounded
     to two steps, so it closes automatically). See README.md for scope + limitations.
+
+  CONTINUOUS-PQ EPOCH FOLD (Phase 5, design/continuous-pq-ratchet.md §6.1). The B_epoch_fold /
+  B_send2_pq rules add the epoch fold to this model; the last two lemmas are new. The four
+  ORIGINAL lemmas still verify with the fold present — their step counts MOVED (message_secrecy
+  37 -> 41, post_compromise_security 16 -> 21, pcs_premise_reachable 6 -> 8) purely because the
+  model grew two rules; the properties are unchanged.
+  *** NOTHING IN THIS FILE IS A POST-QUANTUM RESULT. *** This model's attacker is the classical
+  Dolev-Yao attacker for whom CDH HOLDS, so the fold is, to it, merely one more unguessable
+  secret. What this file shows is that the fold does not DAMAGE the secrecy/PCS already proved
+  (design goal G1). The actual PQ claim — the breaks-CDH-but-not-ML-KEM attacker — lives in
+  ratchet-pq-epoch.spthy, and is meaningful only alongside its negative control
+  (ratchet-pq-epoch-nofold.spthy, which MUST falsify) and its hijack scope control
+  (ratchet-pq-epoch-hijack.spthy).
   NOTE: running the prover materially FIXED the model — it caught (a) a circular header-key
   derivation, (b) a free-variable scoping bug in the PCS lemma, and (c) an over-broad PCS
   quantifier that let `m2` range over step-1 messages. An "authored but unchecked" model would
@@ -51,7 +67,7 @@ begin
 
 builtins: diffie-hellman, symmetric-encryption
 
-functions: kdfRK/2, kdfCK/1, msgK/1
+functions: kdfRK/2, kdfCK/1, msgK/1, kdfEpoch/2
 
 /* Bootstrap: a shared content root established out of band (the handshake, analysed elsewhere). */
 rule Bootstrap:
@@ -92,6 +108,37 @@ rule B_send2:
   --[ Send(~m2), SecretMsg(~m2), ProtectedBy(~m2, rk2), HealedSend(~m2, ~b) ]->
     [ Out( senc{ '1', 'g'^~b }( kdfRK(~cr, 'hkb') ) )   // header under the responder's bootstrap HK
     , Out( senc{ ~m2 }( msgK(rk2) ) ) ]
+
+/* CONTINUOUS-PQ EPOCH FOLD (design/continuous-pq-ratchet.md §4.1; implemented as EpochKdf.kdfEpoch,
+   applied by DoubleRatchet.advanceRoot/applyPendingFold at the root-index anchor). Bob folds a hybrid
+   KEM epoch secret into the LIVE root of the healed chain: rkE = kdfEpoch(rk2, ~ss), and then replies
+   on the PQ-hardened root. This is design §6.1's "add the kdfEpoch rule ... add lemma coverage that a
+   heal *plus* an epoch fold still heals".
+
+   ABSTRACTION — READ BEFORE QUOTING. `~ss` is modelled as a fresh secret that is never published,
+   i.e. the KEM exchange that produces it (chunk transport, encaps/decaps, the confirmation tags) is
+   NOT modelled here; this rule models only WHERE the fold sits in the key schedule. The exchange, the
+   §4.2-amended tag keying, and — crucially — the breaks-CDH-but-not-ML-KEM attacker the fold actually
+   exists to defeat are all in ratchet-pq-epoch.spthy, together with the negative control that proves
+   the fold load-bearing. NOTHING in THIS file breaks CDH, so nothing here is a post-quantum result:
+   the fold is just another unguessable secret to this model's classical Dolev-Yao attacker. What this
+   file adds is that the fold does not DAMAGE the bounded secrecy/PCS the ratchet already had. */
+rule B_epoch_fold:
+    let rkE = kdfEpoch(rk2, ~ss)
+    in
+    [ B_chain(~cr, Apub, ~b, rk2), Fr(~ss) ]
+  --[ EpochFold(rk2, rkE), FoldSecret(~ss) ]->
+    [ B_chain_pq(~cr, Apub, ~b, rkE) ]
+
+/* Step 2' — Bob replies on the healed AND PQ-folded chain. Mirrors B_send2 exactly, but the message
+   is protected by msgK(rkE). It still carries HealedSend(~m2, ~b), so the ORIGINAL
+   post_compromise_security lemma covers this path too (a fold must not cost the classical PCS the
+   heal already gave — design goal G1). */
+rule B_send2_pq:
+    [ B_chain_pq(~cr, Apub, ~b, rkE), Fr(~m2) ]
+  --[ Send(~m2), SecretMsg(~m2), ProtectedBy(~m2, rkE), HealedSend(~m2, ~b), FoldedSend(~m2, rkE) ]->
+    [ Out( senc{ '1', 'g'^~b }( kdfRK(~cr, 'hkb') ) )
+    , Out( senc{ ~m2 }( msgK(rkE) ) ) ]
 
 /* Adversary STATE compromise: reveal a published chain root. The Dolev-Yao adversary already owns
    the network (In/Out); this adds key compromise so FS/PCS can be phrased. RevealCK(ck) leaks ck. */
@@ -134,6 +181,34 @@ lemma message_secrecy:
 lemma post_compromise_security:
   "All m2 b rk1 #s #h #r.
      ( HealedSend(m2, b)@s
+     & Heal(b, rk1)@h
+     & RevealCK(rk1)@r
+     & r < h )
+     ==> not (Ex #k. K(m2)@k)"
+
+// Non-vacuity for pcs_with_epoch_fold: the reveal -> heal -> EPOCH FOLD -> send scenario is actually
+// reachable, so the all-traces lemma below is not vacuously true. Mirrors pcs_premise_reachable.
+lemma epoch_fold_premise_reachable:
+  exists-trace
+  "Ex m2 rkE rk2 b rk1 #s #f #h #r.
+     ( FoldedSend(m2, rkE)@s
+     & EpochFold(rk2, rkE)@f
+     & Heal(b, rk1)@h
+     & RevealCK(rk1)@r
+     & r < h
+     & h < f
+     & f < s )"
+
+// A HEAL PLUS AN EPOCH FOLD STILL HEALS (design §6.1). A message sent on a chain that was healed by a
+// fresh DH `b` AND THEN PQ-folded stays secret despite the pre-heal state compromise. The point of
+// this lemma is NOT that the fold adds strength here — against this file's classical attacker it
+// cannot, since PCS already held — but that inserting the fold into the live root does not BREAK the
+// healing that was already proved (goal G1: "a broken/absent KEM must not reduce today's classical
+// PCS"). The PQ strength claim lives in ratchet-pq-epoch.spthy, under an attacker this file lacks.
+lemma pcs_with_epoch_fold:
+  "All m2 rkE b rk1 #s #h #r.
+     ( FoldedSend(m2, rkE)@s
+     & HealedSend(m2, b)@s
      & Heal(b, rk1)@h
      & RevealCK(rk1)@r
      & r < h )

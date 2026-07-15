@@ -1,0 +1,196 @@
+theory DeppisPqEpochHijack
+/*
+  *** THE HONESTY CONTROL: what the epoch fold does NOT buy. THIS MODEL IS EXPECTED TO FALSIFY. ***
+
+  ratchet-pq-epoch.spthy proves PQ post-compromise security under abstraction A1: the rekey control
+  frames are delivered over an AUTHENTIC channel, modelling the MK-sealed ratchet chain the KEM
+  chunks actually ride inside. A1 is an ASSUMPTION, and it is in tension with the very compromise
+  that lemma models — an adversary that revealed a live root can derive that chain's message keys
+  and therefore FORGE the seal.
+
+  This file removes A1 and models the seal EXPLICITLY: every rekey control frame travels over the
+  real network, sealed under msgK(rk) of the PRE-FOLD root — which is exactly what the
+  implementation does (the chunks ride in the MK-sealed inner block; design §3.1/§4.2). Nothing
+  else changes. The seal is real, so an adversary WITHOUT the root cannot inject: the hijack below
+  is not "Tamarin lets anyone spoof", it is specifically enabled by the state compromise.
+
+  WHAT IT SHOWS. `pq_active_hijack_witness` is an exists-trace that FINDS the attack:
+    1. the adversary reveals a live pre-fold root (classical state compromise) — so it holds
+       msgK(rk) and can both read and FORGE the rekey control frames;
+    2. it suppresses the responder's genuine ciphertext and injects its OWN — aenc('evil', pk(ek))
+       for a KEM secret 'evil' THAT IT CHOSE — sealed under the compromised chain's key;
+    3. ML-KEM's implicit rejection means decaps does not throw; the initiator recovers 'evil';
+    4. the confirmation tag does NOT save it — the tag proves knowledge of ss, and the adversary
+       genuinely KNOWS 'evil', so confirmTag('evil','r') verifies. (This is the precise limit of
+       what a key-confirmation tag can do. It is not a flaw in EpochKdf: no tag keyed on ss can
+       distinguish "the peer knows ss" from "the attacker chose ss".)
+    5. the initiator folds with the attacker's secret. The fold COMPLETES and is CONFIRMED, and it
+       hardens NOTHING: with the CRQC also supplying the X25519 exponents, the adversary computes
+       rkf = kdfEpoch(kdfRK(rk,dh),'evil') and reads the post-fold message.
+  Note the adversary needs BOTH the revealed root (to forge the seal) AND the CRQC (to compute dh
+  and hence the anchor root). Neither alone suffices, which is why this is the post-compromise
+  active adversary and not a generic break.
+
+  WHY THIS IS NOT A NEW VULNERABILITY. This is the standard, well-known caveat on post-compromise
+  security in the double-ratchet literature: an ACTIVE adversary holding the session state can MITM
+  from that moment on, and no amount of fresh key material re-injected INTO the hijacked session
+  heals it, because the adversary controls what "fresh" material the victim accepts. Signal's DH
+  PCS carries the identical caveat; the epoch fold neither creates nor cures it. Deppis's EXISTING
+  classical PCS results (ratchet.spthy, ratchet-unbounded.spthy) sit behind the same assumption —
+  they model a reveal, not an injection. So this file is not a finding against the implementation;
+  it is a SCOPE STATEMENT that design §6.2's proposed lemma text does not make, and that this Phase
+  must not let a reader silently over-read.
+
+  WHAT THE FOLD DOES BUY, precisely: PQ post-compromise security against an adversary that is
+  ACTIVE BEFORE the rekey (it compromised the state) and PASSIVE ON the rekey exchange itself —
+  including one that holds the ciphertext and both tags. That is ratchet-pq-epoch.spthy. It is a
+  real and useful property (it is exactly the harvest-then-go-quiet adversary), but it is NOT
+  "PQ-PCS against any post-compromise adversary", and it must never be quoted as such.
+
+  MEASURED (tamarin-prover 1.12.0 + Maude 3.5.1, `tamarin-prover ratchet-pq-epoch-hijack.spthy --prove`):
+      executable                  (exists-trace): verified  (13 steps)  -- honest rekey, NO compromise
+      pq_active_hijack_witness    (exists-trace): verified  (23 steps)  *** THE ATTACK IS FOUND ***
+      pq_post_compromise_security (all-traces):   falsified (14 steps)  *** EXPECTED RED ***
+      All wellformedness checks were successful.  (processing time ~1.3s)
+
+  Abstractions A2-A5 of ratchet-pq-epoch.spthy apply here unchanged.
+
+  Run:  tamarin-prover ratchet-pq-epoch-hijack.spthy --prove
+*/
+
+begin
+
+builtins: diffie-hellman, symmetric-encryption, asymmetric-encryption
+
+functions: kdfRK/2, kdfEpoch/2, msgK/1, confirmTag/2
+
+restriction Equality:
+  "All x y #i. Eq(x, y)@i ==> x = y"
+
+/* A live session at the moment of classical state compromise. Both peers sit on the same pre-fold
+   root (abstraction A2), and msgK(rk) is the seal on the chain the rekey frames ride in. */
+rule Live_root:
+    [ Fr(~rkc) ]
+  --[ LiveRoot(~rkc), Root(~rkc) ]->
+    [ St_I_Pre(~rkc), St_R_Pre(~rkc), !RevealableRoot(~rkc) ]
+
+/* Classical state compromise. This is what hands the adversary msgK(rk) — i.e. the ability to
+   FORGE the seal on the rekey control frames, which is the whole difference from A1. */
+rule Reveal_root:
+    [ !RevealableRoot(rk) ]
+  --[ RevealRoot(rk) ]->
+    [ Out(rk) ]
+
+/* The CRQC: every X25519 ratchet exponent. */
+rule Reveal_dh:
+    [ !RevealableDh(x) ]
+  --[ RevealDh(x) ]->
+    [ Out(x) ]
+
+/* Initiator streams its fresh epoch KEM public key, sealed under the live chain (design §3.1). */
+rule Epoch_pub:
+    [ St_I_Pre(rk), Fr(~ek) ]
+  --[ EpochPub(~ek) ]->
+    [ St_I_PubSent(rk, ~ek)
+    , Out( senc{ <'pub', pk(~ek)> }( msgK(rk) ) ) ]
+
+/* Responder encapsulates honestly and seals its ciphertext + /r tag. In the hijack trace this
+   frame is simply SUPPRESSED by the adversary (it owns the network) and replaced by its own. */
+rule Epoch_encaps:
+    [ St_R_Pre(rk), In( senc{ <'pub', pkI> }( msgK(rk) ) ), Fr(~ss) ]
+  --[ Encaps(~ss) ]->
+    [ St_R_Confirming(rk, ~ss)
+    , Out( senc{ <'ct', aenc(~ss, pkI), confirmTag(~ss, 'r')> }( msgK(rk) ) ) ]
+
+/* Initiator decapsulates whatever sealed ciphertext arrives and constant-time verifies the /r tag
+   before anything folds. The check is faithful and it PASSES for the attacker's chosen secret —
+   see the header, step 4. */
+rule Epoch_decaps_verify:
+    let ss = adec(ct, ~ek)
+    in
+    [ St_I_PubSent(rk, ~ek)
+    , In( senc{ <'ct', ct, tagR> }( msgK(rk) ) ) ]
+  --[ Eq(tagR, confirmTag(ss, 'r')), IConfirmed(ss) ]->
+    [ St_I_Confirmed(rk, ss)
+    , Out( senc{ <'tagi', confirmTag(ss, 'i')> }( msgK(rk) ) ) ]
+
+/* Responder verifies the initiator's /i tag and emits the EPOCH_COMMIT frame — the honest committer
+   (design §8.1: the responder is the COMMITTER). Without this rule nothing would ever emit a commit
+   frame honestly, and the `executable` sanity lemma below would only be satisfiable by an ADVERSARY
+   forging one — i.e. the model's "honest path" would secretly require a compromise, and `executable`
+   would be certifying nothing. (That defect was present in this file's first draft.) */
+rule Epoch_commit_R:
+    [ St_R_Confirming(rk, ~ss)
+    , In( senc{ <'tagi', tagI> }( msgK(rk) ) ) ]
+  --[ Eq(tagI, confirmTag(~ss, 'i')), RConfirmed(~ss) ]->
+    [ Out( senc{ <'commit'> }( msgK(rk) ) ) ]
+
+/* EPOCH_COMMIT received: the initiator arms its fold at the named anchor. The adversary can forge this
+   frame too, for the same reason it can forge the others. */
+rule Epoch_commit:
+    [ St_I_Confirmed(rk, ss)
+    , In( senc{ <'commit'> }( msgK(rk) ) ) ]
+  --[ Commit(ss) ]->
+    [ St_Anchor(rk, ss) ]
+
+/* The anchor DH step, then the fold — identical to ratchet-pq-epoch.spthy. */
+rule Anchor_step_fold:
+    let dh  = ('g'^~a)^~b
+        rkn = kdfRK(rk, dh)
+        rkf = kdfEpoch(rkn, ss)
+    in
+    [ St_Anchor(rk, ss), Fr(~a), Fr(~b) ]
+  --[ AnchorRoot(rkn), Fold(rkn, rkf), FoldedWith(rkf, ss), Root(rkf) ]->
+    [ St_Post(rkf)
+    , !RevealableDh(~a)
+    , !RevealableDh(~b) ]
+
+rule Send_post_fold:
+    [ St_Post(rkf), Fr(~m) ]
+  --[ PostFoldSend(~m, rkf), SecretMsg(~m) ]->
+    [ Out( senc{~m}(msgK(rkf)) ) ]
+
+/* =============================================================================================
+   LEMMAS
+   ============================================================================================= */
+
+// Sanity: an HONEST rekey — encaps, the responder's own confirmed EPOCH_COMMIT, fold, send — runs to
+// completion WITH NO COMPROMISE AT ALL (`not Ex RevealRoot`). Without this, the falsification below
+// could be an artifact of a model that simply cannot execute honestly, or one whose only executable
+// path is an adversary forging the commit frame. The explicit no-reveal conjunct is what pins that
+// down: it proves the sealed channel does not break the protocol for the honest parties.
+lemma executable:
+  exists-trace
+  "Ex m rkf ss #e #c #s.
+     ( Encaps(ss)@e
+     & RConfirmed(ss)@c
+     & PostFoldSend(m, rkf)@s
+     & #e < #c
+     & #c < #s
+     & not (Ex rk #r. RevealRoot(rk)@r) )"
+
+// *** THE RESIDUAL, DEMONSTRATED. ***
+// A trace in which a live pre-fold root is revealed, the fold nevertheless COMPLETES (the
+// confirmation tag verified — IConfirmed fires), a message is sent on the "PQ-hardened" root, and
+// the adversary READS IT ANYWAY. This is the active post-compromise hijack that abstraction A1 of
+// ratchet-pq-epoch.spthy assumes away, stated as a machine-found trace rather than a caveat.
+lemma pq_active_hijack_witness:
+  exists-trace
+  "Ex rkc m rkf ss #c #r #i #s #k.
+     ( LiveRoot(rkc)@c
+     & RevealRoot(rkc)@r
+     & IConfirmed(ss)@i
+     & PostFoldSend(m, rkf)@s
+     & K(m)@k
+     & #c < #r
+     & #r < #i
+     & #i < #s )"
+
+// The A1-free statement of the crux lemma. EXPECTED TO FALSIFY: this is the same property
+// ratchet-pq-epoch.spthy verifies, minus the authentic-channel assumption. The gap between this
+// red and that green IS abstraction A1 — that is what this file measures.
+lemma pq_post_compromise_security:
+  "All m rkf #s.
+     PostFoldSend(m, rkf)@s ==> not (Ex #k. K(m)@k)"
+
+end

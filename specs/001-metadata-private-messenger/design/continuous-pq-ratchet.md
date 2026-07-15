@@ -1,7 +1,24 @@
 # Design: Continuous post-quantum ratchet ("Option B") — chunked rekey inside the fixed frame
 
-**Status: PHASES 1–3 IMPLEMENTED (PRs #83, #84, #85). NOT YET FORMALLY ANALYSED OR HUMAN-REVIEWED —
-Phase 5 is outstanding, so NO LABELING CHANGE: `DEV, NO METADATA PRIVACY` stands (§0, §6.3, §7).**
+**Status: PHASES 1–3 IMPLEMENTED (PRs #83, #84, #85). PHASE 5 FORMAL ANALYSIS DONE — NOT HUMAN-REVIEWED,
+so NO LABELING CHANGE: `DEV, NO METADATA PRIVACY` stands (§0, §6.3, §7).**
+
+> **Phase 5 outcome (see `formal-analysis/README.md` §5–§6 for the real prover output).** The epoch fold
+> is now modelled in `ratchet.spthy` + `ratchet-unbounded.spthy` (all 11 pre-existing lemmas still
+> verify, plus 6 new ones incl. FS/PCS across epoch boundaries). The §6.2 lemma
+> `pq_post_compromise_security` **verifies** in the new `ratchet-pq-epoch.spthy` and is **non-vacuous**:
+> its no-fold negative control **falsifies**, so the fold is load-bearing. **Two honest limits the §6.2
+> sketch did not anticipate:**
+> 1. the result assumes an **authentic rekey channel**; dropping that assumption
+>    (`ratchet-pq-epoch-hijack.spthy`) **finds an active post-compromise hijack**, so the claim is
+>    PQ-PCS against an adversary **passive on the rekey exchange** (the standard PCS caveat — §6.2's
+>    proposed lemma text omits it, and it must not be quoted without it);
+> 2. **Q3 (traffic pattern, §5/§9) is NOT discharged** — Tamarin has no notion of length, timing or
+>    volume, and structurally cannot answer it. It is reduced to engine invariants and argued, not
+>    verified.
+>
+> Phase 5 is the gate but **not the decision**: §6.3 requires formal analysis **and** human security
+> review. Only the first is delivered.
 
 > This document began as design-only and its body is still written in that voice ("proposed",
 > "must", "Phase 3 should"). Where the implementation and this text disagree, **the implementation

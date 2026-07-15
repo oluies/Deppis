@@ -1,0 +1,321 @@
+theory DeppisPqEpochNoFold
+/*
+  *** THE NEGATIVE CONTROL for ratchet-pq-epoch.spthy — THIS MODEL MUST FALSIFY. ***
+
+  This file is ratchet-pq-epoch.spthy with the EPOCH FOLD REMOVED, and NOTHING else. Apart from
+  this header comment, the complete difference is the theory name and ONE line in rule
+  Anchor_step_fold:
+
+      fold model (ratchet-pq-epoch.spthy):   rkf = kdfEpoch(rkn, ~ss)
+      THIS negative control:                 rkf = rkn
+
+  Verify that claim mechanically — it is the whole point, and a control that quietly drifted from
+  the model it controls would prove nothing. Diff the MODEL BODIES (from `begin`), which is what
+  the prover actually reads:
+
+      diff <(sed -n '/^begin/,$p' ratchet-pq-epoch.spthy) \
+           <(sed -n '/^begin/,$p' ratchet-pq-epoch-nofold.spthy)
+      # => exactly ONE changed line: rkf = kdfEpoch(rkn, ~ss)  ->  rkf = rkn
+
+  WHY THIS FILE EXISTS. `pq_post_compromise_security` is TRIVIALLY TRUE for the wrong reasons if the
+  model is built carelessly — design §6.2 says so outright: the naive "breaks X25519 but not ML-KEM"
+  adversary can never compute any root anyway, because Option A's pairing seed already binds every
+  root to the pairing ML-KEM secret. Such a lemma would verify identically on a build WITHOUT the
+  fold, so its green tick would certify nothing about the fold.
+  This control is what rules that out. Same model, same attacker, same lemmas — fold deleted. If the
+  fold were doing no work, this file would VERIFY too, and the positive result next door would be
+  worthless. It does not verify: it is FALSIFIED, and the attack trace Tamarin returns is exactly the
+  §1.2 gap the whole continuous-PQ effort exists to close — revealed pre-fold root + broken CDH ⇒ the
+  adversary walks the classical chain forward to the send and reads the message.
+
+  MEASURED (tamarin-prover 1.12.0 + Maude 3.5.1, `tamarin-prover ratchet-pq-epoch-nofold.spthy --prove`):
+      executable                 (exists-trace): verified  (3 steps)
+      pq_pcs_premise_reachable   (exists-trace): verified  (6 steps)
+      epoch_secret_secret        (all-traces):   verified  (4 steps)   -- ss stays secret; it is simply
+                                                                       -- never used for anything here
+      anchor_root_is_compromised (exists-trace): verified  (8 steps)
+      pq_post_compromise_security (all-traces):  FALSIFIED (7 steps)   *** THE EXPECTED RED ***
+  Note `epoch_secret_secret` still VERIFIES here: the epoch secret is still unguessable, it is just
+  no longer mixed into anything. That is the precise shape of the point — a secret you do not fold in
+  buys you nothing, and only the FALSIFIED lemma next to it reveals that.
+
+  Everything below is verbatim from ratchet-pq-epoch.spthy; read that file for the model, the
+  attacker, and the abstractions (A1-A5) that bound both results.
+
+  ---------------------------------------------------------------------------------------------
+  PQ POST-COMPROMISE SECURITY of the continuous-PQ epoch fold, under a
+  BREAKS-CDH-BUT-NOT-ML-KEM attacker (a CRQC).
+
+  Design under analysis: ../continuous-pq-ratchet.md §4 (KDF integration), §4.2 AMENDMENT
+  (confirmation-tag keying), §6.2 (this lemma).
+  Implementation modelled: engine.EpochKdf (kdfEpoch + the two confirm tags) and
+  engine.DoubleRatchet (armEpochFold / advanceRoot / applyPendingFold, the root-INDEX anchor).
+
+  ============================================================================================
+  WHY THIS IS A NEW MODEL, NOT AN EDIT (design §6.2). Every existing lemma (ratchet.spthy,
+  ratchet-unbounded.spthy) is proved against a Dolev-Yao attacker for whom CDH HOLDS. The whole
+  point of the continuous PQ rekey is to defend an attacker for whom CDH does NOT hold. That
+  attacker cannot be expressed by adding a term to the old models; it needs its own.
+
+  WHY THE NAIVE STATEMENT IS VACUOUS (and what this file does instead). "Reveal the DH secrets
+  but not the ML-KEM arm ⇒ a post-fold message is secret" holds even WITHOUT the fold, because
+  Option A's pairing seed already makes every root depend on the pairing ML-KEM secret
+  (design §1.2) — such an adversary can never compute any root, fold or no fold. It would
+  distinguish nothing. So this model adds the state compromise that ERASES the seed's help:
+    (i)  Reveal_root  — a RevealRoot state-compromise event on a LIVE, PRE-FOLD root. The
+         revealed root ALREADY EMBEDS the pairing seed, so the seed's PQ hardening is spent;
+         healing from here on depends only on entropy mixed in AFTERWARD (design §1.2).
+    (ii) Reveal_dh    — the CRQC: the adversary is handed every X25519 ratchet EXPONENT.
+         Granting the exponents is exactly granting the discrete logs; the adversary then
+         computes ('g'^~a)^~b itself with the dh builtin, so CDH is broken FOR IT ALONE, while
+         the KEM arm stays hard. This is how "breaks CDH but not ML-KEM" is expressed in a tool
+         whose dh builtin has no CDH switch.
+  The adversary is thereby given the pre-fold root AND every classical secret that follows it, so
+  it computes every root the classical ratchet produces. The ONLY thing standing between it and
+  the post-fold message is the epoch fold. That is what makes the lemma non-vacuous.
+
+  THE NEGATIVE CONTROL IS THE PROOF THAT THE FOLD IS LOAD-BEARING. ratchet-pq-epoch-nofold.spthy
+  is this file with ONE line changed (rkf = rkn instead of kdfEpoch(rkn,~ss)) and MUST FALSIFY.
+  A green tick here means nothing without that red one there. See README.md §5.
+  ============================================================================================
+
+  Idealized primitives (Constitution I delegates primitives to vetted libraries):
+    * X25519            -> the diffie-hellman builtin, but see Reveal_dh: the CRQC gets the
+                           exponents, so CDH gives the ADVERSARY no protection here. It still
+                           constrains nothing else in the model.
+    * ML-KEM (hybrid)   -> an INDEPENDENT HARD PROBLEM, per design §6.2, modelled with the
+                           asymmetric-encryption builtin: ct = aenc(~ss, pk(~ek)) and
+                           adec(ct, ~ek) = ~ss. A KEM *is* the public-key encryption of a fresh
+                           random secret, and the builtin gives exactly the symbolic IND-CCA shape
+                           wanted: ~ss is recoverable ONLY with the KEM secret ~ek, and there is no
+                           algebraic inverse and no dh-style deconstruction.
+                           [An earlier draft of this file used a FREE function kemct/2 and
+                           pattern-matched ss out of it. All five lemmas "verified" — but Tamarin's
+                           message-derivation check FAILED ("Rule Epoch_decaps_verify: Failed to
+                           derive Variable(s): ss") and warned "the analysis results might be
+                           wrong". That is unintended pattern matching: the rule extracted ss from
+                           a term nothing can invert. The green ticks were not trustworthy and were
+                           discarded, not shipped. Same lesson as the circular header key that
+                           ratchet.spthy's header records — see README.md §2.]
+                           The hybrid X25519 arm of
+                           HybridKem.combine is deliberately NOT modelled as breakable-and-mixed:
+                           modelling the KEM as hard-in-full is the CONSERVATIVE-for-this-lemma
+                           choice ONLY in that it isolates the ML-KEM arm, which is precisely the
+                           arm this attacker cannot break. G1 (never worse than classical) is a
+                           separate claim and is NOT what this file proves.
+    * HMAC-SHA256 KDFs  -> one-way free functions kdfRK/2, kdfEpoch/2, msgK/1, confirmTag/2.
+                           kdfEpoch(rk,ss) IS EpochKdf.kdfEpoch = HMAC(rk, "dr/pq-epoch" || ss):
+                           key = the root, DATA = the epoch secret.
+                           confirmTag(ss,'i'|'r') IS EpochKdf.epochConfirmTag{Initiator,Responder}
+                           = HMAC(ss, "dr/pq-epoch-confirm/{i,r}"): key = the EPOCH SECRET, per the
+                           §4.2 AMENDMENT — NOT keyed on RK_epoch as §4.2's original text said.
+                           The amendment is what the SHIPPED code does (EpochKdf.scala:101-116) and
+                           the doc is explicit that Phase 5 must model the amended keying.
+    * ChaCha20-Poly1305 -> the symmetric-encryption builtin (perfect AEAD).
+
+  ------------------------------------------------------------------------------------------------
+  ABSTRACTIONS — what this model does NOT capture (read before quoting any result):
+
+  A1. AUTHENTIC REKEY CHANNEL — THE LOAD-BEARING ASSUMPTION, STATED AS SUCH.
+      The rekey control frames (KEM pub, ct, confirm tags) are delivered between the peers over
+      Auth_* facts, NOT over the network. The adversary SEES every one of them (each is also
+      Out()-put, so secrecy of ~ss is genuinely tested against an adversary holding the ct and both
+      tags) but cannot SUBSTITUTE them. This models the MK-sealed, authenticated ratchet chain the
+      chunks actually ride inside — exactly the session/transcript binding design §4.2's amendment
+      says supplies what keying on RK_epoch would have supplied.
+      *** THIS IS AN ASSUMPTION, NOT A RESULT, AND IT IS IN TENSION WITH THE VERY COMPROMISE THIS
+      LEMMA MODELS.*** An adversary that revealed a live root can derive that chain's message keys
+      and therefore FORGE the seal — so a fully active post-compromise adversary can hijack the
+      rekey by substituting a KEM ciphertext whose secret it chose, and the fold then hardens
+      nothing. ratchet-pq-epoch-hijack.spthy demonstrates exactly that, as an exists-trace witness.
+      So the property proved here is PQ-PCS against an adversary that is ACTIVE BEFORE the rekey
+      (it compromised the state) and PASSIVE ON the rekey exchange itself. That is the standard
+      post-compromise setting — the double-ratchet literature's PCS carries the same caveat, since
+      an active adversary holding the state can always MITM and the session never heals — but it
+      MUST NOT be dropped when this result is quoted. See README.md §5 and the hijack file.
+
+  A2. ONE SHARED ROOT CHAIN, ROLES ABSTRACTED. The real peers traverse one shared root chain at
+      OFFSET positions and are never simultaneously on the same root — which is the entire reason
+      the fold is anchored to a root INDEX and the tags cannot be keyed on RK_epoch (§4.2
+      amendment; DoubleRatchet.scala:186-208). This model collapses that to a single chain object
+      that both sides fold identically at the anchor. It therefore assumes, rather than proves,
+      that both sides derive the byte-identical RK_epoch at the anchor. That agreement is a
+      LIVENESS/AGREEMENT property, not a secrecy one; it is exercised by Phase 4's tests
+      (DoubleRatchetModelSpec fold-atomicity / no-divergence ops), NOT here.
+
+  A3. CHUNKING IS TRANSPORT, NOT CRYPTO. The ~9-frame pubkey and ~8-frame ciphertext transfers
+      (design §3.1) are modelled as single atomic messages. Reassembly, ARQ, loss and reorder are
+      transport concerns discharged by the ARQ layer's property tests, not by this model.
+
+  A4. NOT MODELLED: the ~19-frame traffic PATTERN (design §5, §9 Q3), the rekey state machine's
+      Committed/Stranded liveness (§8.2), chunk-level tampering (the confirm tag's fail-closed
+      behaviour is modelled only as the pattern-match in Epoch_decaps_verify), key wiping, and any
+      side-channel/constant-time property (Constitution II — out of scope for every Tamarin
+      artifact here).
+
+  A5. BOUNDED. One compromise, one rekey, one anchor step, one post-fold send — the minimal trace
+      that exhibits the property. The unbounded structural half is ratchet-unbounded.spthy, which
+      now carries the fold as a second kind of root input; the two are NOT mechanically composed.
+  ------------------------------------------------------------------------------------------------
+
+  Run:  tamarin-prover ratchet-pq-epoch.spthy --prove
+*/
+
+begin
+
+builtins: diffie-hellman, symmetric-encryption, asymmetric-encryption
+
+functions: kdfRK/2, kdfEpoch/2, msgK/1, confirmTag/2
+
+/* The constant-time tag comparison of design §4.2, as an explicit equality check. Using a
+   restriction (rather than pattern-matching the tag apart) keeps every rule variable derivable
+   from its premises — see the ML-KEM note in the header for why that matters here. */
+restriction Equality:
+  "All x y #i. Eq(x, y)@i ==> x = y"
+
+/* A live ratchet session, at the moment of classical state compromise. ~rkc is a LIVE root, well
+   past bootstrap: it already embeds the Option A pairing seed, which is exactly why revealing it
+   spends the seed's PQ hardening (design §1.2) and why this scenario — not the naive one — is the
+   non-vacuous statement of what the fold buys. */
+rule Live_root:
+    [ Fr(~rkc) ]
+  --[ LiveRoot(~rkc), Root(~rkc) ]->
+    [ St_Pre(~rkc), !RevealableRoot(~rkc) ]
+
+/* (i) CLASSICAL STATE COMPROMISE, strictly BEFORE the fold: the adversary obtains the live root.
+   Only the pre-fold root is ever made revealable — there is no rule that reveals a post-fold root,
+   so the lemma cannot be discharged by revealing its own target. */
+rule Reveal_root:
+    [ !RevealableRoot(rk) ]
+  --[ RevealRoot(rk) ]->
+    [ Out(rk) ]
+
+/* (ii) THE CRQC: the adversary computes X25519 discrete logs. Modelled by handing it the ratchet
+   EXPONENTS themselves — strictly stronger than a dlog oracle, and it lets the adversary rebuild
+   ('g'^~a)^~b with the dh builtin, i.e. CDH is broken for it. The ML-KEM arm has no such rule. */
+rule Reveal_dh:
+    [ !RevealableDh(x) ]
+  --[ RevealDh(x) ]->
+    [ Out(x) ]
+
+/* ---- The epoch rekey (design §3.1 / §4.2; Engine's rekey state machine) ---------------------- */
+
+/* Initiator mints a FRESH hybrid KEM keypair per attempt (design §4.4) and streams the public key.
+   Auth_Pub = authentic delivery to the responder (A1); Out = the adversary sees it too. */
+rule Epoch_pub:
+    [ St_Pre(rk), Fr(~ek) ]
+  --[ EpochPub(~ek) ]->
+    [ St_I_PubSent(rk, ~ek)
+    , Auth_Pub(rk, pk(~ek))
+    , Out(pk(~ek)) ]
+
+/* Responder encapsulates: fresh epoch secret ~ss, ciphertext + its /r confirmation tag. Both are
+   Out()-put, so the lemma is proved against an adversary that HOLDS the ciphertext and the tag. */
+rule Epoch_encaps:
+    [ Auth_Pub(rk, pkI), Fr(~ss) ]
+  --[ Encaps(~ss) ]->
+    [ St_R_Confirming(rk, ~ss)
+    , Auth_Ct(aenc(~ss, pkI), confirmTag(~ss, 'r'))
+    , Out(aenc(~ss, pkI))
+    , Out(confirmTag(~ss, 'r')) ]
+
+/* Initiator decapsulates and CONSTANT-TIME VERIFIES the responder's /r tag BEFORE anything folds
+   (design §4.2 fail-closed; Engine verifies before it ever calls armEpochFold). The Eq check on
+   confirmTag(ss,'r') IS that verification: a tag on any other secret fails it. ML-KEM's implicit
+   rejection is why the check exists at all — decaps yields a pseudo-random secret rather than
+   throwing, so nothing else would notice a substituted ciphertext. */
+rule Epoch_decaps_verify:
+    let ss = adec(ct, ~ek)
+    in
+    [ St_I_PubSent(rk, ~ek)
+    , Auth_Ct(ct, tagR) ]
+  --[ Eq(tagR, confirmTag(ss, 'r')), IConfirmed(ss) ]->
+    [ St_I_Confirmed(rk, ss)
+    , Auth_TagI(confirmTag(ss, 'i'))
+    , Out(confirmTag(ss, 'i')) ]
+
+/* Responder verifies the initiator's /i tag; both sides have now proven the same ~ss, so the
+   responder ARMS the fold at its own next root index and names that index in EPOCH_COMMIT. The
+   distinct /i and /r labels are the anti-reflection defence (EpochKdf.scala:108-116). */
+rule Epoch_commit:
+    [ St_R_Confirming(rk, ~ss)
+    , Auth_TagI(tagI) ]
+  --[ Eq(tagI, confirmTag(~ss, 'i')), RConfirmed(~ss), Commit(~ss) ]->
+    [ St_Anchor(rk, ~ss) ]
+
+/* The DH step that reaches the anchor, then the fold AT the anchor — DoubleRatchet.advanceRoot
+   calling applyPendingFold, i.e. rk_anchor = kdfRK(rk, dh) and then RK_epoch = kdfEpoch(rk_anchor, ss).
+   The exponents ~a,~b become revealable: the CRQC gets them, so it can compute dh and hence rkn.
+   Everything up to and including rkn is therefore ADVERSARY-COMPUTABLE by construction — the fold
+   is the only step it cannot follow. */
+rule Anchor_step_fold:
+    let dh  = ('g'^~a)^~b
+        rkn = kdfRK(rk, dh)
+        rkf = rkn                   // *** THE NEGATIVE CONTROL: THE FOLD IS REMOVED ***
+    in
+    [ St_Anchor(rk, ~ss), Fr(~a), Fr(~b) ]
+  --[ AnchorRoot(rkn), Fold(rkn, rkf), FoldedWith(rkf, ~ss), Root(rkf) ]->
+    [ St_Post(rkf)
+    , !RevealableDh(~a)
+    , !RevealableDh(~b) ]
+
+/* A message sent AFTER the completed fold, on the PQ-hardened root. */
+rule Send_post_fold:
+    [ St_Post(rkf), Fr(~m) ]
+  --[ PostFoldSend(~m, rkf), SecretMsg(~m) ]->
+    [ Out( senc{~m}(msgK(rkf)) ) ]
+
+/* =============================================================================================
+   LEMMAS
+   ============================================================================================= */
+
+// Sanity: the reveal -> rekey -> fold -> send scenario runs to completion.
+lemma executable:
+  exists-trace
+  "Ex m rkf #s. PostFoldSend(m, rkf)@s"
+
+// NON-VACUITY, the part that matters. The all-traces lemma below quantifies over traces in which
+// the compromise MAY happen; this witness proves the full hostile scenario it is supposed to cover
+// is actually REACHABLE: a pre-fold root revealed, BOTH ratchet exponents handed to the CRQC, and a
+// post-fold send — with the reveal strictly preceding the send. Without this, a passing all-traces
+// result could be vacuously true because the model never lets the adversary compromise anything.
+lemma pq_pcs_premise_reachable:
+  exists-trace
+  "Ex rkc m rkf a b #c #r #d1 #d2 #s.
+     ( LiveRoot(rkc)@c
+     & RevealRoot(rkc)@r
+     & RevealDh(a)@d1
+     & RevealDh(b)@d2
+     & PostFoldSend(m, rkf)@s
+     & #d1 < #d2
+     & #c < #r
+     & #r < #s )"
+
+// The epoch secret is never learned: it is fresh, and it reaches the wire only inside kemct/2 and
+// under confirmTag/2 — free functions with no inverse and no deconstruction rule (symbolic
+// IND-CCA, design §6.2 "an independent hard problem"). [reuse] so the PCS lemma can cut on it.
+lemma epoch_secret_secret [reuse]:
+  "All ss #i. Encaps(ss)@i ==> not (Ex #k. K(ss)@k)"
+
+// The ANCHOR root — the last root before the fold — IS adversary-computable in this model. This is
+// not a defect, it is the POINT: it certifies that the compromise really did spend the seed and the
+// CRQC really did break the classical chain, so the fold is the ONLY remaining protection. It is
+// also precisely what the no-fold negative control turns into a full break.
+lemma anchor_root_is_compromised:
+  exists-trace
+  "Ex rkn #a #k. AnchorRoot(rkn)@a & K(rkn)@k"
+
+// *** THE CRUX (design §6.2) ***
+// PQ POST-COMPROMISE SECURITY. A message sent after the completed epoch fold stays secret EVEN
+// THOUGH (i) a live pre-fold root was revealed — a classical state compromise — and (ii) the
+// adversary holds every X25519 ratchet exponent (a CRQC: CDH broken), and (iii) it holds the KEM
+// ciphertext and both confirmation tags. The fold's ML-KEM-derived epoch secret is the only thing
+// it lacks, and that is enough.
+// THIS RESULT IS MEANINGLESS ALONE: it must be read together with ratchet-pq-epoch-nofold.spthy,
+// which is this model minus the fold and MUST be FALSIFIED. And it is subject to A1 (authentic
+// rekey channel) — see ratchet-pq-epoch-hijack.spthy.
+lemma pq_post_compromise_security:
+  "All m rkf #s.
+     PostFoldSend(m, rkf)@s ==> not (Ex #k. K(m)@k)"
+
+end
