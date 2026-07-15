@@ -113,8 +113,14 @@ for t in "${TARGETS[@]}"; do
   # label across elements, and escapes XML metacharacters — so a substring match against SVG bytes can
   # fail while the trace is unchanged, yielding a confident "the attack's SHAPE changed". The .dot is
   # the upstream, stabler surface. Whitespace-tolerant for the same reason.
+  # ($tmp/t.dot is guaranteed present and non-empty by the `-s` guard above, which exits loudly —
+  # so a missing/renamed artifact cannot reach these greps and be mis-reported as a shape change.)
   if [ "$base" = "hijack-attack" ]; then
-    if ! grep -qE 'aenc\(ss,[[:space:]]*pk\(~ek' "$tmp/t.dot"; then
+    # The closing `\)` is load-bearing: an unanchored `pk(~ek` prefix also matches `pk(~ek.1)` /
+    # `pk(~ek.2)` — an epoch key the ADVERSARY supplied — and would report "encapsulates under the
+    # HONEST key" for a trace that does the opposite, which is the exact claim this grep encodes. It
+    # would also match `pk(~ekey)`, the false-positive class the sibling `\b` exists to stop.
+    if ! grep -qE 'aenc\(ss,[[:space:]]*pk\(~ek\)' "$tmp/t.dot"; then
       echo "STALE PROSE: README claims the hijack trace shows aenc(ss, pk(~ek)) — not found in the" >&2
       echo "             fresh render. The attack's SHAPE changed; rewrite the sentence, not just" >&2
       echo "             the picture." >&2
