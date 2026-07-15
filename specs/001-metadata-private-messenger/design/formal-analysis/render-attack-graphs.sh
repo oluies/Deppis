@@ -87,7 +87,15 @@ for t in "${TARGETS[@]}"; do
   # prevent. Cheap to check, so check it rather than trusting a human to remember.
   real_steps="$(printf '%s\n' "$summary" | grep -oE '\(([0-9]+) steps\)' | grep -oE '[0-9]+' | head -1 || true)"
   doc_steps="$(grep -F "graphs/$base.svg" README.md | grep -oE 'falsified, [0-9]+ steps' | grep -oE '[0-9]+' | head -1 || true)"
-  if [ -n "$real_steps" ] && [ -n "$doc_steps" ] && [ "$real_steps" != "$doc_steps" ]; then
+  # A check that silently does nothing when it cannot parse is worse than no check: it reads as
+  # enforcement in review while enforcing nothing. If either side won't parse, say so and fail.
+  if [ -z "$real_steps" ] || [ -z "$doc_steps" ]; then
+    echo "ERROR: step-count check could not run for $base (prover='${real_steps:-?}'," >&2
+    echo "       README='${doc_steps:-?}'). This is a PARSER problem, not a security result —" >&2
+    echo "       fix the parsing rather than assuming the claim still holds." >&2
+    exit 1
+  fi
+  if [ "$real_steps" != "$doc_steps" ]; then
     echo "STALE PROSE: README §5.2.1 says '$doc_steps steps' for $base, prover says '$real_steps'." >&2
     echo "             Regenerating the SVG will NOT fix the sentence next to it. Update both." >&2
     status=1
@@ -101,14 +109,23 @@ for t in "${TARGETS[@]}"; do
   # rot the moment the model moves. These greps ARE the claims:
   #   * the attacker encapsulates under the HONEST epoch key            -> aenc(ss, pk(~ek)) present
   #   * it never supplies a key of its own                              -> exactly one ~ek name
+  # Assert on the .dot, NOT the rendered .svg: graphviz emits labels as <text> runs, may split a long
+  # label across elements, and escapes XML metacharacters — so a substring match against SVG bytes can
+  # fail while the trace is unchanged, yielding a confident "the attack's SHAPE changed". The .dot is
+  # the upstream, stabler surface. Whitespace-tolerant for the same reason.
   if [ "$base" = "hijack-attack" ]; then
-    if ! grep -qF 'aenc(ss, pk(~ek))' "$tmp/t.svg"; then
+    if ! grep -qE 'aenc\(ss,[[:space:]]*pk\(~ek' "$tmp/t.dot"; then
       echo "STALE PROSE: README claims the hijack trace shows aenc(ss, pk(~ek)) — not found in the" >&2
       echo "             fresh render. The attack's SHAPE changed; rewrite the sentence, not just" >&2
       echo "             the picture." >&2
       status=1
     fi
-    eks="$(grep -oE '~ek[0-9]*' "$tmp/t.svg" | sort -u | wc -l | tr -d ' ')"
+    # Tamarin disambiguates repeated fresh names with a DOT suffix (~ek, ~ek.1) — NOT a bare digit.
+    # An earlier version of this guard used '~ek[0-9]*', which matches only the '~ek' prefix of
+    # '~ek.1', so `sort -u` collapsed the two into one and it reported "1 distinct" in precisely the
+    # two-key case it exists to detect: a no-op against its own threat model. The \b also stops an
+    # unrelated name like ~ekey from counting.
+    eks="$(grep -oE '~ek(\.[0-9]+)?\b' "$tmp/t.dot" | sort -u | wc -l | tr -d ' ')"
     if [ "$eks" != "1" ]; then
       echo "STALE PROSE: README claims 'no second ~ek exists in the trace' (i.e. the adversary uses" >&2
       echo "             no key of its own), but the fresh render has $eks distinct ~ek names." >&2
