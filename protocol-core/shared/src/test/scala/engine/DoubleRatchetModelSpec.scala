@@ -481,35 +481,48 @@ class DoubleRatchetModelSpec extends AnyFunSuite with ScalaCheckPropertyChecks:
     forAll(gen) { case (lead, tail) =>
       val w = World()
       lead.foreach(_(w))
-      // Reach a quiescent, converged state before forcing the case under test. NOT by clearing
-      // `attempt`: that would strand a committer whose fold is already ARMED (its EPOCH_COMMIT is
-      // on the wire and its peer will never be told to fold), which desynchronizes the pair and
-      // would surface later as a bogus failure of the assertions below — a test bug wearing a
-      // protocol bug's clothes. Draining lets any in-flight attempt finish or fail on its own.
-      w.drain()
+      // Reach a state where the case under test is GUARANTEED to open. Three things are needed and
+      // each one is load-bearing:
+      //   - `settle()`, not a bare `drain()`: a drain leaves the committer's fold ARMED (it
+      //     lands on its next DH step), and `start` refuses to open while it is — so the
+      //     mismatched attempt would never open and this test's body would be skipped entirely.
+      //     `settle` lands the fold first.
+      //   - `abort()` clears an attempt that stalled without ever arming (its commit was skipped
+      //     because a fold was still armed), which would otherwise block `start` the same way.
+      //   - NOT `attempt = None`: that strands a committer whose fold is armed and whose peer
+      //     will never be told to fold, desynchronizing the pair and surfacing later as a bogus
+      //     failure — a test bug wearing a protocol bug's clothes.
+      w.settle()
+      w.abort()
       w.start(mismatchedSecret = true)
-      val opened = w.attempt.isDefined
+      // Asserted, not branched on: `if opened then …` would let this test silently assert NOTHING
+      // for an iteration, and only the cross-iteration counter below would notice.
+      assert(
+        w.attempt.isDefined,
+        "the mismatched attempt must open, or this iteration proves nothing"
+      )
       val foldsBefore = w.alice.epochFoldsApplied
       w.drain()
-      if opened then
-        refused += 1
-        assert(w.attempt.isEmpty, "the mismatched attempt must have been torn down")
-        assert(
-          w.alice.epochFoldsApplied == foldsBefore && !w.alice.epochFoldArmed,
-          "a mismatched epoch secret must not fold or arm anything on the initiator"
-        )
-        assert(!w.bob.epochFoldArmed, "nor on the committer")
-      // The pair is still usable and can still rekey: run an HONEST attempt to completion.
+      refused += 1
+      assert(w.attempt.isEmpty, "the mismatched attempt must have been torn down")
+      assert(
+        w.alice.epochFoldsApplied == foldsBefore && !w.alice.epochFoldArmed,
+        "a mismatched epoch secret must not fold or arm anything on the initiator"
+      )
+      assert(!w.bob.epochFoldArmed, "nor on the committer")
+      // The pair is still usable and can still rekey: run an HONEST attempt to completion. Same
+      // three-step setup, and the retry is likewise asserted rather than branched on.
       tail.foreach(_(w))
-      w.drain()
+      w.settle()
+      w.abort()
       val before = w.foldsCompleted
       w.start(mismatchedSecret = false)
-      if w.attempt.isDefined then
-        w.settle()
-        assert(w.foldsCompleted == before + 1, "a retry after a refused epoch must still fold")
-        assert(
-          w.alice.epochFoldsApplied == w.bob.epochFoldsApplied,
-          "and the retry leaves both sides in lockstep"
-        )
+      assert(w.attempt.isDefined, "the honest retry must open, or the retry claim is vacuous")
+      w.settle()
+      assert(w.foldsCompleted == before + 1, "a retry after a refused epoch must still fold")
+      assert(
+        w.alice.epochFoldsApplied == w.bob.epochFoldsApplied,
+        "and the retry leaves both sides in lockstep"
+      )
     }
     assert(refused > 0, "the model must actually reach the confirmation with a mismatched secret")
