@@ -175,8 +175,7 @@ class PqRekeyModelSpec extends AnyFunSuite with ScalaCheckPropertyChecks:
     * (`sendEvery = 5` with `dropOneIn = 2`, i.e. a saturated channel losing half its live frames):
     * in-flight peaks at exactly 4, the residual backlog is 4, and the drain reaches quiescence in
     * 61 rounds against the 600-round cap — so the cap is a safety net rather than the argument, and
-    * traffic still runs the whole phase (109 messages sent, 363 rounds of rekey/content
-    * contention). */
+    * traffic still runs the whole phase (109 messages sent). */
   private val Window = 4
 
   private val genScript: Gen[(Int, Int, Long)] = for {
@@ -187,7 +186,6 @@ class PqRekeyModelSpec extends AnyFunSuite with ScalaCheckPropertyChecks:
 
   test("model: a rekey over a lossy network never diverges the pair (§7 Phase 4)"):
     var totalFolds = 0
-    var totalLost = 0
     var busyCases = 0
     forAll(genScript, minSuccessful(6)) { case (dropOneIn, sendEvery, seed) =>
       val rng = new scala.util.Random(seed)
@@ -234,9 +232,9 @@ class PqRekeyModelSpec extends AnyFunSuite with ScalaCheckPropertyChecks:
             p.bob.sendMessage(p.pid, s"n$bSent"): Unit
             bSent += 1
         tick(): Unit
+      // Per-iteration, so no aggregate tally is needed (or honest — one would only restate this).
       assert(p.lost > 0, "the network must actually have eaten live frames")
       if sendEvery > 0 then busyCases += 1
-      totalLost += p.lost
 
       // RECOVERY: a clean network. First DRAIN to quiescence, so the probe below measures the
       // ratchet rather than the queue; then probe. Whatever the loss did to the rekey, the two
@@ -285,13 +283,17 @@ class PqRekeyModelSpec extends AnyFunSuite with ScalaCheckPropertyChecks:
       assert(sb.ratchetFolds <= sb.epochsFolded + 1, s"a fold applies at most once per epoch: $sb")
       totalFolds += sa.ratchetFolds
     }
-    // ANTI-VACUITY: every assertion above holds trivially on a run where no rekey ever completed or
-    // where the network never actually ate anything, so pin both. `totalLost` counts real live
-    // frames swallowed (not attempts to lose one) — the metric an earlier revision got wrong.
+    // ANTI-VACUITY, and ONLY what has no per-iteration counterpart. Everything asserted inside the
+    // loop is relative (folds within +-1 of each other, at most one fold per epoch) and so holds on
+    // a run that never folded at all, which is what `totalFolds` pins. `busyCases` guards the
+    // generator WEIGHTS — a revision that let the silent pair own half the state space is exactly
+    // what happened once — and claims nothing more; the class doc records the lane arbitration this
+    // suite does NOT pin.
+    //
+    // Deliberately NOT tallied: live frames swallowed. `assert(p.lost > 0, ...)` already runs every
+    // iteration and `lost` only grows, so an aggregate `totalLost > 0` could not fail unless
+    // `forAll` ran zero cases — coverage theatre of exactly the kind removed twice already
+    // (`refused`, and the contention counter). An assertion that cannot fail is worse than none: it
+    // reads as a guarantee nobody is getting.
     assert(totalFolds > 0, "the model must actually fold under loss, or it proves nothing")
-    assert(totalLost > 0, "and the network must actually have eaten live frames")
-    // The generator must actually produce BUSY cases. This is a guard on the WEIGHTS (a revision
-    // that let the silent pair own half the state space is exactly what happened once), and it
-    // claims nothing more than that — see the class doc on what lane arbitration this suite does
-    // NOT pin.
     assert(busyCases > 0, "the generator must produce busy cases, not only the idle probe")
