@@ -57,17 +57,64 @@ for t in "${TARGETS[@]}"; do
   # Anchor to THIS lemma. A bare `grep -q falsified` would match a falsification anywhere in the log
   # (another lemma, or the word echoed in theory text) and pass while `$lemma` itself verified — the
   # exact silent drift this guard exists to catch.
-  if ! grep -qE "^[[:space:]]*${lemma}[[:space:]]*\(.*\):[[:space:]]*falsified" "$tmp/log"; then
+  #
+  # Two DIFFERENT failures live here and must not be conflated: "the summary says this lemma
+  # verified" (the model changed meaning) vs. "no recognisable summary line for this lemma at all"
+  # (Tamarin rephrased its output). Reporting the second as the first would hand the reader a
+  # confident, WRONG diagnosis — telling them a security property flipped when only a format did.
+  # That is the same defect guarded against at the prover invocation above.
+  summary="$(grep -E "^[[:space:]]*${lemma}[[:space:]]*\(" "$tmp/log" || true)"
+  if [ -z "$summary" ]; then
+    echo "ERROR: no summary line found for $lemma in $model — Tamarin's output format may have" >&2
+    echo "       changed. This is NOT necessarily a security result; do not touch the README on" >&2
+    echo "       the strength of this message. Update this script's parser. Full output:" >&2
+    cat "$tmp/log" >&2
+    exit 1
+  fi
+  if ! printf '%s\n' "$summary" | grep -qE ":[[:space:]]*falsified"; then
     echo "ERROR: $model :: $lemma did NOT falsify — there is no attack trace to render." >&2
     echo "       If this lemma now VERIFIES, the model changed meaning; fix this script and the" >&2
     echo "       README rather than shipping a stale picture of an attack that no longer exists." >&2
-    echo "       Prover summary:" >&2
-    grep -E "verified|falsified" "$tmp/log" >&2 || true
+    echo "       Summary line: $summary" >&2
     exit 1
   fi
   [ -s "$tmp/t.dot" ] || { echo "ERROR: no dot emitted for $model :: $lemma" >&2; exit 1; }
 
+  # CONFRONT THE README WITH THE ARTIFACT. The §5.2.1 table hardcodes a step count per graph; the
+  # prover just told us the real one. Without this the images are drift-checked and the PROSE is not:
+  # a model edit changes the trace, --check says STALE, the reader regenerates, and the sentence
+  # beside the picture silently becomes false — the exact failure this whole section exists to
+  # prevent. Cheap to check, so check it rather than trusting a human to remember.
+  real_steps="$(printf '%s\n' "$summary" | grep -oE '\(([0-9]+) steps\)' | grep -oE '[0-9]+' | head -1 || true)"
+  doc_steps="$(grep -F "graphs/$base.svg" README.md | grep -oE 'falsified, [0-9]+ steps' | grep -oE '[0-9]+' | head -1 || true)"
+  if [ -n "$real_steps" ] && [ -n "$doc_steps" ] && [ "$real_steps" != "$doc_steps" ]; then
+    echo "STALE PROSE: README §5.2.1 says '$doc_steps steps' for $base, prover says '$real_steps'." >&2
+    echo "             Regenerating the SVG will NOT fix the sentence next to it. Update both." >&2
+    status=1
+  fi
+
   dot -Tsvg "$tmp/t.dot" -o "$tmp/t.svg"
+
+  # The hijack row makes SPECIFIC structural claims about its trace, because a vaguer sentence was
+  # what got the previous revision wrong (it said the adversary "supplies its own KEM public key";
+  # the trace shows it does not). Specific claims are only safe if they are checked — otherwise they
+  # rot the moment the model moves. These greps ARE the claims:
+  #   * the attacker encapsulates under the HONEST epoch key            -> aenc(ss, pk(~ek)) present
+  #   * it never supplies a key of its own                              -> exactly one ~ek name
+  if [ "$base" = "hijack-attack" ]; then
+    if ! grep -qF 'aenc(ss, pk(~ek))' "$tmp/t.svg"; then
+      echo "STALE PROSE: README claims the hijack trace shows aenc(ss, pk(~ek)) — not found in the" >&2
+      echo "             fresh render. The attack's SHAPE changed; rewrite the sentence, not just" >&2
+      echo "             the picture." >&2
+      status=1
+    fi
+    eks="$(grep -oE '~ek[0-9]*' "$tmp/t.svg" | sort -u | wc -l | tr -d ' ')"
+    if [ "$eks" != "1" ]; then
+      echo "STALE PROSE: README claims 'no second ~ek exists in the trace' (i.e. the adversary uses" >&2
+      echo "             no key of its own), but the fresh render has $eks distinct ~ek names." >&2
+      status=1
+    fi
+  fi
 
   if [ "$check" = 1 ]; then
     if ! diff -q "$tmp/t.svg" "$OUT/$base.svg" >/dev/null 2>&1; then
