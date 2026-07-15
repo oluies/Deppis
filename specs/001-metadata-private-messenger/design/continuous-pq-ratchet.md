@@ -11,17 +11,22 @@ the initial pairing — is closed. It is a design deliverable. Read the honesty 
 - **Continuous PQ is NOT built.** The live content ratchet shipped in
   `protocol-core/shared/src/main/scala/engine/DoubleRatchet.scala` **heals classically**: every ratchet
   step mixes a fresh **X25519** shared secret and nothing else (`dhRatchet`, `DoubleRatchet.scala:389-421`).
-  The live stream is *already* safe against a purely **passive** harvest-now-decrypt-later adversary —
-  the ratchet root chains back by HMAC to Option A's PQ-hardened seed, so no root is computable without
-  the ML-KEM secret (§1.2). What is missing is **post-quantum *post-compromise* security**: after a
-  *classical state compromise*, the X25519-only healing hands a future quantum (CRQC) adversary every
-  subsequent key until a PQ secret is re-injected. **This design proposes how to close that
-  post-compromise gap; it does not change today's behavior.**
+  **For a PQ-paired session** (the Option A prekey path was taken — enforceable end-to-end via
+  `pqRequired`), the live stream is *already* safe against a purely **passive** harvest-now-decrypt-later
+  adversary, because the ratchet root chains back by HMAC to the PQ-hardened seed, so no root is
+  computable without the ML-KEM secret (§1.2). **The default pairing path is still classical**
+  (`addBuddy` defaults `initiatePqPrekey=false` → `addClassical`, `Engine.scala:287,318-323,326-336`);
+  a classical pairing's passive-HNDL status rests on the *transport* of the out-of-band secret, not on
+  ML-KEM (`Engine.scala:273-275`). Either way, what is missing on the *live stream* is **post-quantum
+  *post-compromise* security**: after a *classical state compromise*, the X25519-only healing hands a
+  future quantum (CRQC) adversary every subsequent key until a PQ secret is re-injected. **This design
+  proposes how to close that post-compromise gap; it does not change today's behavior.**
 - **What IS built today** is Option A: a one-shot PQ hardening of the *initial* content root via a
   hybrid X25519 + ML-KEM-768 KEM (`KeySchedule.pqContentRoot`, `KeySchedule.scala:49-58`), with
   bidirectional key confirmation (`pqConfirmTagResponder`/`pqConfirmTagInitiator`,
-  `KeySchedule.scala:78-85`) and a fail-closed PQ-intent binding (`pqRequired`, PR #81, open at time of
-  writing). Option A's own doc comment is explicit that "the ongoing X25519 DH ratchet … REMAINS
+  `KeySchedule.scala:78-85`) and a fail-closed PQ-intent binding (`pqRequired`, PR #81, merged to main) —
+  though the PQ prekey path is opt-in, not the `addBuddy` default (see above). Option A's own doc comment
+  is explicit that "the ongoing X25519 DH ratchet … REMAINS
   CLASSICAL — each per-message DH step is still harvest-now-decrypt-later-exposed"
   (`KeySchedule.scala:40-43`). This document is the design for the follow-up that Option A's honesty
   note points at.
@@ -53,16 +58,26 @@ ML-KEM-768 (pub 1184, ct 1088, ss 32 — `HybridKem.scala:44,47`) so the compose
 
 ### 1.2 The residual gap (the whole reason for this doc)
 
-**First, what is NOT the gap.** The live stream is *already* safe against a **purely passive**
+**First, what is NOT the gap — *for a PQ-paired session*.** When the Option A prekey path was taken
+(enforceable via `pqRequired`), the live stream is *already* safe against a **purely passive**
 harvest-now-decrypt-later adversary, and this doc must not claim otherwise. The ratchet's root chains
-back to the PQ-hardened seed by HMAC, and HMAC chaining does **not** "dilute" that dependency. The
-responder's initial root is `rk0 = HMAC(contentRoot, "dr/root0")` (`DoubleRatchet.scala:101`), where
-`contentRoot` is the `pqContentRoot` output; every subsequent step is
+back to the PQ-hardened seed by HMAC, and HMAC chaining does **not** "dilute" that dependency. On the PQ
+path the responder's initial root is `rk0 = HMAC(contentRoot, "dr/root0")` (`DoubleRatchet.scala:101`)
+where `contentRoot` is the `pqContentRoot` output; every subsequent step is
 `rk2 = HMAC(HMAC(rk, "dr/rk" ‖ dh), "dr/root")` (`kdfRk`, `DoubleRatchet.scala:59-65`). So every root
 `rk_i` transitively depends on `rk0` and therefore on the pairing ML-KEM shared secret. A CRQC-equipped
 adversary that only **recorded** the ciphertext stream (never touched an endpoint) still cannot compute
 *any* root without that ML-KEM secret, which it does not have. Option A therefore already closes the
-passive-HNDL window for the whole live stream, not just the seed.
+passive-HNDL window for the whole live stream of a PQ pairing, not just the seed.
+
+**Caveat — the default pairing is classical.** `addBuddy` defaults `initiatePqPrekey=false` and falls
+through to `addClassical`, seeding the ratchet from the non-PQ `contentRoot` (`Engine.scala:287,318-323,
+326-336`), whose seed is "only as strong as the classical OOB secret" (`Engine.scala:273-275`). For such
+a pairing the passive-HNDL protection above does **not** apply — its confidentiality against a future
+CRQC rests on the *transport* of the out-of-band pairing secret, not on ML-KEM. The rest of this section
+(the post-compromise gap) applies to *both* path kinds; the PQ *post-compromise* rekey this doc designs
+is what a PQ-paired session additionally needs, and is moot for a classical pairing that already lacks
+passive-HNDL PQ protection.
 
 **The actual gap is PQ *post-compromise* security.** Consider an adversary that (a) obtains a device's
 live ratchet *state* at some moment — a classical state compromise, exactly the threat PCS exists to
@@ -455,10 +470,13 @@ it should be flagged as such to the security reviewer, because it is where the r
 
 - Until the above is modeled *and* implemented *and* human-reviewed, the live stream remains classical
   and the `DEV, NO METADATA PRIVACY` label stays. This design does not license any PQ-messaging claim.
-- The claim that eventually becomes true is narrow: "PQ **post-compromise** secrecy on the live stream
-  **after** the first completed epoch fold, bounding the quantum post-compromise window to `N` steps"
-  (passive-HNDL secrecy already holds via the Option A seed — §1.2). The *bootstrap* chain and the steps
-  before the first fold have **no** PQ post-compromise healing beyond that seed — say so (§7).
+- The claim that eventually becomes true is narrow and **conditioned on a PQ pairing**: "for a
+  PQ-paired session (Option A prekey path, enforceable via `pqRequired`), PQ **post-compromise** secrecy
+  on the live stream **after** the first completed epoch fold, bounding the quantum post-compromise
+  window to `N` steps." Passive-HNDL secrecy already holds via the Option A seed for such a session
+  (§1.2); a **classical (default) pairing** has neither — its passive-HNDL status rests on the OOB
+  secret's transport, not ML-KEM, so this design is moot for it until it is PQ-paired. The *bootstrap*
+  chain and the steps before the first fold have **no** PQ post-compromise healing beyond the seed (§7).
 
 ---
 
@@ -524,11 +542,13 @@ sequenceDiagram
         I-->>R: ARQ ack
     end
     I->>I: decaps → ss 32 B, then wipe the 2464-B keypair secret
-    Note over I,R: each side computes its per-direction epoch-confirm tag over RK_epoch
-    I->>S: KEM_CONFIRM frame — initiator tag /i
+    Note over I,R: each side computes its per-direction confirm tag over the SCRATCH RK_epoch (§4.2)
+    I->>S: KEM_CONFIRM frame — initiator tag /i (ordinary ARQ message)
     S->>R: same 256-B frame
-    R->>S: KEM_CONFIRM frame — responder tag /r
+    R-->>I: ARQ ack
+    R->>S: KEM_CONFIRM frame — responder tag /r (ordinary ARQ message)
     S->>I: same 256-B frame
+    I-->>R: ARQ ack
     Note over I,R: both constant-time verify the peer tag — fold only on match, else abort with no strip
     I->>I: RK_epoch = HMAC of RK with dr/pq-epoch ‖ ss — atomic, on tag-verify
     R->>R: RK_epoch = HMAC of RK with dr/pq-epoch ‖ ss
@@ -545,9 +565,10 @@ stateDiagram-v2
     [*] --> NoPqPcsEpoch: bootstrap — Option A seed gives passive-HNDL secrecy but no PQ post-compromise healing
     NoPqPcsEpoch --> Rekeying: trigger (N steps reached or idle round available)
     PqEpoch --> Rekeying: next trigger (bounded PQ post-compromise window = N steps)
-    Rekeying --> Rekeying: stream and reassemble KEM chunks over ARQ (retransmit until acked)
+    Rekeying --> Rekeying: stream and reassemble KEM chunks over ARQ (ARQ retransmits until acked, so a lost chunk stays here)
+    Rekeying --> Aborted: rekey timeout (bounded per §4.4, wipe keypair secret)
     Rekeying --> Confirming: both sides hold hybrid ss (32 B)
-    Confirming --> Aborted: tag mismatch, lost chunk, or timeout (fail closed, wipe keypair secret)
+    Confirming --> Aborted: tag mismatch or timeout (fail closed, wipe keypair secret)
     Confirming --> PqEpoch: per-direction confirm tags verify then fold RK_epoch (atomic)
     Aborted --> NoPqPcsEpoch: retry if no prior fold had completed
     Aborted --> PqEpoch: retry if a prior fold had completed (prior PQ hardening retained, not stripped)
@@ -599,5 +620,5 @@ stateDiagram-v2
 `design/formal-analysis/ratchet.spthy` (rules/lemmas 57-137) · `ratchet-unbounded.spthy` (`Derive` rule
 63-66; induction lemmas 104-122) · `unlinkability.spthy` (2315-step result) · `design/dh-ratchet.md`
 (§2, §3, §6) · `design/retry-safe-addressing.md` (ARQ stop-and-wait; robustness note 1) ·
-`future-work.md` (Phase D). PR #81 `pqRequired` referenced from `gh pr view 81` (OPEN at time of
-writing).
+`future-work.md` (Phase D). `pqRequired` (PR #81) merged to main; the PQ prekey path remains opt-in, not
+the `addBuddy` default (`Engine.scala:287,318-323,326-336`; classical-seed caveat 273-275).
