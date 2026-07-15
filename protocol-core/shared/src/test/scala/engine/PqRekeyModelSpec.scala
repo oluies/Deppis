@@ -23,10 +23,11 @@ import scala.collection.mutable
   * timing-sensitive branches (idle-vs-busy trigger, chunk retransmit, the tag exchange, the
   * commit's anchor chosen at send time) and a fixed script visits exactly one path through them.
   *
-  * ==The adversary drops DELIVERIES, not map entries (and this is load-bearing)==
-  * Loss is injected by swallowing a `retrieve` that WOULD have returned a frame ([[Lossy]]), so
-  * every drop is exactly one real, live frame that the peer was about to receive — countable, and
-  * impossible to waste.
+  * ==The adversary drops LIVE FRAMES, not map entries (and this is load-bearing)==
+  * Loss is injected by swallowing a `retrieve` that would have returned a live frame ([[Lossy]]),
+  * so every drop is exactly one real frame the peer wrote — countable, and impossible to waste.
+  * (What that count does and does not mean is spelled out on [[Lossy]]: live frames swallowed —
+  * content, control, or ack — not deliveries prevented.)
   *
   * The obvious alternative — reach into the store map and `remove` a random key — is a TRAP, and an
   * earlier revision of this test fell into it. `FakeBackend.store` is append-only apart from
@@ -48,6 +49,21 @@ import scala.collection.mutable
   * (a malicious PEER) in `PqRekeyCrossSpec`.
   *
   * ==What this model does NOT reach (measured, not guessed)==
+  * LANE ARBITRATION is not pinned. Busy cases DO run the two lanes together — content flows for the
+  * whole adversarial phase while a rekey streams — but no assertion here proves that
+  * `ChunkScheduler.decide` ever chose `Chunk` over pending content. An earlier revision claimed it
+  * did, via a counter of rounds where a rekey was in progress while content was unacked. That
+  * counter was trivially satisfied: the warm-up ends idle with `stepsSinceFold >= IdleMinSteps`, so
+  * an attempt is ALREADY open when the adversarial phase starts (measured: `inProgress = true` at
+  * `advStart`, 3/3 runs) and the first send makes the condition true on round 0 — for every busy
+  * case, whatever the scheduler does. It also measured the wrong thing: `decide` is consulted once
+  * per HEAD with `chunkPending = rt.ctrl.nonEmpty` (`Engine.scala:1423-1428`), while `inProgress`
+  * stays true across long stretches with an empty `ctrl` (awaiting the peer's pub or tag). Pinning
+  * arbitration honestly needs the engine to report it (a chunk-lane head counter on `RekeyStatus`),
+  * which is production code and does not belong in a test-only PR — it is recorded as a follow-up
+  * instead of claimed here. `busyCases > 0` below guards only what it says: that the generator
+  * still produces busy cases at all.
+  *
   * The TIMEOUT paths are outside its horizon: `PqRekey.TimeoutRounds` is 2000, while a run is
   * capped at 96 warm + 660 adversarial + 600 drain + 200 probe = 1,556 rounds (typically ~820). No
   * attempt
@@ -172,7 +188,7 @@ class PqRekeyModelSpec extends AnyFunSuite with ScalaCheckPropertyChecks:
   test("model: a rekey over a lossy network never diverges the pair (§7 Phase 4)"):
     var totalFolds = 0
     var totalLost = 0
-    var totalContended = 0
+    var busyCases = 0
     forAll(genScript, minSuccessful(6)) { case (dropOneIn, sendEvery, seed) =>
       val rng = new scala.util.Random(seed)
       val p = pair(rng)
@@ -207,7 +223,6 @@ class PqRekeyModelSpec extends AnyFunSuite with ScalaCheckPropertyChecks:
       val advStart = round
       var aSent = 0
       var bSent = 0
-      var contended = 0
       def aInFlight = aSent - gotB.count(_.startsWith("m"))
       def bInFlight = bSent - gotA.count(_.startsWith("n"))
       while round < advStart + 660 do
@@ -218,17 +233,9 @@ class PqRekeyModelSpec extends AnyFunSuite with ScalaCheckPropertyChecks:
           if bInFlight < Window then
             p.bob.sendMessage(p.pid, s"n$bSent"): Unit
             bSent += 1
-        // Measure the busy/contention path rather than assuming it: a rekey in progress WHILE
-        // content is queued is exactly when `ChunkScheduler.decide` has to arbitrate the head.
-        if sendEvery > 0 && aInFlight > 0 && status(p.alice, p.pid).inProgress then contended += 1
         tick(): Unit
       assert(p.lost > 0, "the network must actually have eaten live frames")
-      // Anti-vacuity for the BUSY paths specifically: without this, a generator or scheduler change
-      // could quietly reduce every case to the idle pair and the suite would stay green while the
-      // contention this spec claims to cover went untested.
-      if sendEvery > 0 then
-        assert(contended > 0, "a busy case must contend: a rekey in flight while content is queued")
-        totalContended += contended
+      if sendEvery > 0 then busyCases += 1
       totalLost += p.lost
 
       // RECOVERY: a clean network. First DRAIN to quiescence, so the probe below measures the
@@ -279,8 +286,12 @@ class PqRekeyModelSpec extends AnyFunSuite with ScalaCheckPropertyChecks:
       totalFolds += sa.ratchetFolds
     }
     // ANTI-VACUITY: every assertion above holds trivially on a run where no rekey ever completed or
-    // where the network never actually ate anything, so pin both. `totalLost` counts real lost
-    // deliveries (not attempts to lose one) — the metric an earlier revision got wrong.
+    // where the network never actually ate anything, so pin both. `totalLost` counts real live
+    // frames swallowed (not attempts to lose one) — the metric an earlier revision got wrong.
     assert(totalFolds > 0, "the model must actually fold under loss, or it proves nothing")
     assert(totalLost > 0, "and the network must actually have eaten live frames")
-    assert(totalContended > 0, "and must have exercised the busy/contention path, not only idle")
+    // The generator must actually produce BUSY cases. This is a guard on the WEIGHTS (a revision
+    // that let the silent pair own half the state space is exactly what happened once), and it
+    // claims nothing more than that — see the class doc on what lane arbitration this suite does
+    // NOT pin.
+    assert(busyCases > 0, "the generator must produce busy cases, not only the idle probe")
