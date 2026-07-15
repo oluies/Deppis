@@ -14,11 +14,35 @@ import java.nio.charset.StandardCharsets.UTF_8
 object Handshake:
   final case class PairInit(pairId: String, safetyNumber: String, pairKey: Array[Byte])
 
-  def init(sharedSecret: Array[Byte]): PairInit =
-    val pairKey = Kdf.hmacSha256(sharedSecret, "mm/pair-key".getBytes(UTF_8))
-    val pairId = hex(Kdf.hmacSha256(sharedSecret, "mm/pair-id".getBytes(UTF_8))).take(32)
-    val safety = safetyNumber(Kdf.hmacSha256(sharedSecret, "mm/safety".getBytes(UTF_8)))
-    PairInit(pairId, safety, pairKey)
+  /** Derive the symmetric pairing values from the out-of-band shared secret.
+    *
+    * ==PQ-intent binding (US7 strip-downgrade defense)==
+    * `pqRequired` is the authenticated out-of-band pairing intent — "this pairing MUST be
+    * post-quantum". BOTH sides set it from the SAME OOB agreement, and it is folded (domain-separated
+    * by a `"mm/pq-required"` step) into the derivation so a MITM who flips the intent bit on one side
+    * makes the two sides derive DIFFERENT `pairId`/`safetyNumber`/`pairKey` — the out-of-band safety
+    * number comparison then fails, exactly as a tampered secret would. This binds the PQ intent to the
+    * authenticated channel, so an attacker who STRIPS the initiator's `kemPublicKey` cannot silently
+    * demote a party that expected PQ (that party fails closed at `addBuddy`; see `Engine.addBuddy`).
+    *
+    * BACKWARD COMPATIBILITY: when `pqRequired == false` the derivation is BYTE-IDENTICAL to the
+    * pre-change classical pairing (the raw `sharedSecret` is used unchanged), so existing classical
+    * pairIds / safety numbers do not move (pinned by `HandshakeSpec`). */
+  def init(sharedSecret: Array[Byte], pqRequired: Boolean = false): PairInit =
+    // A domain-separated step folds the PQ-intent bit into the derivation ONLY when set, so a
+    // `pqRequired = true` pairing derives entirely different values from a `pqRequired = false` one.
+    // The derived `effective` is a transient secret — wiped in `finally` (it is a fresh copy; the
+    // caller's `sharedSecret` is untouched). When the bit is unset we alias `sharedSecret` directly and
+    // must NOT wipe it, so the wipe is gated on `pqRequired`.
+    val effective =
+      if pqRequired then Kdf.hmacSha256(sharedSecret, "mm/pq-required".getBytes(UTF_8))
+      else sharedSecret
+    try
+      val pairKey = Kdf.hmacSha256(effective, "mm/pair-key".getBytes(UTF_8))
+      val pairId = hex(Kdf.hmacSha256(effective, "mm/pair-id".getBytes(UTF_8))).take(32)
+      val safety = safetyNumber(Kdf.hmacSha256(effective, "mm/safety".getBytes(UTF_8)))
+      PairInit(pairId, safety, pairKey)
+    finally if pqRequired then java.util.Arrays.fill(effective, 0.toByte)
 
   private def hex(b: Array[Byte]): String = b.map(x => f"${x & 0xff}%02x").mkString
 

@@ -274,6 +274,21 @@ final class Engine(
     *     content root exactly as before. This path is NON-PQ (the pairing seed is only as strong as
     *     the classical OOB secret); a PQ pairing must instead flow KEM material on both sides.
     *
+    * ==PQ-intent binding (US7, strip-downgrade defense)==
+    * `pqRequired` is the authenticated out-of-band pairing intent ("this pairing MUST be
+    * post-quantum"). BOTH sides set it from the SAME OOB agreement. It does two things:
+    *   - '''Fail closed on a stripped key''': a '''RESPONDER''' with `pqRequired = true` but NO
+    *     `initiatorKemPublicKey` is refused (`pq_prekey_required`) rather than seeding a classical
+    *     pairing — so an attacker who STRIPS the initiator's `kemPublicKey` from the OOB delivery can no
+    *     longer silently demote a responder that expected PQ. An '''INITIATOR''' with `pqRequired = true`
+    *     IMPLIES `initiatePqPrekey` (the PQ prekey path), so it can never accidentally seed a classical
+    *     pairing under a PQ intent.
+    *   - '''Bind intent to the authenticated channel''': `pqRequired` is folded (domain-separated) into
+    *     the `Handshake` derivation (see `Handshake.init`), so a MITM who flips the intent bit on one
+    *     side makes the two sides derive DIFFERENT `pairId`/`safetyNumber` ⇒ the out-of-band safety
+    *     number comparison fails. Backward compat: `pqRequired = false` leaves the derivation
+    *     byte-identical to the classical pairing.
+    *
     * HONEST LABELING (Constitution IV): even on the PQ path this hardens ONLY the initial content
     * root; the ongoing per-message X25519 DH ratchet stays classical (see `KeySchedule.pqContentRoot`
     * / the engine-api doc). `kemPublicKey`/`kemCiphertext` are PUBLIC; no private key leaves the
@@ -284,8 +299,13 @@ final class Engine(
       role: BuddyRole,
       peerNotifyLabel: Array[Byte] = Array.emptyByteArray,
       initiatorKemPublicKey: Option[Array[Byte]] = None,
-      initiatePqPrekey: Boolean = false
+      initiatePqPrekey: Boolean = false,
+      pqRequired: Boolean = false
   ): Either[EngineError, AddBuddyResult] =
+    // A `pqRequired` INITIATOR MUST take the PQ prekey path — imply it (the cleaner of the two options
+    // in the design: `pqRequired` semantically demands PQ, so opting into the prekey is the intent, not
+    // an error). A responder never generates a prekey; its PQ path is driven by `initiatorKemPublicKey`.
+    val wantInitiatorPq = initiatePqPrekey || (role == BuddyRole.Initiator && pqRequired)
     if sharedSecret.isEmpty then Left(EngineError("invalid_arg", "shared secret required"))
     // Reject inconsistent PQ argument combinations BEFORE the handshake — never silently drop KEM
     // material into a non-PQ (classical) pairing (fail closed):
@@ -293,10 +313,23 @@ final class Engine(
     //   - a Responder that sets `pqPrekey` must also supply the initiator's KEM public key to encaps to.
     else if role == BuddyRole.Initiator && initiatorKemPublicKey.isDefined then
       Left(EngineError("invalid_arg", "initiator must not be given a KEM public key"))
+    // STRIP-DOWNGRADE DEFENSE (fail closed): a responder that expected PQ (`pqRequired = true`) but
+    // received NO `initiatorKemPublicKey` refuses rather than seeding a classical pairing. This is the
+    // key removal an attacker performs to silently demote the responder to non-PQ; with the intent bound
+    // to the (authenticated) OOB pairing, its absence is now detectable and terminal. Checked BEFORE the
+    // `pqPrekey` arg-consistency guard below so that when `pqRequired` is set, a stripped key ALWAYS
+    // surfaces as `pq_prekey_required` (the "peer's PQ key was stripped" UX) — even if a caller also
+    // (mis)set the initiator-only `pqPrekey` flag on the responder, which would otherwise win invalid_arg.
+    else if role == BuddyRole.Responder && pqRequired && initiatorKemPublicKey.isEmpty then
+      Left(
+        EngineError("pq_prekey_required", "PQ intent set but no initiator KEM public key arrived")
+      )
     else if role == BuddyRole.Responder && initiatePqPrekey && initiatorKemPublicKey.isEmpty then
       Left(EngineError("invalid_arg", "responder pqPrekey requires the initiator KEM public key"))
     else
-      val init = Handshake.init(sharedSecret)
+      // Bind the PQ intent into the derivation (domain-separated; byte-identical when false), so a MITM
+      // flipping the bit on one side yields a mismatching safety number (OOB comparison fails).
+      val init = Handshake.init(sharedSecret, pqRequired)
       // Forward-secrecy root split: derive the retained addressing root (tokens + notify bit) and the
       // content-chain root, then WIPE the raw pair key so the content root is not recomputable from
       // anything we keep. `addrKey` cannot derive `contentRoot` (different HMAC branch).
@@ -317,7 +350,7 @@ final class Engine(
       (role, initiatorKemPublicKey) match
         case (BuddyRole.Responder, Some(peerPub)) =>
           addResponderPq(init, rel, addrKey, contentRoot, peerPub)
-        case (BuddyRole.Initiator, _) if initiatePqPrekey =>
+        case (BuddyRole.Initiator, _) if wantInitiatorPq =>
           addInitiatorPq(init, rel, addrKey, contentRoot)
         case _ =>
           addClassical(init, rel, addrKey, contentRoot, role)

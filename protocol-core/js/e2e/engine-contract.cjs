@@ -127,4 +127,20 @@ const pqRespConf = JSON.parse(
 );
 assert.strictEqual(pqRespConf.events[0].event, "buddyConfirmed", "PQ responder confirms with the initiator's /i tag");
 
+// PQ-intent binding (US7 strip-downgrade defense): a responder that expected PQ (`pqRequired: true`)
+// but received NO initiatorKemPublicKey (an attacker STRIPPED it) fails closed instead of demoting to
+// a classical pairing. And flipping the intent bit on one side moves the safety number (bound into the
+// derivation), so a MITM intent-flip is caught by the out-of-band comparison.
+const pqStrip = JSON.parse(
+  new ProtocolEngine().handle('{"apiVersion":"1","command":"addBuddy","args":{"sharedSecret":"oob","role":"responder","pqRequired":true}}')
+);
+assert.strictEqual(pqStrip.error.code, "pq_prekey_required", "pqRequired responder without a KEM key fails closed (strip defense)");
+const snClassical = JSON.parse(
+  new ProtocolEngine().handle('{"apiVersion":"1","command":"addBuddy","args":{"sharedSecret":"oob","role":"responder"}}')
+).result.safetyNumber;
+const snRequired = JSON.parse(
+  new ProtocolEngine().handle('{"apiVersion":"1","command":"addBuddy","args":{"sharedSecret":"oob","role":"initiator","pqRequired":true}}')
+).result.safetyNumber;
+assert.notStrictEqual(snRequired, snClassical, "pqRequired binds into the safety number (intent-flip caught)");
+
 console.log("engine-contract e2e: OK (bundle =", path.basename(bundle) + ")");

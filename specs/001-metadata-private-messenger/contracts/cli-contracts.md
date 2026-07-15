@@ -8,11 +8,18 @@ respect to the protocol/crypto logic in `protocol-core` / `crypto`.
 
 | Subcommand | Input (JSON stdin) | Output (JSON stdout) |
 |---|---|---|
-| `handshake-init` | `{ sharedSecret, role }` | `{ pairId, safetyNumber, sendCredential, recvCredential }` |
+| `handshake-init` | `{ sharedSecret, pqRequired? }` | `{ pairId, safetyNumber, pairKey }` |
 | `frame` | `{ pairId, plaintext, counter }` | `{ frame(256B, base64), writeToken, retrievalToken }` |
 | `deframe` | `{ frame(base64), keysRef }` | `{ plaintext }` |
 | `retrieval-token` | `{ senderId, receiverId, counter }` | `{ token }`  (keyed-PRF; non-recurrent) |
 | `schedule-next` | `{ scheduleState, now }` | `{ roundId, action: send|retrieve|carrier }` |
+
+`handshake-init` derives `pairId`/`safetyNumber`/`pairKey` symmetrically from the out-of-band
+`sharedSecret` (no `role` — both sides derive the same values). `pqRequired` (bool, default `false`)
+is the authenticated OOB PQ intent (US7): when set it is bound (domain-separated) into the derivation,
+so a MITM flipping the bit makes the two sides derive different safety numbers. Because it is a
+security intent flag, `handshake-init` REJECTS any input key outside `{ sharedSecret, pqRequired }`
+with an error (fail loud) — a typo'd flag never silently falls back to the classical derivation.
 
 `counter` MAY be a JSON string (recommended) to preserve the full 64-bit range; JSON numbers
 lose integer precision above 2^53, which would weaken retrieval-token non-recurrence (FR-014).
