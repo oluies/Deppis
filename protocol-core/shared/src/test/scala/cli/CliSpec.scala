@@ -57,6 +57,12 @@ class CliSpec extends AnyFunSuite:
       misspelled.isLeft,
       "a misspelled pqRequired key must be rejected, not silently classical"
     )
+    // Pin the actionable message too: it NAMES the offending key (an unknown-key rejection, not some
+    // unrelated failure that happens to be Left).
+    assert(
+      misspelled.swap.exists(_.contains("pq_required")),
+      s"the rejection must name the offending key, got: $misspelled"
+    )
     // Sanity: the same object with the CORRECT key is accepted and yields the PQ-required derivation.
     val ok = Pcore
       .run("handshake-init", s"""{"sharedSecret":"$secret","pqRequired":true}""")

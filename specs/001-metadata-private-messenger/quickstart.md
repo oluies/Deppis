@@ -35,7 +35,8 @@ sbt server/test
 ## Try the CLIs (no UI required — Constitution V)
 
 ```bash
-echo '{"sharedSecret":"<oob-secret>","role":"initiator"}' | pcore handshake-init
+echo '{"sharedSecret":"<oob-secret>"}'                       | pcore handshake-init
+echo '{"sharedSecret":"<oob-secret>","pqRequired":true}'     | pcore handshake-init  # PQ-intent bound
 echo '{"senderId":"A","receiverId":"B","counter":1}'      | pcore retrieval-token
 echo '{"suite":"ml-kem-768"}'                              | mcrypto kat   # {pass:true,...}
 echo '{}'                                                  | pstatus show  # shows the dev label
