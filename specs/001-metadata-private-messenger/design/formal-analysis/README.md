@@ -295,6 +295,35 @@ the falsified lemma beside it reveals that a secret you don't fold in buys you n
 > KEM was remodelled on the `asymmetric-encryption` builtin (a KEM *is* PKE of a fresh random secret)
 > with the tag check as an explicit `Eq` restriction. Same lesson as the circular header key in §2.
 
+### 5.2.1 The attack graphs — look at these first
+
+Tamarin draws the counterexample it finds. Two are committed under `graphs/`, so a reviewer can see
+what the falsified lemmas *mean* without installing anything:
+
+| Picture | What it is | Read it as |
+|---|---|---|
+| [`graphs/nofold-attack.svg`](graphs/nofold-attack.svg) | `ratchet-pq-epoch-nofold.spthy` :: `pq_post_compromise_security` — **falsified, 7 steps** | **The attack the fold prevents.** Follow `RevealRoot` → `kdfRK` → `Send`/`Out`: the adversary takes the revealed pre-fold root, walks the classical chain forward across the DH step (CDH is broken), and reads the message. This is the §1.2 gap, drawn. |
+| [`graphs/hijack-attack.svg`](graphs/hijack-attack.svg) | `ratchet-pq-epoch-hijack.spthy` :: `pq_post_compromise_security` — **falsified, 14 steps** | **The limit of the positive result** (§5.3). With A1 dropped, an adversary *active on the rekey exchange* supplies its own KEM public key and folds a secret it chose. Note the confirm tag is present and verifies — it proves knowledge of `ss`, and the attacker knows the `ss` it picked. |
+
+**There is deliberately no picture of the positive result.** `ratchet-pq-epoch.spthy`'s
+`pq_post_compromise_security` is *verified*, and a verified all-traces lemma has no trace to draw — its
+content is the **absence** of an attack, and absence has no picture. Anyone wanting to see that result
+must read the model and re-run the prover; that asymmetry is honest, not an omission. The pair above is
+the argument: **same model, same attacker, same lemmas — one line changed, and the attack appears.**
+
+Regenerate (never hand-edit the SVGs — a committed picture that drifts from its model is precisely the
+"asserts something the code does not do" failure this analysis keeps catching):
+
+```bash
+./render-attack-graphs.sh           # re-render graphs/*.svg from the models beside it
+./render-attack-graphs.sh --check   # exit 1 if the committed SVGs are stale
+```
+
+The script **fails loudly if a lemma stops falsifying** — if the control ever verifies, the negative
+control has silently stopped controlling anything, and no picture should be shipped until that is
+understood. Rendered with `tamarin-prover 1.12.0` + `graphviz 15.1.0`; `dot` layout is not guaranteed
+byte-stable across graphviz versions, so `--check` is a drift alarm for humans, not a CI gate.
+
 ### 5.3 What this does NOT prove — the assumption that bounds it
 
 **`ratchet-pq-epoch.spthy` assumes an *authentic* rekey channel (its abstraction A1).** The KEM
