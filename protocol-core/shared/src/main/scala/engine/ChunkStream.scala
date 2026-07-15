@@ -279,6 +279,9 @@ object ChunkStream:
   *     `maxCompletedRemembered` completed keys. A duplicate of a key evicted from that window
   *     could in principle start a fresh transfer — upstream ARQ dedup makes duplicates
   *     non-occurring in practice, and Phase 3's epoch state machine ignores non-current epochs.
+  *   - Bounded in TIME by the caller: a stalled transfer is never evicted on its own, so Phase 3's
+  *     abort/timeout path must call [[abandon]] to release it (§4.4) — otherwise it would hold one
+  *     of the `maxPendingTransfers` slots for the process's lifetime.
   *
   * Not thread-safe (mutable, single-owner) — same discipline as the rest of the engine state. */
 final class ChunkReassembler(
