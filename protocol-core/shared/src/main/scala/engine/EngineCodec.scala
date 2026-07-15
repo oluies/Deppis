@@ -53,9 +53,12 @@ final class EngineCodec(engine: Engine):
     val args = env.obj.getOrElse("args", ujson.Obj())
     env.obj.get("command").map(_.str).getOrElse("") match
       case "addBuddy" =>
-        // PQ pairing prekey (US7) wire fields (all optional; base64):
+        // PQ pairing prekey (US7) wire fields (all optional; base64 unless noted):
         //   in : `initiatorKemPublicKey` (responder consumes the initiator's hybrid-KEM public key),
-        //        `pqPrekey: true` (an initiator opting into the PQ path — generate a keypair + defer).
+        //        `pqPrekey: true` (an initiator opting into the PQ path — generate a keypair + defer),
+        //        `pqRequired: true` (bool; the authenticated OOB PQ intent — both sides set it: binds
+        //        into the safety-number derivation AND fails a responder closed with `pq_prekey_required`
+        //        if the initiator's KEM public key was stripped in transit). Defaults to `false`.
         //   out: `kemPublicKey` (initiator) or `kemCiphertext` + `kemConfirmTag` (responder) — PUBLIC
         //        material the app carries out of band to the peer. Absent on the classical path. A
         //        malformed base64 value throws and is mapped to `bad_request` by the guard in `handle`.
@@ -65,7 +68,8 @@ final class EngineCodec(engine: Engine):
             str(args, "sharedSecret").getBytes(UTF_8),
             role,
             initiatorKemPublicKey = optBytes(args, "initiatorKemPublicKey"),
-            initiatePqPrekey = bool(args, "pqPrekey")
+            initiatePqPrekey = bool(args, "pqPrekey"),
+            pqRequired = bool(args, "pqRequired")
           )
         yield
           val obj = ujson.Obj("pairId" -> res.pairId, "safetyNumber" -> res.safetyNumber)

@@ -9,7 +9,7 @@ runtime. Messages are JSON; `apiVersion` is mandatory on every call.
 
 | Command | Args | Effect |
 |---|---|---|
-| `addBuddy` | `{ sharedSecret, role, pqPrekey?: bool, initiatorKemPublicKey?: base64 }` | Run add-friend handshake; returns `safetyNumber` to compare out of band, plus optional PQ pairing-prekey material (see below). |
+| `addBuddy` | `{ sharedSecret, role, pqPrekey?: bool, pqRequired?: bool, initiatorKemPublicKey?: base64 }` | Run add-friend handshake; returns `safetyNumber` to compare out of band, plus optional PQ pairing-prekey material (see below). `pqRequired` is the authenticated OOB PQ intent (both sides set it): it binds into the safety number and fails a responder closed if the KEM key was stripped (see below). |
 | `confirmBuddy` | `{ pairId, matched: bool, kemCiphertext?: base64, kemConfirmTag?: base64, initiatorConfirmTag?: base64 }` | Confirm/reject pairing after safety-number comparison. Initiator: carries the responder's `kemCiphertext` + `kemConfirmTag` to key-confirm, and its result returns `initiatorConfirmTag`. Responder: carries the initiator's `initiatorConfirmTag` here to verify before it confirms (bidirectional key confirmation). |
 | `removeBuddy` | `{ pairId }` | Remove buddy; stops delivery without leaking prior existence (FR-018). |
 | `sendMessage` | `{ pairId, plaintext }` | Frame + content-encrypt + enqueue for next round. |
@@ -52,8 +52,9 @@ Because a KEM is asymmetric, the two devices exchange real, distinct key materia
 4. **Responder** `confirmBuddy` with `matched: true` and `initiatorConfirmTag` (base64) → **constant-time
    verifies it against the parked expected `/i` tag** and only then emits `buddyConfirmed`. Both sides
    arrive at a byte-identical seed and interoperate, and **both fail closed on any KEM tampering _of an
-   established PQ pairing_** (a same-length ciphertext flip, or a *substituted* `kemPublicKey`). See the
-   **stripped-key caveat** below: this does NOT cover an attacker who *removes* the KEM material entirely.
+   established PQ pairing_** (a same-length ciphertext flip, or a *substituted* `kemPublicKey`). An
+   attacker who *removes* the KEM material entirely is covered separately by **`pqRequired`** (the
+   **PQ-intent binding** below).
 
 - The **safety number / pairId are UNCHANGED** — still derived symmetrically from the out-of-band
   secret; only the content root gains the KEM secret.
@@ -70,27 +71,37 @@ Because a KEM is asymmetric, the two devices exchange real, distinct key materia
   `kemPublicKey` **tampered in transit to the responder** (a *substitution*) now makes the **responder**
   fail closed at step 4 (the honest initiator cannot produce the responder's expected `/i` tag), closing
   the former responder-side confirmed-but-dead gap.
-- **Stripped-key caveat (honest scope, Constitution IV):** bidirectional confirmation closes the
-  **substitution** case only. If an attacker instead **STRIPS** the `kemPublicKey` from the OOB delivery
-  to the responder, the responder's `addBuddy` sees no `initiatorKemPublicKey`, takes the **classical
-  (non-PQ) path**, and confirms on a bare `matched: true` — silently **demoted to non-PQ** (the initiator
-  still fails closed, but the responder does not, because it never entered the PQ flow). The safety
-  number (from the OOB secret) still authenticates the channel, so this is a loss of the *PQ hardening*,
-  not of channel authentication. The engine cannot detect this alone: "the peer expected PQ but no KEM
-  material arrived" is indistinguishable from "the peer never opted into PQ". **The app MUST treat a
-  missing-KEM-material-when-PQ-was-expected as a failure** — e.g. carry a PQ-intent flag alongside the
-  authenticated OOB secret and refuse a classical confirm when PQ intent was set. Binding PQ-intent into
-  the pairing itself (so a stripped key fails closed at the engine) is a **tracked follow-up**; it is
-  NOT implemented here.
+- **PQ-intent binding — strip-downgrade defense (`pqRequired`, resolves the former stripped-key
+  caveat):** bidirectional confirmation closes the **substitution** case; `pqRequired` closes the
+  **strip** case. If an attacker **STRIPS** the `kemPublicKey` from the OOB delivery, a responder that
+  did not know PQ was expected would take the **classical (non-PQ) path** and confirm on a bare
+  `matched: true` — a silent demotion to non-PQ. `pqRequired` is the **authenticated out-of-band PQ
+  intent** ("this pairing MUST be post-quantum"); **both sides set it from the same OOB agreement** (the
+  same channel as the safety-number comparison). It does two things:
+    1. **Fail closed on a stripped key:** a **responder** `addBuddy` with `pqRequired: true` but **no**
+       `initiatorKemPublicKey` is refused with `pq_prekey_required` (it does NOT seed a classical
+       pairing). An **initiator** with `pqRequired: true` **implies** `pqPrekey` (the PQ prekey path), so
+       it can never accidentally seed a classical pairing under a PQ intent.
+    2. **Bind the intent to the authenticated channel:** `pqRequired` is folded (domain-separated, via a
+       `"mm/pq-required"` step) into the `pairId` / `safetyNumber` / `pairKey` derivation. So a MITM who
+       flips the intent bit on **one** side makes the two sides derive **different** safety numbers ⇒ the
+       out-of-band comparison fails, exactly as a tampered secret would. This defeats an attacker who
+       strips the key *and* flips the victim's intent to classical to dodge (1). **Backward compatibility:
+       `pqRequired: false` (the default) leaves the derivation byte-identical to the pre-change classical
+       pairing** — existing classical pairIds / safety numbers do not move (pinned in `HandshakeSpec`).
+  Honest scope (Constitution IV): the initial pairing ROOT is what is bound + PQ-hardened; the ongoing
+  DH ratchet remains classical. `pqRequired` is opt-in per pairing — the app sets it whenever PQ was
+  agreed out of band; a pairing with `pqRequired: false` on both sides is the classical (legacy /
+  local-dev) path, unchanged.
 - **Fail closed:** once an initiator opts into `pqPrekey`, the initiator's `confirmBuddy(matched: true)`
   WITHOUT both `kemCiphertext` and `kemConfirmTag`, and the responder's `confirmBuddy(matched: true)`
   WITHOUT `initiatorConfirmTag`, are each refused (`pq_prekey_required`); a tag mismatch on either side
   is refused (`pq_confirm_failed`) — a PQ pairing never silently downgrades to the classical seed. In
   all cases the parked state is retained so a legitimate retry can complete. A pairing with no KEM
-  material on either side is the classical (legacy / local-dev) path and is NON-PQ — but note the
-  **stripped-key caveat** above: because a responder that receives no `initiatorKemPublicKey` is
-  indistinguishable from a genuinely-classical pairing, the *absence* of KEM material is not itself
-  fail-closed; the app must enforce PQ-intent out of band.
+  material on either side and `pqRequired: false` is the classical (legacy / local-dev) path and is
+  NON-PQ. When PQ **was** expected the app sets `pqRequired: true`, and a responder that then receives no
+  `initiatorKemPublicKey` **is** fail-closed (`pq_prekey_required`) — see the **PQ-intent binding** above,
+  which makes the *absence* of KEM material detectable + terminal instead of a silent classical demotion.
 - **Argument-consistency (fail closed):** `addBuddy` rejects inconsistent PQ combinations with
   `invalid_arg` before the handshake — an Initiator given an `initiatorKemPublicKey`, or a Responder
   with `pqPrekey: true` but no `initiatorKemPublicKey` — so KEM material is never silently dropped
