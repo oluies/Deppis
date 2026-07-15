@@ -366,13 +366,18 @@ class DoubleRatchetModelSpec extends AnyFunSuite with ScalaCheckPropertyChecks:
           foldsCompleted += 1
       }
 
-    /** Deliver everything still in flight, in FIFO order, then force the committer's armed fold to
-      * land (it applies on its next DH step) with a full ping-pong. Interoperability IS the root
-      * comparison: no oracle exposes the root, and two ratchets talk iff their roots agree. */
-    def settle(): Unit =
+    /** Deliver everything still in flight, in FIFO order. Terminates: a delivery can only enqueue
+      * the next step of one attempt's finite exchange (`/r → /i → EPOCH_COMMIT`), never content. */
+    def drain(): Unit =
       while a2b.nonEmpty || b2a.nonEmpty do
         if a2b.nonEmpty then deliver(fromInit = true)
         if b2a.nonEmpty then deliver(fromInit = false)
+
+    /** [[drain]], then force the committer's armed fold to land (it applies on its next DH step)
+      * with a full ping-pong. Interoperability IS the root comparison: no oracle exposes the root,
+      * and two ratchets talk iff their roots agree. */
+    def settle(): Unit =
+      drain()
       send(fromInit = true, "settle-a")
       deliver(fromInit = true)
       send(fromInit = false, "settle-b")
@@ -382,8 +387,8 @@ class DoubleRatchetModelSpec extends AnyFunSuite with ScalaCheckPropertyChecks:
       *
       * "Both sides still talk" is SYMMETRIC: a fold that quietly did nothing — a half-commit that
       * derived `RK_epoch` and never replaced the root, say — leaves both roots equal and passes
-      * every convergence assertion in this file. (Checked, not assumed: that exact mutation passes
-      * the property above and fails HERE.) So each script that folded ends by folding ONE side only
+      * every convergence assertion in this file. (Checked, not assumed: that exact mutation
+      * passes the property above and fails HERE.) So every script ends by folding ONE side only
       * and proving the roots part company. Without a root oracle — and production code must never
       * expose one — interoperability is the only honest observable: two ratchets talk iff their
       * roots agree, so a one-sided fold that does NOT break them means the fold never reached the
@@ -392,7 +397,10 @@ class DoubleRatchetModelSpec extends AnyFunSuite with ScalaCheckPropertyChecks:
       * Terminal: it deliberately desynchronizes the pair, so nothing may run after it. */
     def assertFoldIsLoadBearing(): Unit =
       assert(bob.canSend && !bob.epochFoldArmed, "precondition: a settled pair")
-      assert(bob.armEpochFold(bob.rootIndex + 1, random.Rand.bytes(EpochKdf.KeyBytes)))
+      assert(
+        bob.armEpochFold(bob.rootIndex + 1, random.Rand.bytes(EpochKdf.KeyBytes)),
+        "the control's one-sided fold must arm"
+      )
       // Drive the committer to its next DH step so the armed fold lands. `a → b` is always safe:
       // the receiving chain is derived by the `kdfRk` that PRODUCED the anchor root, so it predates
       // the fold — only the committer's REPLY is keyed under the folded root.
@@ -473,14 +481,16 @@ class DoubleRatchetModelSpec extends AnyFunSuite with ScalaCheckPropertyChecks:
     forAll(gen) { case (lead, tail) =>
       val w = World()
       lead.foreach(_(w))
-      // Force the implicit-rejection case, then drive the confirmation to completion.
-      w.attempt = None
+      // Reach a quiescent, converged state before forcing the case under test. NOT by clearing
+      // `attempt`: that would strand a committer whose fold is already ARMED (its EPOCH_COMMIT is
+      // on the wire and its peer will never be told to fold), which desynchronizes the pair and
+      // would surface later as a bogus failure of the assertions below — a test bug wearing a
+      // protocol bug's clothes. Draining lets any in-flight attempt finish or fail on its own.
+      w.drain()
       w.start(mismatchedSecret = true)
       val opened = w.attempt.isDefined
       val foldsBefore = w.alice.epochFoldsApplied
-      while w.a2b.nonEmpty || w.b2a.nonEmpty do
-        if w.a2b.nonEmpty then w.deliver(fromInit = true)
-        if w.b2a.nonEmpty then w.deliver(fromInit = false)
+      w.drain()
       if opened then
         refused += 1
         assert(w.attempt.isEmpty, "the mismatched attempt must have been torn down")
@@ -491,7 +501,7 @@ class DoubleRatchetModelSpec extends AnyFunSuite with ScalaCheckPropertyChecks:
         assert(!w.bob.epochFoldArmed, "nor on the committer")
       // The pair is still usable and can still rekey: run an HONEST attempt to completion.
       tail.foreach(_(w))
-      w.attempt = None
+      w.drain()
       val before = w.foldsCompleted
       w.start(mismatchedSecret = false)
       if w.attempt.isDefined then

@@ -34,6 +34,16 @@ import scala.collection.mutable
   * — the forged-envelope cases are exercised where they ARE reachable (a malicious PEER) in
   * `PqRekeyCrossSpec`.
   *
+  * ==What this model does NOT reach (measured, not guessed)==
+  * The TIMEOUT paths are outside its horizon: `PqRekey.TimeoutRounds` is 2000 and a run drives ~1100
+  * rounds, so no attempt here ever times out and nothing exercises the point of no return
+  * (`Engine.safeToAbort`) or stranding (§9 Q5). Verified by mutation: replacing `safeToAbort` with
+  * `true` leaves this suite GREEN — and turns four `PqRekeyCrossSpec` tests red, which is where that
+  * property is tested with the explicit round arithmetic it needs. Stretching the horizon past 2000
+  * rounds per case only to duplicate that coverage would cost minutes of CI for nothing, so this
+  * model deliberately does not claim it. What it does catch, by the same mutation method: a
+  * committer that arms the wrong anchor, and any divergence between the two roots.
+  *
   * ==Honest scope==
   * Green here is NOT a PQ claim: it says the mechanism survives a lossy network without diverging.
   * The `pq_post_compromise_security` property is Phase 5's formal analysis under an attacker model
@@ -70,13 +80,24 @@ class PqRekeyModelSpec extends AnyFunSuite with ScalaCheckPropertyChecks:
     seed <- Gen.choose(0L, Long.MaxValue) // which frame the store eats
   } yield (dropEvery, sendEvery, seed)
 
+  /** Messages queued per side during the adversarial phase.
+    *
+    * BOUNDED ON PURPOSE, and the bound is load-bearing for the test's honesty. The transport is
+    * stop-and-wait: one message in flight per pair, several rounds each, fewer still when the store
+    * is eating frames. An unbounded send cadence therefore builds a backlog the recovery phase can
+    * never drain, and then "the message I sent last never arrived" is a statement about QUEUE DEPTH,
+    * not about the ratchet — it fires on a perfectly healthy pair and, worse, it fires for the same
+    * reason on a broken one, so it cannot tell them apart. Capping the backlog is what makes the
+    * post-rekey delivery below an actual divergence detector. (Learned the hard way: an earlier
+    * revision of this test had no cap and "failed" identically whether or not the code was mutated.) */
+  private val MaxQueuedPerSide = 8
+
   test("model: a rekey over a lossy store never diverges the pair (§7 Phase 4, §9 Q5)"):
     var totalFolds = 0
     var totalDrops = 0
     forAll(genScript, minSuccessful(6)) { case (dropEvery, sendEvery, seed) =>
       val p = pair()
       val rng = new scala.util.Random(seed)
-      val delivered = mutable.ArrayBuffer.empty[String]
       var drops = 0
       var sent = 0
 
@@ -88,14 +109,14 @@ class PqRekeyModelSpec extends AnyFunSuite with ScalaCheckPropertyChecks:
         p.bob.drainEvents(): Unit
 
       for r <- 41 to 700 do
-        if sendEvery > 0 && r % sendEvery == 0 then
+        if sendEvery > 0 && sent < MaxQueuedPerSide && r % sendEvery == 0 then
           p.alice.sendMessage(p.pid, s"a$sent"): Unit
           p.bob.sendMessage(p.pid, s"b$sent"): Unit
           sent += 1
         p.alice.tick(r.toLong): Unit
         p.bob.tick(r.toLong): Unit
         p.alice.drainEvents(): Unit
-        delivered ++= p.bob.drainEvents().collect { case EngineEvent.MessageReceived(_, t, _) => t }
+        p.bob.drainEvents(): Unit
         // The store eats a frame: ARQ must recover it, and the rekey must not be diverged by the
         // retransmit (or by the duplicate a lost ack produces).
         if r % dropEvery == 0 && p.be.store.nonEmpty then
@@ -105,14 +126,15 @@ class PqRekeyModelSpec extends AnyFunSuite with ScalaCheckPropertyChecks:
       assert(drops > 0, "the script must actually have lost frames")
       totalDrops += drops
 
-      // Recovery phase: a clean network. Whatever the loss did to the rekey, the two sides must
-      // still be on the SAME root — and the only honest observable for that is that they still
-      // talk (no oracle exposes a root, and two ratchets interoperate iff their roots agree).
+      // Recovery phase: a clean network, long enough to drain the bounded backlog. Whatever the
+      // loss did to the rekey, the two sides must still be on the SAME root — and the only honest
+      // observable is that they still talk (no oracle exposes a root, and two ratchets interoperate
+      // iff their roots agree). A diverged pair delivers NOTHING from here on, in either direction.
       p.alice.sendMessage(p.pid, "after-a"): Unit
       p.bob.sendMessage(p.pid, "after-b"): Unit
       val gotA = mutable.ArrayBuffer.empty[String]
       val gotB = mutable.ArrayBuffer.empty[String]
-      for r <- 701 to 900 do
+      for r <- 701 to 1100 do
         p.alice.tick(r.toLong): Unit
         p.bob.tick(r.toLong): Unit
         gotA ++= p.alice.drainEvents().collect { case EngineEvent.MessageReceived(_, t, _) => t }
