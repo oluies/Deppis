@@ -46,6 +46,47 @@ object BuddyRole:
 /** Fixed, non-secret-dependent error (Constitution II). */
 final case class EngineError(code: String, message: String)
 
+/** Cadence + bounds for the CONTINUOUS post-quantum rekey (design/continuous-pq-ratchet.md §3.3
+  * option (c), §7 Phase 3, §9 open questions 1–2). These are the deliberate threat-model decisions
+  * the design doc refuses to default silently — named here, with their rationale, so the Phase 5
+  * security reviewer can argue with the numbers rather than reverse-engineer them.
+  *
+  * HONEST SCOPE (Constitution IV): none of this changes a privacy or PQ LABEL. The labeling gate is
+  * Phase 5 (the `pq_post_compromise_security` model + human review); `DEV, NO METADATA PRIVACY`
+  * stands regardless of how many epochs fold. */
+object PqRekey:
+  /** The HARD ceiling: at most this many content messages (sent + received on a pair) pass before a
+    * rekey is started. This IS the PQ post-compromise window of design §1.3 G3 — after a classical
+    * state compromise, a CRQC adversary reads at most this many further messages before the next
+    * ML-KEM secret it cannot compute re-hardens the root. 100 is chosen as the doc's own worked
+    * example (§3.1: "amortized over a cadence of, say, N = 100 message steps … ~19 % frame overhead"
+    * worst case) and sits in the same order as iMessage PQ3's ~50-message/periodic rekey (§9 Q1).
+    * Lower ⇒ a tighter window, more bandwidth; the knob is here precisely so that trade is explicit. */
+  val StepCeiling: Int = 100
+
+  /** The OPPORTUNISTIC floor (doc option (c) / (a-i)): on a round where the pair has nothing to
+    * send, a rekey costs ZERO marginal frames — its chunk frame simply replaces the cover write the
+    * round would have emitted anyway, and the store sees the same one uniform 256-byte write either
+    * way. So rekey early when it is free, but not so eagerly that a one-message-then-idle pair burns
+    * ~19 frames and an ML-KEM keygen per message: 8 amortizes a full rekey over ≥ 8 messages while
+    * still hardening a pair (especially a CLASSICAL pairing — doc §1.2) long before the ceiling. */
+  val IdleMinSteps: Int = 8
+
+  /** Bounded rekey lifetime in rounds (Constitution II / doc §4.4: "a bounded rekey timeout (and
+    * wipe) is required so a stalled rekey does not leave 2.4 KB of KEM secret resident
+    * indefinitely"). Generous by ~25×: a ~19-frame transfer needs ≤ ~76 rounds even when the
+    * scheduler cedes only 1 busy round in `ChunkScheduler.Policy.Default.busyStride` = 4 to chunks,
+    * so this only fires on a genuinely stalled/stranded transfer, never on a slow one.
+    *
+    * The timeout is NOT applied past an attempt's point of no return (`Engine.safeToAbort`: the
+    * confirm exchange, from which the peer is committed to folding). Tearing down there would either
+    * diverge the chains or strand the peer, both strictly worse than holding 32 bytes of `ss`. This
+    * costs the doc's requirement nothing: the 2464-byte keypair secret this bound exists for is
+    * wiped the instant `decaps` returns — strictly BEFORE the initiator's `/i` tag goes out, i.e.
+    * strictly before the point of no return — so every round in which that secret is live is still
+    * inside the timeout's reach. */
+  val TimeoutRounds: Long = 2000L
+
 /** Engine → caller events (engine-api.md). No event ever carries key material. */
 sealed trait EngineEvent
 object EngineEvent:
@@ -80,6 +121,53 @@ final case class ConfirmResult(
 
 /** Per-round client decision from the schedule (`tick`). `kind`/`retrieve` only — no payload. */
 final case class RoundDecision(roundId: Long, carrier: Boolean, retrieve: Boolean)
+
+/** Non-secret observability for a pair's continuous-PQ rekey (design §7 Phase 3). Counters and a
+  * FIXED abort reason only — never key material, never anything secret-dependent (Constitution II);
+  * `lastAbort` is one of a closed set of literals. Deliberately NOT on the JSON/Dart boundary (no
+  * `engine-api.md` contract change): this is engine-internal diagnostics and test observability.
+  *
+  * `epochsFolded` counts rekeys this side has COMMITTED; `ratchetFolds` counts folds the ratchet has
+  * actually APPLIED to its root. They differ transiently by design: the committer arms its fold for
+  * its NEXT root index, so it commits the rekey one DH step before the root actually folds. */
+final case class RekeyStatus(
+    epochsFolded: Int,
+    ratchetFolds: Int,
+    attempts: Int,
+    aborts: Int,
+    /** Inputs rejected while the attempt was held open past its point of no return — a forged frame
+      * shows up here, not in `aborts`, because it must not be able to kill the attempt. */
+    refusals: Int,
+    inProgress: Boolean,
+    /** The in-flight attempt's epoch id, or 0 when none. PUBLIC transport metadata (it rides the
+      * control envelope), never key material. */
+    currentEpoch: Int,
+    /** The round the in-flight attempt opened on (-1 when none) — the base the `PqRekey
+      * .TimeoutRounds` bound is measured from. A public round id, never key material. */
+    attemptStartRound: Long,
+    /** Whether the in-flight attempt has reached its epoch shared secret — a PHASE bit (which the
+      * peer already knows from the traffic it sent us), not a fact about any key's bytes. */
+    hasEpochSecret: Boolean,
+    /** Whether this side has verified the peer's confirmation tag and queued its own response — the
+      * `Confirming` state of design §8.2. Phase, not key material. */
+    confirmExchanged: Boolean,
+    /** Whether the in-flight attempt can still be torn down without risking a ONE-SIDED fold (see
+      * `Engine.safeToAbort`). False once the peer is committed to folding at the anchor — the window
+      * in which a timeout or a hostile envelope must NOT dismantle the attempt. */
+    abortSafe: Boolean,
+    /** TOTAL age in rounds of a STRANDED attempt — `roundId - startRound`, so it is `≥
+      * PqRekey.TimeoutRounds` whenever it is nonzero (0 = not stranded). Named for what it holds:
+      * this is the attempt's whole lifetime, not the excess over the timeout, because "this attempt
+      * has been alive N rounds" is what a human diagnosing a stall wants next to `startRound`.
+      *
+      * Nonzero means this pair has STOPPED REKEYING and will not resume: its PQ post-compromise
+      * window is no longer refreshing, though messaging is unaffected. With `lastAbort =
+      * "pq_rekey_stranded"` this is the only observable for the §9-Q5 stranding residual. */
+    strandedAttemptAgeRounds: Long,
+    foldArmed: Boolean,
+    stepsSinceFold: Int,
+    lastAbort: String
+)
 
 /** Stateful engine instance. Single-threaded by contract (one engine per client session); the JS
   * runtime is single-threaded and the JVM tests drive it from one thread.
@@ -166,6 +254,51 @@ final class Engine(
       case BuddyRole.Initiator => DoubleRatchet.initInitiator(contentRoot)
       case BuddyRole.Responder => DoubleRatchet.initResponder(contentRoot)
 
+    // ---- Continuous-PQ periodic rekey (design/continuous-pq-ratchet.md §7 Phase 3) -------------
+    /** ONE reassembler PER PAIR — `ChunkReassembler`'s stated contract, and its natural home. Its
+      * key carries no pair id and its at-cap policy evicts the OLDEST pending transfer, which is
+      * self-healing only while a SINGLE peer supplies every chunk (a peer can then evict just its
+      * own stalled transfer). A reassembler shared across buddies would let one malicious peer evict
+      * another buddy's live transfer — a cross-buddy denial of service. */
+    val reassembler: ChunkReassembler = ChunkReassembler()
+
+    /** Control frames awaiting transmission — the rekey's KEM chunks / confirm tags / epoch commit.
+      * They ride the SAME stop-and-wait ARQ lane as content (one head in flight, retransmitted under
+      * a fresh round token until acked); [[ChunkScheduler]] picks the lane when a new head opens. */
+    var ctrl: Vector[CtrlItem] = Vector.empty
+    var headIsCtrl: Boolean = false // does the in-flight head come from `ctrl` or the outbox?
+    var sched: ChunkScheduler.State = ChunkScheduler.State.Initial
+    var rekey: Option[RekeyAttempt] = None
+
+    /** Content messages (sent + received) since the last committed fold — the cadence counter the
+      * `PqRekey.StepCeiling` / `IdleMinSteps` trigger reads. Public metadata, never secret-derived. */
+    var stepsSinceFold: Int = 0
+
+    /** Lowest rekey epoch this side will still open. Monotonic and never reused, INCLUDING across a
+      * failed attempt: reusing an aborted epoch would collide with that epoch's reassembler state
+      * (a completed transfer's late-duplicate suppression would swallow the retry's chunks). */
+    var nextRekeyEpoch: Int = 1
+    var epochsFolded: Int = 0
+    var rekeyAttempts: Int = 0
+    var rekeyAborts: Int = 0
+
+    /** Inputs REJECTED while the attempt was held past its point of no return (`safeToAbort`) —
+      * distinct from `rekeyAborts` (attempts actually torn down). */
+    var rekeyRefusals: Int = 0
+
+    /** TOTAL age in rounds (`roundId - startRound`) of the current attempt once it is stranded;
+      * 0 when not stranded. Surfaces the §9-Q5 stall that otherwise has no observable at all. */
+    var strandedAttemptAgeRounds: Long = 0L
+    var lastAbort: String = ""
+
+    /** Release every rekey secret + buffer for this pair (buddy removal / rejected pairing). */
+    def wipeRekey(): Unit =
+      rekey.foreach(_.wipe())
+      rekey = None
+      ctrl = Vector.empty
+      reassembler.abandonAll(): Unit
+      ratchet.disarmEpochFold()
+
   /** Parked initiator PQ pairing-prekey state (see `pendingPq`). Holds the hybrid-KEM secret key and
     * the base content root — BOTH secret — until the responder's ciphertext arrives. Only ever an
     * INITIATOR's state (a responder seeds its ratchet synchronously at `addBuddy`), so the role is
@@ -178,6 +311,39 @@ final class Engine(
     def wipe(): Unit =
       Engine.this.wipe(kemSecret)
       Engine.this.wipe(baseContentRoot)
+
+  /** A queued control frame. `Encoded` is ready bytes; `Commit` is materialized LATE — its anchor is
+    * the ratchet position at the instant the frame's bytes are built, which the queue cannot know. */
+  private enum CtrlItem(val epoch: Int):
+    case Encoded(override val epoch: Int, bytes: Array[Byte]) extends CtrlItem(epoch)
+    case Commit(override val epoch: Int) extends CtrlItem(epoch)
+
+  /** One in-flight rekey attempt (design §8.2's `Rekeying`/`Confirming` states). Fresh per attempt —
+    * the hybrid keypair is NEVER reused across epochs or retries (§4.4). */
+  private final class RekeyAttempt(val epoch: Int, val startRound: Long):
+    /** The 2464-byte hybrid keypair secret — INITIATOR only, and only until `decaps` (§4.4). It is
+      * the one rekey secret that must survive the multi-round ciphertext transfer, which is exactly
+      * why it is wiped the instant it has served (and on every abort/timeout path). */
+    var kemSecret: Array[Byte] = null
+
+    /** The 32-byte hybrid-KEM epoch shared secret, once known. Wiped at the fold or the abort. */
+    var ss: Array[Byte] = null
+    var confirmSent: Boolean = false // initiator: our /i tag is queued
+    var commitQueued: Boolean = false // responder: our EPOCH_COMMIT is queued
+    /** The POINT OF NO RETURN: set the instant this side puts its own confirmation tag on the wire
+      * (`/r` for the responder, `/i` for the initiator). From here the attempt is never torn down —
+      * see [[Engine.safeToAbort]] for why both sides need this and why it is the tag SEND, not its
+      * ack, that draws the line. */
+    var committed: Boolean = false
+
+    /** Set once this attempt has outlived `PqRekey.TimeoutRounds` while past its point of no return
+      * — i.e. it is being held for a peer that may never answer (see `maybeTimeoutRekey`). */
+    var stranded: Boolean = false
+    def wipe(): Unit =
+      if kemSecret != null then Engine.this.wipe(kemSecret)
+      kemSecret = null
+      if ss != null then Engine.this.wipe(ss)
+      ss = null
 
   private def peerRole(r: BuddyRole): BuddyRole = r match
     case BuddyRole.Initiator => BuddyRole.Responder
@@ -235,6 +401,431 @@ final class Engine(
     * followed by AEAD ciphertext+tag, which is computationally indistinguishable from random — so a
     * random block is a perfect cover (FR-012), byte-indistinguishable in size and entropy. */
   private def coverFrame(): Array[Byte] = random.Rand.bytes(DoubleRatchet.WireSize)
+
+  // ==== Continuous post-quantum rekey — the state machine (design/continuous-pq-ratchet.md §7 =====
+  //      Phase 3; states + transitions per §8.2; sequence per §8.1).
+  //
+  // Shape (roles are the PAIRING roles, so the cadence has exactly one driver and no rekey race):
+  //
+  //   INITIATOR                                             RESPONDER
+  //   trigger (§3.3 (c)) ─ fresh hybrid keypair (§4.4)
+  //   ── KEM_CHUNK(e, PUB) × 9 ──────────────────────────▶  encaps ⇒ (ct, ss)
+  //   decaps ⇒ ss;  WIPE the 2464-B keypair secret  ◀────── KEM_CHUNK(e, CT) × 8, then
+  //   verify /r tag (constant time) ─ mismatch ⇒ ABORT ◀───  KEM_CONFIRM(e, /r)
+  //   ── KEM_CONFIRM(e, /i) ─────────────────────────────▶  verify /i (constant time) ⇒ else ABORT
+  //   fold at `anchor`, wipe ss             ◀───────────── ARM fold @ own next root index, then
+  //                                                         EPOCH_COMMIT(e, anchor), wipe ss
+  //
+  // Every frame above is an ORDINARY ARQ message inside the MK-sealed inner block: same 256-byte
+  // wire frame, same encrypted header, no size change (§5 / G2 / FR-012). Ordering, retransmit,
+  // dedup are the existing stop-and-wait ARQ's job (§3.1) — nothing new is invented here.
+  //
+  // WHY THE FOLD CANNOT SIMPLY BE "FOLD MY CURRENT ROOT". The peers share ONE root chain but are
+  // never on the same root at the same time (see `DoubleRatchet.rootIndex`), so the fold is anchored
+  // to a root INDEX. The committer arms its own NEXT index; the receiver of that frame sits on
+  // exactly that index once it has processed the frame, and re-checks it before folding. The
+  // ratchet's own structure gates this: the committer CANNOT advance past its anchor until the peer
+  // has received the commit, because it only advances on a new peer ratchet key, which the peer only
+  // mints after processing a frame — and stop-and-wait leaves the commit as the committer's only
+  // in-flight frame. That is the doc's "gated liveness", enforced by construction rather than hoped
+  // for.
+  //
+  // CONFIRM-BEFORE-COMMIT (§4.2, ML-KEM implicit rejection). Both per-direction tags are verified
+  // constant-time BEFORE any ratchet state moves, so a tampered/mismatched epoch secret is refused
+  // with an explicit reason and leaves the pre-rekey epoch fully usable — never a "confirmed but
+  // dead" fork, never a stripped prior hardening. The tags are keyed on the hybrid-KEM shared secret
+  // (`HMAC(ss, "dr/pq-epoch-confirm/{i,r}")`), which is what §4.2 specifies as amended for Phase 3 —
+  // `RK_epoch` is unavailable at tag time for the reason in the paragraph above, and the bindings it
+  // would have carried come from the authenticated MK-sealed chain the tags ride, `ss` being fresh
+  // per attempt (§4.4), and the explicit, re-checked `EPOCH_COMMIT.anchor`. See `EpochKdf`'s object
+  // doc and design §4.2 for the full argument.
+
+  /** Fold-cadence trigger (design §3.3 option (c)): the `PqRekey.StepCeiling` ceiling, taken
+    * OPPORTUNISTICALLY earlier on a round this pair would otherwise spend on a cover write — where
+    * a rekey costs zero marginal frames (§3.1 (a-i)). Initiator-driven only. */
+  private def maybeStartRekey(pid: String, rt: BuddyRuntime, roundId: Long): Unit =
+    val idle =
+      outbox.get(pid).forall(_.isEmpty) && rt.ctrl.isEmpty && rt.headSeq == ArqFrame.NoSeq
+    val due = rt.stepsSinceFold >= PqRekey.StepCeiling ||
+      (idle && rt.stepsSinceFold >= PqRekey.IdleMinSteps)
+    if due then startRekey(rt, roundId)
+
+  /** Open an attempt: a FRESH hybrid keypair (§4.4 — never reused across epochs or retries) whose
+    * public key is chunked onto the control lane. The epoch id is monotonic and never re-used. */
+  private def startRekey(rt: BuddyRuntime, roundId: Long): Unit =
+    val epoch = rt.nextRekeyEpoch
+    rt.nextRekeyEpoch += 1
+    rt.reassembler.abandonBefore(epoch): Unit // stale attempts' buffers are reclaimed in bulk
+    val generated =
+      try Right(HybridKem.keypair())
+      catch case _: Throwable => Left(())
+    generated match
+      case Left(_) => noteAbort(rt, "pq_rekey_keygen_failed")
+      case Right((kemPub, kemSecret)) =>
+        ChunkStream.chunk(epoch, BuddyRole.Initiator, ChunkStream.Part.Pub, kemPub) match
+          case Left(_) =>
+            wipe(kemSecret)
+            noteAbort(rt, "pq_rekey_chunk_failed")
+          case Right(frames) =>
+            val a = RekeyAttempt(epoch, roundId)
+            a.kemSecret = kemSecret
+            rt.rekey = Some(a)
+            rt.rekeyAttempts += 1
+            rt.ctrl = rt.ctrl ++ frames.map(f => CtrlItem.Encoded(epoch, f))
+
+  /** Responder side of the same admission: the initiator drives, so a PUB chunk for a fresh epoch
+    * opens our attempt. */
+  private def beginResponderAttempt(rt: BuddyRuntime, epoch: Int, roundId: Long): Unit =
+    rt.rekey = Some(RekeyAttempt(epoch, roundId))
+    rt.rekeyAttempts += 1
+    rt.nextRekeyEpoch = epoch + 1
+    rt.reassembler.abandonBefore(epoch): Unit
+
+  private def noteAbort(rt: BuddyRuntime, reason: String): Unit =
+    rt.rekeyAborts += 1
+    rt.lastAbort = reason // a fixed literal from a closed set — nothing attacker-controlled echoed
+
+  /** May this attempt still be torn down without stranding or diverging the peer?
+    *
+    * This is the two-phase-commit question, and getting it wrong is silent, so the reasoning is
+    * spelled out. The line is drawn where each side PUTS ITS OWN CONFIRMATION TAG ON THE WIRE:
+    *
+    *   - The INITIATOR cannot abort once its `/i` tag is SENT — not once it is ACKED. The responder
+    *     commits on RECEIVING that tag, and the ack proving receipt can be lost while the tag itself
+    *     was delivered. So from the moment it goes out the responder may already be committed;
+    *     aborting would wipe the `ss` needed when the commit lands ⇒ the responder folds, we do not
+    *     ⇒ silent divergence.
+    *   - The RESPONDER cannot abort once its `/r` tag is SENT — for the mirror reason. The initiator
+    *     sends `/i` (and commits) only in response to `/r`, so from the moment `/r` is out the
+    *     initiator may be committed and waiting for a commit that an abort here would never send.
+    *     Drawing the responder's line any later — at the EPOCH_COMMIT, say — leaves a real race: a
+    *     responder that timed out while the initiator's `/i` was still in flight would strand that
+    *     initiator forever, holding `ss` and unable to rekey again.
+    *
+    * Because `/i` can only follow `/r`, the responder is always already holding when the initiator
+    * commits, so neither side can be stranded by the other. What stays resident past the line is 32
+    * bytes of `ss`. The 2464-byte keypair secret that §4.4's bounded timeout exists for is wiped the
+    * instant `decaps` returns — strictly before `/i` goes out — so every round in which THAT secret
+    * is live remains inside the timeout's reach, which is what the doc requires.
+    *
+    * Residual, stated honestly (design §9 open question 5, "epoch-fold liveness under stranding"):
+    * if the peer disappears past this line the attempt is held open for the pair's lifetime, so that
+    * pair stops rekeying (its PQ post-compromise window stops being refreshed). Messaging is
+    * unaffected — the ratchet is untouched. Stuck-but-correct is the right trade against diverged,
+    * and it is the honest state of the art for a two-general commit; a resynchronization handshake
+    * is deliberately left to a later phase rather than faked here. */
+  private def safeToAbort(rt: BuddyRuntime, a: RekeyAttempt): Boolean = !a.committed
+
+  /** Abort an attempt and route back to the PRE-REKEY epoch (design §8.2): every secret wiped, the
+    * epoch's reassembly buffers released, its queued control frames dropped — and NOTHING about a
+    * previously completed fold touched, so a failed rekey can never strip earlier PQ hardening. The
+    * attempt id is already consumed, so a retry uses a fresh epoch.
+    *
+    * Past the point of no return this REFUSES to tear the attempt down (see [[safeToAbort]]) and
+    * only rejects the offending input, keeping the attempt alive. Fail-closed is preserved either
+    * way — nothing folds on a bad input, which is the security property — and holding is strictly
+    * better: only a malicious or broken peer can prompt an abort there (an honest one has verified
+    * the same `ss`), so tearing down would let a single forged frame both strand the peer and deny
+    * the pair every future rekey. The genuine tag can still arrive and complete the epoch. */
+  private def abortRekey(rt: BuddyRuntime, reason: String): Unit =
+    rt.rekey match
+      case Some(a) if !safeToAbort(rt, a) =>
+        rt.lastAbort = reason // the specific fail-closed reason; the ATTEMPT survives
+        rt.rekeyRefusals += 1
+      case Some(a) =>
+        a.wipe()
+        rt.reassembler.abandon(a.epoch): Unit
+        // Drop only THIS epoch's queued control frames: a COMPLETED epoch's EPOCH_COMMIT may still
+        // be in flight, and its peer folds on it, so it must keep retransmitting.
+        val headDropped = rt.headIsCtrl && rt.ctrl.headOption.exists(_.epoch == a.epoch)
+        rt.ctrl = rt.ctrl.filterNot(_.epoch == a.epoch)
+        if headDropped then
+          rt.headSeq = ArqFrame.NoSeq // an unacked, abandoned head: the next head takes a fresh seq
+          rt.headWire = null
+          rt.headIsCtrl = false
+        rt.rekey = None
+        noteAbort(rt, reason)
+      case None => noteAbort(rt, reason)
+
+  /** Bounded attempt lifetime (§4.4) — but never past the point of no return (see `safeToAbort`). */
+  private def maybeTimeoutRekey(rt: BuddyRuntime, roundId: Long): Unit =
+    rt.rekey.foreach { a =>
+      val overdue = roundId - a.startRound > PqRekey.TimeoutRounds
+      if safeToAbort(rt, a) then
+        if overdue then abortRekey(rt, "pq_rekey_timeout")
+      else if overdue then
+        // STRANDED (design §9 open question 5). Past the point of no return we deliberately never
+        // tear an attempt down, so a peer that disappears here leaves this attempt — and its 32-byte
+        // `ss` — resident for the pair's lifetime. The real cost is silent: `maybeStartRekey` is
+        // gated on `rekey.isEmpty`, so THIS PAIR STOPS REKEYING FOREVER and its PQ post-compromise
+        // window simply never refreshes again. Messaging is unaffected (the ratchet is untouched),
+        // which is why holding still beats diverging — but the condition must be REPORTABLE rather
+        // than only inferable from `epochsFolded` never advancing.
+        //
+        // `lastAbort` is written ONCE, on the transition into the stall — not every round. It is the
+        // only diagnostic surface here, so re-stamping it each tick would clobber any later
+        // fail-closed reason (a forged frame's `pq_rekey_confirm_failed`, say) within one round and
+        // hide it forever. The age below keeps counting, so "how long" stays live either way.
+        if !a.stranded then
+          a.stranded = true
+          rt.lastAbort = "pq_rekey_stranded"
+        rt.strandedAttemptAgeRounds = roundId - a.startRound
+    }
+
+  /** The rekey is done on this side: wipe `ss`, reclaim stale reassembly, restart the cadence. */
+  private def completeRekey(rt: BuddyRuntime, a: RekeyAttempt): Unit =
+    a.wipe()
+    rt.rekey = None
+    rt.strandedAttemptAgeRounds = 0L // a stranded attempt that finally landed is no longer stranded
+    rt.reassembler.abandonBefore(a.epoch + 1): Unit
+    rt.stepsSinceFold = 0
+    rt.epochsFolded += 1
+    if a.epoch >= rt.nextRekeyEpoch then rt.nextRekeyEpoch = a.epoch + 1
+
+  /** Route one decoded-as-control ARQ payload. Fail-closed throughout: an envelope we cannot decode,
+    * or one that speaks in OUR role (reflection), aborts the attempt rather than being ignored. */
+  private def onControl(rt: BuddyRuntime, payload: Array[Byte], roundId: Long): Unit =
+    ChunkStream.decode(payload) match
+      case Left(_) => abortRekey(rt, "pq_rekey_bad_envelope")
+      case Right(env) =>
+        // Anti-reflection: the peer may only ever speak in the PEER's role — mirroring the
+        // per-direction domain separation of the confirm tags themselves.
+        val role = env match
+          case c: ChunkStream.Envelope.KemChunk => c.role
+          case c: ChunkStream.Envelope.KemConfirm => c.role
+          case c: ChunkStream.Envelope.EpochCommit => c.role
+        if role != peerRole(rt.role) then abortRekey(rt, "pq_rekey_role_reflected")
+        else
+          env match
+            case c: ChunkStream.Envelope.KemChunk => onKemChunk(rt, c, roundId)
+            case ChunkStream.Envelope.KemConfirm(e, _, tag) => onKemConfirm(rt, e, tag)
+            case ChunkStream.Envelope.EpochCommit(e, _, anchor) => onEpochCommit(rt, e, anchor)
+
+  private def onKemChunk(rt: BuddyRuntime, c: ChunkStream.Envelope.KemChunk, roundId: Long): Unit =
+    // A fresh epoch is admitted only when no fold is still ARMED-but-unapplied: `armEpochFold`
+    // refuses a second pending fold, so admitting one here would only reach `ctrlHeadBytes` and
+    // abort. The previous fold lands on this pair's next DH step, so the initiator's retry (a fresh
+    // epoch) is admitted a step later — self-healing rather than a churn of doomed attempts. The
+    // initiator's own trigger carries the same guard.
+    val fresh = rt.role == BuddyRole.Responder && c.part == ChunkStream.Part.Pub &&
+      c.epoch >= rt.nextRekeyEpoch && !rt.ratchet.epochFoldArmed
+    if fresh then
+      rt.rekey match
+        case Some(a) if !safeToAbort(rt, a) => () // past the point of no return: never abandoned
+        case Some(_) =>
+          abortRekey(rt, "pq_rekey_superseded")
+          beginResponderAttempt(rt, c.epoch, roundId)
+        case None => beginResponderAttempt(rt, c.epoch, roundId)
+    rt.rekey match
+      case Some(a) if a.epoch == c.epoch =>
+        rt.reassembler.feed(c) match
+          case Left(_) => abortRekey(rt, "pq_rekey_chunk_rejected") // fail closed, retryable
+          case Right(None) => () // buffered, or an exact duplicate
+          case Right(Some(done)) => onKemObject(rt, a, done)
+      case _ => () // no attempt at this epoch (a stale duplicate): ignore, mutate nothing
+
+  private def onKemObject(
+      rt: BuddyRuntime,
+      a: RekeyAttempt,
+      done: ChunkReassembler.Completed
+  ): Unit =
+    (rt.role, done.part) match
+      case (BuddyRole.Responder, ChunkStream.Part.Pub) =>
+        val encapsed =
+          try Right(HybridKem.encaps(done.bytes))
+          catch case _: Throwable => Left(()) // malformed / low-order peer key
+        encapsed match
+          case Left(_) => abortRekey(rt, "pq_rekey_bad_pubkey")
+          case Right((ct, ss)) =>
+            ChunkStream.chunk(a.epoch, BuddyRole.Responder, ChunkStream.Part.Ct, ct) match
+              case Left(_) =>
+                wipe(ss)
+                abortRekey(rt, "pq_rekey_chunk_failed")
+              case Right(frames) =>
+                a.ss = ss
+                // Our `/r` tag goes out with these chunks ⇒ the initiator may answer with `/i` and
+                // commit at any time after this, so this attempt is now ours to see through.
+                a.committed = true
+                val tag = EpochKdf.epochConfirmTagResponder(ss) // PUBLIC: a one-way HMAC of `ss`
+                rt.ctrl = rt.ctrl ++ frames.map(f => CtrlItem.Encoded(a.epoch, f)) :+
+                  CtrlItem.Encoded(
+                    a.epoch,
+                    ChunkStream.encode(
+                      ChunkStream.Envelope.KemConfirm(a.epoch, BuddyRole.Responder, tag)
+                    )
+                  )
+      case (BuddyRole.Initiator, ChunkStream.Part.Ct) =>
+        if a.kemSecret == null then abortRekey(rt, "pq_rekey_no_keypair")
+        else
+          val recovered =
+            try Right(HybridKem.decaps(done.bytes, a.kemSecret))
+            catch case _: Throwable => Left(())
+          // §4.4 "wipe on completion": the 2464-byte keypair secret has served its ONE purpose, so
+          // it dies here — on the failure path too, before anything else can throw past it. This is
+          // also what makes the post-commit window safe to leave un-timed-out (see PqRekey).
+          wipe(a.kemSecret)
+          a.kemSecret = null
+          recovered match
+            case Left(_) => abortRekey(rt, "pq_rekey_decaps_failed")
+            case Right(ss) => a.ss = ss
+      case _ => abortRekey(rt, "pq_rekey_unexpected_object")
+
+  /** Key confirmation (§4.2), constant-time and BEFORE any state mutation — the ML-KEM
+    * implicit-rejection defense: `decaps` silently returns a pseudo-random secret on a tampered
+    * same-length ciphertext, so without this an epoch would fold into a dead, PQ-stripped fork. */
+  private def onKemConfirm(rt: BuddyRuntime, epoch: Int, tag: Array[Byte]): Unit =
+    rt.rekey match
+      case Some(a) if a.epoch != epoch => () // stale duplicate for another epoch: ignore
+      case Some(a) if a.ss == null => abortRekey(rt, "pq_rekey_out_of_order")
+      case Some(a) =>
+        rt.role match
+          case BuddyRole.Initiator =>
+            // The RESPONDER's `/r` tag. `equalsCT` — no secret-dependent early exit, exactly as the
+            // pairing-time confirmation does (`completePqInitiator`).
+            if !token.RetrievalToken.equalsCT(EpochKdf.epochConfirmTagResponder(a.ss), tag) then
+              abortRekey(rt, "pq_rekey_confirm_failed")
+            else if !a.confirmSent then
+              a.confirmSent = true
+              // Our `/i` tag goes on the wire ⇒ the responder may commit on receiving it, so from
+              // here we must stay able to fold (see `safeToAbort`).
+              a.committed = true
+              rt.ctrl = rt.ctrl :+ CtrlItem.Encoded(
+                epoch,
+                ChunkStream.encode(
+                  ChunkStream.Envelope
+                    .KemConfirm(epoch, BuddyRole.Initiator, EpochKdf.epochConfirmTagInitiator(a.ss))
+                )
+              )
+          case BuddyRole.Responder =>
+            // The INITIATOR's `/i` tag. On a match BOTH sides have now proven the same `ss`, so we
+            // may commit — the anchor itself is chosen later, when the frame is actually built.
+            if !token.RetrievalToken.equalsCT(EpochKdf.epochConfirmTagInitiator(a.ss), tag) then
+              abortRekey(rt, "pq_rekey_confirm_failed")
+            else if !a.commitQueued then
+              a.commitQueued = true
+              rt.ctrl = rt.ctrl :+ CtrlItem.Commit(epoch)
+      case None => () // no attempt: a stale duplicate, ignore
+
+  /** The initiator's fold point. Having just processed the committer's frame this side sits on
+    * exactly the committer's anchor, so the fold is applied HERE, atomically, and only after the
+    * anchor re-check — a mismatch refuses rather than folding at the wrong chain position. */
+  private def onEpochCommit(rt: BuddyRuntime, epoch: Int, anchor: Int): Unit =
+    rt.rekey match
+      case Some(a) if a.epoch != epoch => () // stale duplicate
+      case Some(a) if rt.role != BuddyRole.Initiator || a.ss == null || !a.confirmSent =>
+        abortRekey(rt, "pq_rekey_out_of_order")
+      case Some(a) =>
+        // THE ANCHOR CHECK. Having just processed the committer's frame we sit on exactly its
+        // anchor; anything else means folding here would land at a different chain position — the
+        // silent divergence the explicit anchor exists to turn into an error. Refuse the frame; the
+        // attempt is past its point of no return, so it is held (an honest commit may still arrive)
+        // and NOTHING is folded either way.
+        if anchor != rt.ratchet.rootIndex || !rt.ratchet.armEpochFold(anchor, a.ss) then
+          abortRekey(rt, "pq_rekey_anchor_mismatch")
+        else completeRekey(rt, a)
+      case None => ()
+
+  /** Bytes for the control head, materializing an `EPOCH_COMMIT` at the LAST possible moment: its
+    * anchor must be the ratchet position of the frame actually going out, and the root may have
+    * advanced since the commit was queued. Arming here is this side's point of no return. */
+  private def ctrlHeadBytes(rt: BuddyRuntime): Option[Array[Byte]] =
+    rt.ctrl.headOption.flatMap {
+      case CtrlItem.Encoded(_, bytes) => Some(bytes)
+      case CtrlItem.Commit(epoch) =>
+        rt.rekey match
+          case Some(a) if a.epoch == epoch && a.ss != null =>
+            val anchor =
+              rt.ratchet.rootIndex + 1 // our NEXT root = the peer's root after this frame
+            if !rt.ratchet.armEpochFold(anchor, a.ss) then
+              // Defensive: the ratchet refused the arm (today only possible with an earlier fold
+              // still armed-but-unapplied). RELEASE THE ARQ SLOT but KEEP the Commit queued: the
+              // pending fold lands on this pair's next DH step, after which the retry succeeds.
+              // Without the release, `headSeq` stays consumed and `headWire` stays null, so every
+              // later round re-enters here, is refused again — past the point of no return
+              // `abortRekey` only records a refusal — and emits a cover write instead: the pair
+              // would stop sending content permanently, and since it then sends nothing, the peer
+              // never takes the DH step that would have cleared the pending fold. A silent,
+              // permanent stall. (The sibling `case _` below releases the slot for the same reason,
+              // but DROPS its item — that one is unretryable, this one is.)
+              releaseCtrlHeadSlot(rt)
+              abortRekey(rt, "pq_rekey_anchor_unreachable")
+              None
+            else
+              val bytes =
+                ChunkStream.encode(ChunkStream.Envelope.EpochCommit(epoch, rt.role, anchor))
+              completeRekey(rt, a) // `ss` is now inside the armed fold; wipe our copy
+              Some(bytes)
+          case _ =>
+            // Defensive: a Commit with no live attempt behind it. Unreachable today (an abort drops
+            // its own epoch's queued frames, and only one Commit is ever queued per attempt), but it
+            // MUST drop the item explicitly rather than lean on `abortRekey` — with no attempt to
+            // tear down that call would leave this Commit at the queue head, and the head would be
+            // re-materialized, re-refused and re-dropped every round, wedging the pair on cover
+            // writes forever.
+            if rt.ctrl.nonEmpty then rt.ctrl = rt.ctrl.drop(1)
+            releaseCtrlHeadSlot(rt)
+            abortRekey(rt, "pq_rekey_commit_stale")
+            None
+    }
+
+  /** Release the in-flight control head's ARQ slot WITHOUT touching the queue, so the next round
+    * makes a fresh lane decision (and can re-materialize the same item). Every path that declines to
+    * produce bytes for a control head MUST call this: `headSeq` is already consumed by then and
+    * `headWire` is null, so leaving them set makes the round emit a cover write and the next round
+    * re-enter the same declining branch — forever.
+    *
+    * The abandoned sequence number is harmless: `ArqFrame.isNewMessage` only requires a STRICTLY
+    * increasing `msgSeq`, so a gap costs the peer's dedup nothing. */
+  private def releaseCtrlHeadSlot(rt: BuddyRuntime): Unit =
+    rt.headSeq = ArqFrame.NoSeq
+    rt.headWire = null
+    rt.headIsCtrl = false
+
+  /** Per-pair, non-secret rekey diagnostics (tests + engine observability). */
+  def rekeyStatus(pairId: String): Option[RekeyStatus] =
+    runtime.get(pairId).map { rt =>
+      RekeyStatus(
+        epochsFolded = rt.epochsFolded,
+        ratchetFolds = rt.ratchet.epochFoldsApplied,
+        attempts = rt.rekeyAttempts,
+        aborts = rt.rekeyAborts,
+        refusals = rt.rekeyRefusals,
+        inProgress = rt.rekey.isDefined,
+        currentEpoch = rt.rekey.map(_.epoch).getOrElse(0),
+        attemptStartRound = rt.rekey.map(_.startRound).getOrElse(-1L),
+        hasEpochSecret = rt.rekey.exists(_.ss != null),
+        confirmExchanged = rt.rekey.exists(a => a.confirmSent || a.commitQueued),
+        abortSafe = rt.rekey.exists(a => safeToAbort(rt, a)),
+        strandedAttemptAgeRounds =
+          if rt.rekey.exists(_.stranded) then rt.strandedAttemptAgeRounds else 0L,
+        foldArmed = rt.ratchet.epochFoldArmed,
+        stepsSinceFold = rt.stepsSinceFold,
+        lastAbort = rt.lastAbort
+      )
+    }
+
+  /** TEST SEAM (`private[engine]`, never on the JSON/Dart boundary): feed one already-decrypted
+    * control envelope into this pair's rekey state machine, exactly as the receive path does.
+    *
+    * It exists because the fail-closed branches it drives are — by construction — unreachable from
+    * the network: control envelopes ride INSIDE the MK-sealed inner block, so a store or an active
+    * network attacker cannot forge or tamper with one (a corrupted frame simply fails the ratchet
+    * AEAD and is dropped as a carrier, never reaching here). Only a MALICIOUS or BUGGY PEER can
+    * present a bad envelope. That is precisely the residual §4.2 defends against (ML-KEM's implicit
+    * rejection makes a bad ciphertext "succeed" silently), so those branches must be tested — and a
+    * narrow seam is the honest way to reach them, rather than leaving them asserted-but-unexercised.
+    *
+    * Returns false for an unknown pair. Feeds the REAL handler — no test-only logic exists below. */
+  private[engine] def injectControlForTest(
+      pairId: String,
+      envelope: Array[Byte],
+      roundId: Long
+  ): Boolean =
+    runtime.get(pairId) match
+      case None => false
+      case Some(rt) =>
+        onControl(rt, envelope, roundId)
+        true
 
   /** The current build privacy status. Dev backend ⇒ not private ⇒ the mandatory dev label. */
   def privacyStatus: EngineEvent.PrivacyStatus =
@@ -547,7 +1138,7 @@ final class Engine(
                   // Mismatch is terminal (relationship now Removed): drop the buddy's runtime + outbox so
                   // no seeded ratchet lingers past the rejected pairing (parallels removeBuddy's cleanup).
                   book = nb
-                  runtime.remove(pairId)
+                  runtime.remove(pairId).foreach(_.wipeRekey()) // release rekey secrets + buffers
                   outbox.remove(pairId)
                   Right(ConfirmResult())
               case Left(reason) => Left(EngineError("confirm_failed", reason))
@@ -649,7 +1240,7 @@ final class Engine(
       book.confirm(pairId, matched = false) match
         case Right(nb) =>
           book = nb
-          runtime.remove(pairId)
+          runtime.remove(pairId).foreach(_.wipeRekey()) // release rekey secrets + buffers
           outbox.remove(pairId)
           wipe(expectedInitTag)
           pendingResponderTag.remove(pairId)
@@ -687,7 +1278,7 @@ final class Engine(
       case Right(nb) =>
         book = nb
         outbox.remove(pairId)
-        runtime.remove(pairId)
+        runtime.remove(pairId).foreach(_.wipeRekey()) // release rekey secrets + buffers
         pendingPq.remove(pairId).foreach(_.wipe())
         pendingResponderTag.remove(pairId).foreach(wipe)
         completedInitiatorTag.remove(pairId).foreach(wipe)
@@ -764,13 +1355,22 @@ final class Engine(
                 rt <- runtime.get(pid)
                 rel <- book.get(pid) if rel.state == BuddyState.Confirmed && rt.ratchet.canSend
               yield (rt, rel)
-            // Sending buddies (non-empty outbox, can send), rotated fairly by sendCursor.
-            val sendable = outbox.iterator
-              .collect {
-                case (pid, q) if q.nonEmpty =>
-                  confirmedSendable(pid).map((rt, rel) => (pid, rt, rel, q))
-              }
-              .flatten
+            // Continuous-PQ rekey (design §7 Phase 3), BEFORE the write decision so a rekey a round
+            // is about to spend on a cover write can claim it (option (a-i), zero marginal frames).
+            // Only an INITIATOR triggers, so a pair never races two attempts; a fold already armed
+            // (committer, pre-anchor) is not disturbed.
+            runtime.foreach { (pid, rt) =>
+              maybeTimeoutRekey(rt, roundId)
+              if rt.role == BuddyRole.Initiator && rt.rekey.isEmpty &&
+                !rt.ratchet.epochFoldArmed && confirmedSendable(pid).isDefined
+              then maybeStartRekey(pid, rt, roundId)
+            }
+            // Sending buddies (content queued OR a rekey control frame pending, and able to send),
+            // rotated fairly by sendCursor. A retransmitted head is covered either way: its source
+            // queue only drains on the peer's ack.
+            val sendable = runtime.keysIterator
+              .filter(pid => outbox.get(pid).exists(_.nonEmpty) || runtime(pid).ctrl.nonEmpty)
+              .flatMap(pid => confirmedSendable(pid).map((rt, rel) => (pid, rt, rel)))
               .toVector
               .sortBy(_._1)
             val txTarget =
@@ -781,37 +1381,92 @@ final class Engine(
                 Some(tgt)
             val ackTarget = runtime.keysIterator
               .flatMap { pid =>
-                if outbox.get(pid).exists(_.nonEmpty) then
-                  None // a real frame to them carries the ack
+                // A real frame to them — content OR a rekey control frame — already carries the ack.
+                // Excluding control-pending pairs also keeps a committer's EPOCH_COMMIT the ONLY
+                // frame it has in flight, which is what pins its root at the anchor until the peer
+                // has the commit (the gated-liveness argument above).
+                if outbox.get(pid).exists(_.nonEmpty) || runtime.get(pid).exists(_.ctrl.nonEmpty)
+                then None
                 else
                   confirmedSendable(pid).collect { case (rt, rel) if rt.ackOwed => (pid, rt, rel) }
               }
               .nextOption()
-            def submitWire(rt: BuddyRuntime, rel: BuddyRelationship, wire: Array[Byte]): Unit =
+            // `carriedAck` = does THIS wire actually carry our CURRENT `highRecv`? A freshly built
+            // frame always does. A retransmit of a cached wire only does while `headWireAck` still
+            // equals `highRecv` — and a CONTROL head is never re-encrypted (its EPOCH_COMMIT anchor
+            // is only valid at the position it was built at), so its cached wire keeps its
+            // build-time ack even after we receive more. Clearing `ackOwed` there would claim an ack
+            // we did not send; nothing compensates, since `ackTarget` skips control-pending pairs.
+            // It self-corrects today (the peer re-arms `ackOwed` by retransmitting), so this is
+            // latency, not deadlock — but the bookkeeping must still be true, or a change to the
+            // retransmit cadence would silently turn it into a lost ack.
+            def submitWire(
+                rt: BuddyRuntime,
+                rel: BuddyRelationship,
+                wire: Array[Byte],
+                carriedAck: Boolean
+            ): Unit =
               if t.submit(dirToken(rel.addrKey, rt.role, peerRole(rt.role), roundId), wire) then
-                rt.ackOwed = false // our outgoing frame carried our ack
+                if carriedAck then rt.ackOwed = false // this frame really did carry our ack
                 realSubmitted = true
                 if rel.peerNotifyLabel.nonEmpty then
                   realSignal = Some((rel.peerNotifyLabel, rel.addrKey))
             txTarget match
-              case Some((_, rt, rel, q)) =>
+              case Some((pid, rt, rel)) =>
                 if rt.headSeq == ArqFrame.NoSeq then
+                  // A new head opens: pick the lane. `ChunkScheduler` (Phase 2's pure policy) spends
+                  // an idle round on a chunk first — replacing the cover write at zero marginal
+                  // frames (a-i) — and on a busy round cedes at most 1 in `busyStride` to chunks so
+                  // content is never starved (a-ii / the doc's head-of-line caveat). It is consulted
+                  // once per HEAD rather than once per round because stop-and-wait pins one message
+                  // across many rounds, so a per-round vote would not describe the lane share.
+                  val (decision, next) = ChunkScheduler.decide(
+                    rt.sched,
+                    chunkPending = rt.ctrl.nonEmpty,
+                    contentPending = outbox.get(pid).exists(_.nonEmpty),
+                    policy = ChunkScheduler.Policy.Default
+                  )
+                  rt.sched = next
+                  rt.headIsCtrl = decision == ChunkScheduler.Decision.Chunk
                   rt.headSeq = rt.nextSendSeq
                   rt.nextSendSeq += 1
                   rt.headWire = null
+                  if !rt.headIsCtrl then rt.stepsSinceFold += 1 // a content step toward the cadence
                 // (Re)encrypt the head wire only when it's new or our ack advanced; otherwise resubmit
-                // the cached bytes so the ratchet does not advance per retransmit.
-                if rt.headWire == null || rt.headWireAck != rt.highRecv then
-                  rt.headWire = rt.ratchet.encrypt(ArqFrame.encode(rt.highRecv, rt.headSeq, q.head))
+                // the cached bytes so the ratchet does not advance per retransmit. A CONTROL head is
+                // encrypted EXACTLY ONCE and never refreshed: an EPOCH_COMMIT's anchor is only valid
+                // at the ratchet position it was built at, so re-encrypting one later (at a moved
+                // root) would hand the peer a stale anchor — the refresh is a latency nicety, the
+                // anchor is correctness.
+                val payload: Option[Array[Byte]] =
+                  if rt.headWire != null && (rt.headIsCtrl || rt.headWireAck == rt.highRecv) then
+                    None // cached bytes stand
+                  else if rt.headIsCtrl then ctrlHeadBytes(rt)
+                  else outbox.get(pid).flatMap(_.headOption)
+                payload.foreach { p =>
+                  rt.headWire = rt.ratchet.encrypt(ArqFrame.encode(rt.highRecv, rt.headSeq, p))
                   rt.headWireAck = rt.highRecv
-                submitWire(rt, rel, rt.headWire)
+                }
+                // `ctrlHeadBytes` can abort the attempt (and drop this head) rather than emit bytes.
+                if rt.headWire != null then
+                  submitWire(rt, rel, rt.headWire, carriedAck = rt.headWireAck == rt.highRecv)
+                else
+                  coverCounter += 1
+                  t.submit(
+                    RetrievalToken.derive(coverKey, "cover", "", coverCounter),
+                    coverFrame()
+                  ): Unit
               case None =>
                 ackTarget match
                   case Some((_, rt, rel)) =>
+                    // Encrypted FRESH every time, so it always carries the current ack.
                     submitWire(
                       rt,
                       rel,
-                      rt.ratchet.encrypt(ArqFrame.encode(rt.highRecv, ArqFrame.NoSeq, emptyPayload))
+                      rt.ratchet.encrypt(
+                        ArqFrame.encode(rt.highRecv, ArqFrame.NoSeq, emptyPayload)
+                      ),
+                      carriedAck = true
                     )
                   case None =>
                     coverCounter += 1
@@ -903,9 +1558,12 @@ final class Engine(
                       val ackSeq = ArqFrame.ackSeqOf(inner)
                       if ackSeq > rt.peerAcked then rt.peerAcked = ackSeq
                       if rt.headSeq != ArqFrame.NoSeq && rt.peerAcked >= rt.headSeq then
-                        outbox.get(pid).filter(_.nonEmpty).foreach(q => dropHead(pid, q))
+                        // Drain the head from whichever lane produced it (content or rekey control).
+                        if rt.headIsCtrl then rt.ctrl = rt.ctrl.drop(1)
+                        else outbox.get(pid).filter(_.nonEmpty).foreach(q => dropHead(pid, q))
                         rt.headSeq = ArqFrame.NoSeq
                         rt.headWire = null
+                        rt.headIsCtrl = false
                       // 2) De-duplicate + deliver by sequence (a retransmit re-presents an already-seen
                       //    msgSeq; an ack-only frame carries NoSeq). Owe an ack ONLY for a content frame
                       //    (msgSeq != NoSeq) — never for an ack-only, so acks don't ping-pong.
@@ -913,13 +1571,30 @@ final class Engine(
                       if msgSeq != ArqFrame.NoSeq then
                         rt.ackOwed = true // received content ⇒ owe the peer an ack
                         if ArqFrame.isNewMessage(msgSeq, rt.highRecv) then
-                          Frame
-                            .unpad(ArqFrame.payloadOf(inner), MsgPayloadInner)
-                            .toOption
-                            .foreach { p =>
-                              rt.highRecv = msgSeq // advance only on successful delivery
-                              emit(EngineEvent.MessageReceived(pid, new String(p, UTF_8), roundId))
-                            }
+                          val body = ArqFrame.payloadOf(inner)
+                          // Byte 0 discriminates a rekey CONTROL envelope from `Frame.pad`'ed user
+                          // content exactly (ChunkStream's object doc): padded content's byte 0 is
+                          // the high byte of a length < 256, hence always 0; every control tag is
+                          // nonzero. Neither can be mistaken for the other.
+                          if ChunkStream.isControl(body) then
+                            // Consume the sequence even when the envelope is refused: the frame IS
+                            // authenticated (it decrypted under this pair's ratchet), so only the
+                            // peer itself can produce a bad one, and leaving the sequence unconsumed
+                            // would wedge its stop-and-wait retransmit forever. The rekey itself
+                            // fails closed inside `onControl`.
+                            rt.highRecv = msgSeq
+                            onControl(rt, body, roundId)
+                          else
+                            Frame
+                              .unpad(body, MsgPayloadInner)
+                              .toOption
+                              .foreach { p =>
+                                rt.highRecv = msgSeq // advance only on successful delivery
+                                rt.stepsSinceFold += 1 // a content step toward the rekey cadence
+                                emit(
+                                  EngineEvent.MessageReceived(pid, new String(p, UTF_8), roundId)
+                                )
+                              }
               }
             else
               // No unambiguously-signaled buddy (idle OR an ambiguous collision round): a cover read

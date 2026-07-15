@@ -20,10 +20,15 @@ object PqTestKit:
     * engines wired to it drive the full stop-and-wait ARQ flow automatically. */
   final class FakeBackend:
     val store = mutable.Map.empty[String, Array[Byte]]
+
+    /** EVERY store write, in order — what the untrusted store would actually observe. Lets a test
+      * MEASURE the on-wire frames (e.g. that a rekey's chunk frames are the same 256 bytes as
+      * content and cover frames, FR-012 / design §5) rather than assert it from the code. */
+    val writes = mutable.ArrayBuffer.empty[Array[Byte]]
     private val bits = mutable.Map.empty[(Long, Vector[Byte]), mutable.Set[Int]]
     def transport(): RoundTransport = new RoundTransport:
       def submit(token: Array[Byte], frame: Array[Byte]): Boolean =
-        store(hex(token)) = frame; true
+        store(hex(token)) = frame; writes += frame; true
       def retrieve(token: Array[Byte]): Option[Array[Byte]] = store.remove(hex(token))
       override def signal(roundId: Long, label: Array[Byte], bit: Int): Unit =
         bits.getOrElseUpdate((roundId, label.toVector), mutable.Set.empty) += bit

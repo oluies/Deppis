@@ -32,20 +32,45 @@ class EpochKdfCrossSpec extends AnyFunSuite:
       "epoch-fold output drifted — JVM<->JS epoch agreement would break"
     )
 
+  // The confirm tags are plain domain-separated HMACs over a 32-byte epoch key. The vectors below
+  // pin the LABELS and the digest; they are keyed on `kdfEpoch(rk, ss)` purely because that is the
+  // 32-byte value the Phase 1 vectors were generated from, and they are kept byte-identical so the
+  // label pin never moves. What the LIVE protocol keys them on is `ss` — see the `ss`-keyed vectors
+  // below and `EpochKdf`'s object doc ("What the tags are keyed on").
   test("KAT: initiator confirm tag pins label 'dr/pq-epoch-confirm/i' (JVM<->JS)"):
-    val rkEpoch = EpochKdf.kdfEpoch(rk, ss)
+    val key = EpochKdf.kdfEpoch(rk, ss)
     assert(
-      toHex(EpochKdf.epochConfirmTagInitiator(rkEpoch)) ==
+      toHex(EpochKdf.epochConfirmTagInitiator(key)) ==
         "3bb59a4eb4d38e64fd0189a218af3de9205be902880e32783f859a299e89abd4",
       "initiator epoch-confirm tag drifted"
     )
 
   test("KAT: responder confirm tag pins label 'dr/pq-epoch-confirm/r' (JVM<->JS)"):
-    val rkEpoch = EpochKdf.kdfEpoch(rk, ss)
+    val key = EpochKdf.kdfEpoch(rk, ss)
     assert(
-      toHex(EpochKdf.epochConfirmTagResponder(rkEpoch)) ==
+      toHex(EpochKdf.epochConfirmTagResponder(key)) ==
         "5a52cbb40ede361a2bc5d6496e12b7465f7a0754af0fbad23af811f2da363e74",
       "responder epoch-confirm tag drifted"
+    )
+
+  test("KAT: the PHASE 3 keying — tags over the KEM SHARED SECRET itself (JVM<->JS)"):
+    // This is the call shape `Engine`'s rekey state machine actually makes: the per-direction tags
+    // are keyed on the 32-byte hybrid-KEM shared secret, NOT on the folded root (which neither peer
+    // holds while the tags are in flight — see EpochKdf's object doc). Pinning it here means the
+    // interop contract covers what the protocol DOES, not only what Phase 1 could reach.
+    assert(
+      toHex(EpochKdf.epochConfirmTagInitiator(ss)) ==
+        "49fca871a1803f788b3a2bae2a793230663fc3290694a5f6ba1384a4870f7d4a",
+      "initiator epoch-confirm tag over `ss` drifted — JVM<->JS rekey confirmation would break"
+    )
+    assert(
+      toHex(EpochKdf.epochConfirmTagResponder(ss)) ==
+        "dac51684562280e935567b59020cc19259e92d4d23ca831f90871db228c62136",
+      "responder epoch-confirm tag over `ss` drifted — JVM<->JS rekey confirmation would break"
+    )
+    // Anti-reflection at the real keying: the two directions never collide.
+    assert(
+      !EpochKdf.epochConfirmTagInitiator(ss).sameElements(EpochKdf.epochConfirmTagResponder(ss))
     )
 
   test("determinism: same (rk, ss) folds to the same root; tags are deterministic too"):
@@ -80,7 +105,7 @@ class EpochKdfCrossSpec extends AnyFunSuite:
   test("independence: a different live root yields a different folded root"):
     assert(!EpochKdf.kdfEpoch(rk, ss).sameElements(EpochKdf.kdfEpoch(fill(32, 0x12), ss)))
 
-  test("ANTI-REFLECTION: the /i and /r tags of one rkEpoch differ (domain separation)"):
+  test("ANTI-REFLECTION: the /i and /r tags of one epoch key differ (domain separation)"):
     // Mirrors PqReflectionCrossSpec's same-root check for the pairing tags: over the SAME folded
     // root, ONLY the direction label differs, so distinct outputs pin the domain separation that
     // stops a tag observed in one direction being reflected back as the other's.
@@ -89,7 +114,7 @@ class EpochKdfCrossSpec extends AnyFunSuite:
       !EpochKdf
         .epochConfirmTagInitiator(rkEpoch)
         .sameElements(EpochKdf.epochConfirmTagResponder(rkEpoch)),
-      "distinct direction labels must yield distinct tags on the same rkEpoch"
+      "distinct direction labels must yield distinct tags on the same epoch key"
     )
 
   test("output sizes: fold and both tags are 32 bytes (HMAC-SHA256)"):
@@ -108,7 +133,7 @@ class EpochKdfCrossSpec extends AnyFunSuite:
     assertThrows[IllegalArgumentException](EpochKdf.kdfEpoch(rk, fill(31, 0x22)))
     assertThrows[IllegalArgumentException](EpochKdf.kdfEpoch(rk, fill(33, 0x22)))
 
-  test("confirm tags reject a wrong-length rkEpoch"):
+  test("confirm tags reject a wrong-length epoch key"):
     assertThrows[IllegalArgumentException](
       EpochKdf.epochConfirmTagInitiator(Array.emptyByteArray)
     )
