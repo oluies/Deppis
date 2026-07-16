@@ -92,19 +92,19 @@ counts or the verbatim one-line `diff` recipe — **[`formal-analysis/README.md`
 above to reproduce the *result*.
 
 What is mechanically enforced, and what is not, precisely: `render-attack-graphs.sh` confronts the
-models with the docs on **every** run (not only `--check`) and fails if — either control stops
-falsifying (that is §5.2's load-bearing claim, and §2's "falsifies without it"); §5.2.1's table step
-counts drift from the prover; or the hijack row's *structural* claims (`aenc(ss, pk(~ek))` present, no
-second `~ek`) no longer match a fresh trace. Only the SVG byte-comparison is gated behind `--check`.
-**Not** machine-checked: §5.2's measured timings and per-lemma counts, §5.3's counts, and this guide —
-so confirm anything they state by running the prover, not by trusting the prose.
+models with the docs on **every** run (not only `--check`) and fails if — the **no-fold** control stops
+falsifying (§5.2's load-bearing claim, and this guide's §2 "falsifies without it") or the **hijack**
+model stops falsifying (§5.3's claim); §5.2.1's table step counts drift from the prover; or the hijack
+row's *structural* claims (`aenc(ss, pk(~ek))` present, no second `~ek`) no longer match a fresh trace.
+Only the SVG byte-comparison is gated behind `--check`. **Not** machine-checked: §5.2's measured timings
+and per-lemma counts, §5.3's step counts, and this guide — so confirm anything they state by running the
+prover, not by trusting the prose.
 
 The rendered counterexamples for reviewers who will not run the prover:
 [`formal-analysis/graphs/nofold-attack.svg`](formal-analysis/graphs/nofold-attack.svg) (the attack the
 fold prevents) and [`formal-analysis/graphs/hijack-attack.svg`](formal-analysis/graphs/hijack-attack.svg)
 (the limit). There is deliberately **no** picture of the positive result: a verified all-traces lemma
-has no trace to draw. `render-attack-graphs.sh --check` fails if a committed SVG *or its prose claim in
-README §5.2.1* drifts from a fresh render.
+has no trace to draw.
 
 ---
 
@@ -214,9 +214,11 @@ honest result — the analysis was built to make an *un*-change defensible too.
 
 ## 6. Provenance & reproduction notes
 
-- Tamarin `1.12.0` + Maude `3.5.1` + GraphViz `15.1.0`. Every step count in the docs is measured output;
-  `render-attack-graphs.sh --check` is a human drift alarm (dot layout is not byte-stable across
-  graphviz versions — **do not** wire it into CI as a gate).
+- Tamarin `1.12.0` + Maude `3.5.1` + GraphViz `15.1.0`. Every step count in the docs is measured output.
+  In `render-attack-graphs.sh` the falsification, §5.2.1 step-count, and hijack-structural guards run on
+  every invocation and are stable; only the SVG byte-comparison (under `--check`) is a human drift alarm
+  — `dot` layout is not byte-stable across graphviz versions, so **do not** wire *that* comparison into
+  CI as a gate. (See §2 for the full per-guard breakdown.)
 - All merges have CI green including the labeling gate (`JVM — sbt test + labeling gate`), which fails a
   build that claims metadata privacy without an attested backend.
 - Deeper background: [`dh-ratchet.md`](dh-ratchet.md) (the classical ratchet this extends),
