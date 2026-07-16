@@ -71,28 +71,24 @@ The proofs are cheap — this is not a multi-hour proof search. **Reproduce, don
 ```bash
 # macOS: brew install tamarin-prover/tap/tamarin-prover   (installs Maude + GraphViz)
 cd specs/001-metadata-private-messenger/design/formal-analysis
-tamarin-prover ratchet-pq-epoch.spthy        --prove   # ~0.44s — the positive result
-tamarin-prover ratchet-pq-epoch-nofold.spthy --prove   # ~0.40s — the NEGATIVE CONTROL (must falsify)
+tamarin-prover ratchet-pq-epoch.spthy        --prove   # the positive result
+tamarin-prover ratchet-pq-epoch-nofold.spthy --prove   # the NEGATIVE CONTROL (must falsify)
 tamarin-prover ratchet-pq-epoch-hijack.spthy --prove   # the LIMIT (active hijack; PCS falsified)
-tamarin-prover ratchet.spthy                 --prove   # 11 pre-existing lemmas still hold
-tamarin-prover ratchet-unbounded.spthy       --prove
+tamarin-prover ratchet.spthy                 --prove   # the pre-existing lemmas still hold
+tamarin-prover ratchet-unbounded.spthy       --prove   # (with the fold added)
 tamarin-prover interactive .                            # GUI at http://127.0.0.1:3001 to walk any trace
 ```
 
-**The load-bearing result** — check it yourself, it is one line:
+**The load-bearing result** is that `pq_post_compromise_security` **verifies with the fold and
+falsifies without it, every other lemma identical in both** — same model, same attacker, one line
+changed. That flip is the proof the fold does work, i.e. that the lemma is not vacuously true (design
+§6.2 explains why the *naive* lemma would be worthless: the Option-A pairing seed already blocks a
+purely passive harvester, so a green tick that survives fold-removal certifies nothing).
 
-```bash
-diff <(sed -n '/^begin/,$p' ratchet-pq-epoch.spthy) \
-     <(sed -n '/^begin/,$p' ratchet-pq-epoch-nofold.spthy)
-#   -   rkf = kdfEpoch(rkn, ~ss)     # the fold
-#   +   rkf = rkn                    # THE FOLD REMOVED — and nothing else
-```
-
-Expected: `pq_post_compromise_security` is **verified (8 steps)** with the fold and **falsified
-(7 steps)** without it, every other lemma identical in both. That flip — same model, same attacker, one
-line — is the proof the fold does work, i.e. that the lemma is not vacuously true (design §6.2 explains
-why the *naive* lemma would be worthless: the Option-A pairing seed already blocks a purely passive
-harvester, so a green tick that survives fold-removal certifies nothing).
+To avoid two copies of measured numbers that would drift, this guide does **not** restate the exact
+step counts or the one-line `diff` recipe — **[`formal-analysis/README.md`](formal-analysis/README.md)
+§5.2 is the single source** for the reproduction command and the pinned step counts. Run it and confirm
+the flip yourself; that section is drift-checked against the models by `render-attack-graphs.sh`.
 
 The rendered counterexamples for reviewers who will not run the prover:
 [`formal-analysis/graphs/nofold-attack.svg`](formal-analysis/graphs/nofold-attack.svg) (the attack the
