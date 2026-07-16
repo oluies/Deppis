@@ -14,9 +14,12 @@
 #   ./render-attack-graphs.sh            # regenerate graphs/*.svg in place
 #   ./render-attack-graphs.sh --check    # exit 1 if the committed SVGs are stale
 #
-# NOTE on --check: `dot` layout is NOT guaranteed byte-stable across graphviz versions, so a bump can
-# report STALE with no model change. It is a drift alarm for humans — do NOT wire it into CI as a gate
-# (the README says the same; keep the two consistent).
+# NOTE — NOT a CI gate in any mode. The falsification / step-count / structural guards run on every
+# invocation and are stable, but `dot` layout is NOT byte-stable across graphviz versions so the SVG
+# byte-comparison (only under --check) can report STALE with no model change. --check's exit code merges
+# that byte-comparison with the stable guards (you cannot gate on one and not the other), and the
+# default mode rewrites the SVGs in place — so gate nothing on this script; run it locally and read a
+# non-zero --check as a human drift alarm. (README §5.2.1 states the same framing; keep the two in sync.)
 set -euo pipefail
 
 cd "$(dirname "$0")"
