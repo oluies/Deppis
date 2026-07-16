@@ -88,10 +88,16 @@ a purely passive harvester, so a green tick that survives fold-removal certifies
 
 To avoid a second copy of measured numbers that would drift, this guide does not restate the exact step
 counts or the verbatim one-line `diff` recipe — **[`formal-analysis/README.md`](formal-analysis/README.md)
-§5.2 is the single source** for those. (The commands above reproduce the *result*; §5.2 is where the
-control's exact `diff` and the pinned per-lemma step counts live.) The step counts in **§5.2.1**'s table
-are the one part machine-checked against the models — `render-attack-graphs.sh --check` fails if they
-drift; §5.2's prose and this guide are not, so confirm the flip by running it, not by trusting the text.
+§5.2** owns the control's verbatim `diff` recipe and the fold/no-fold measured output; run the commands
+above to reproduce the *result*.
+
+What is mechanically enforced, and what is not, precisely: `render-attack-graphs.sh` confronts the
+models with the docs on **every** run (not only `--check`) and fails if — either control stops
+falsifying (that is §5.2's load-bearing claim, and §2's "falsifies without it"); §5.2.1's table step
+counts drift from the prover; or the hijack row's *structural* claims (`aenc(ss, pk(~ek))` present, no
+second `~ek`) no longer match a fresh trace. Only the SVG byte-comparison is gated behind `--check`.
+**Not** machine-checked: §5.2's measured timings and per-lemma counts, §5.3's counts, and this guide —
+so confirm anything they state by running the prover, not by trusting the prose.
 
 The rendered counterexamples for reviewers who will not run the prover:
 [`formal-analysis/graphs/nofold-attack.svg`](formal-analysis/graphs/nofold-attack.svg) (the attack the
@@ -183,7 +189,7 @@ caught only by adversarial reading, none by CI. So:
       root-index anchor, the KEM modelled as `asymmetric-encryption` of a fresh secret (design README
       records a discarded first model whose five green ticks sat next to a *failed* message-derivation
       check — a lesson worth reading).
-- [ ] The negative control differs from the model by **exactly one line** (verify with the `diff` in §2).
+- [ ] The negative control differs from the model by **exactly one line** (verify with the `diff` recipe in [`formal-analysis/README.md`](formal-analysis/README.md) §5.2).
 - [ ] The hijack model's `executable` requires an honest `EPOCH_COMMIT` sender (an earlier version's only
       satisfying trace was an adversary forgery, certifying nothing — confirm the fix).
 
