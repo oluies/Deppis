@@ -80,22 +80,31 @@ tamarin-prover interactive .                            # GUI at http://127.0.0.
 ```
 
 **The load-bearing result** is that `pq_post_compromise_security` **verifies with the fold and
-falsifies without it, every other lemma identical in both** — same model, same attacker, one line
-changed. That flip is the proof the fold does work, i.e. that the lemma is not vacuously true (design
-§6.2 explains why the *naive* lemma would be worthless: the Option-A pairing seed already blocks a
-purely passive harvester, so a green tick that survives fold-removal certifies nothing).
+falsifies without it, every other lemma identical in both** — same model, same attacker, exactly one
+line different: the anchor step derives `kdfEpoch(RK, ss)` (the fold) versus leaving `RK` unchanged (the
+`-nofold` control). That flip is the proof the fold does work, i.e. that the lemma is not vacuously true
+(design §6.2 explains why the *naive* lemma would be worthless: the Option-A pairing seed already blocks
+a purely passive harvester, so a green tick that survives fold-removal certifies nothing).
 
-To avoid two copies of measured numbers that would drift, this guide does **not** restate the exact
-step counts or the one-line `diff` recipe — **[`formal-analysis/README.md`](formal-analysis/README.md)
-§5.2 is the single source** for the reproduction command and the pinned step counts. Run it and confirm
-the flip yourself; that section is drift-checked against the models by `render-attack-graphs.sh`.
+To avoid a second copy of measured numbers that would drift, this guide does not restate the exact step
+counts or the verbatim one-line `diff` recipe — **[`formal-analysis/README.md`](formal-analysis/README.md)
+§5.2** owns the control's verbatim `diff` recipe and the fold/no-fold measured output; run the commands
+above to reproduce the *result*.
+
+What is mechanically enforced, and what is not, precisely: `render-attack-graphs.sh` confronts the
+models with the docs on **every** run (not only `--check`) and fails if — the **no-fold** control stops
+falsifying (§5.2's load-bearing claim, and this guide's §2 "falsifies without it") or the **hijack**
+model stops falsifying (§5.3's claim); §5.2.1's table step counts drift from the prover; or the hijack
+row's *structural* claims (`aenc(ss, pk(~ek))` present, no second `~ek`) no longer match a fresh trace.
+Only the SVG byte-comparison is gated behind `--check`. **Not** machine-checked: §5.2's measured timings
+and per-lemma counts, §5.3's step counts, and this guide — so confirm anything they state by running the
+prover, not by trusting the prose.
 
 The rendered counterexamples for reviewers who will not run the prover:
 [`formal-analysis/graphs/nofold-attack.svg`](formal-analysis/graphs/nofold-attack.svg) (the attack the
 fold prevents) and [`formal-analysis/graphs/hijack-attack.svg`](formal-analysis/graphs/hijack-attack.svg)
 (the limit). There is deliberately **no** picture of the positive result: a verified all-traces lemma
-has no trace to draw. `render-attack-graphs.sh --check` fails if a committed SVG *or its prose claim in
-README §5.2.1* drifts from a fresh render.
+has no trace to draw.
 
 ---
 
@@ -180,7 +189,7 @@ caught only by adversarial reading, none by CI. So:
       root-index anchor, the KEM modelled as `asymmetric-encryption` of a fresh secret (design README
       records a discarded first model whose five green ticks sat next to a *failed* message-derivation
       check — a lesson worth reading).
-- [ ] The negative control differs from the model by **exactly one line** (verify with the `diff` in §2).
+- [ ] The negative control differs from the model by **exactly one line** (verify with the `diff` recipe in [`formal-analysis/README.md`](formal-analysis/README.md) §5.2).
 - [ ] The hijack model's `executable` requires an honest `EPOCH_COMMIT` sender (an earlier version's only
       satisfying trace was an adversary forgery, certifying nothing — confirm the fix).
 
@@ -205,9 +214,13 @@ honest result — the analysis was built to make an *un*-change defensible too.
 
 ## 6. Provenance & reproduction notes
 
-- Tamarin `1.12.0` + Maude `3.5.1` + GraphViz `15.1.0`. Every step count in the docs is measured output;
-  `render-attack-graphs.sh --check` is a human drift alarm (dot layout is not byte-stable across
-  graphviz versions — **do not** wire it into CI as a gate).
+- Tamarin `1.12.0` + Maude `3.5.1` + GraphViz `15.1.0`. Every step count in the docs is measured output.
+  `render-attack-graphs.sh` mechanically checks the falsification, §5.2.1 step-count, and
+  hijack-structural claims (§2 breaks the guards down). Its **CI-gating semantics differ by mode** (the
+  `--check` byte-comparison is graphviz-layout-unstable; the default mode's exit code is stable-guard-only
+  but rewrites the SVGs in place) — the exact, authoritative behaviour is documented in the **script's
+  own header NOTE**; read that rather than a second-hand summary. As a human, run it and treat a non-zero
+  result as a drift signal.
 - All merges have CI green including the labeling gate (`JVM — sbt test + labeling gate`), which fails a
   build that claims metadata privacy without an attested backend.
 - Deeper background: [`dh-ratchet.md`](dh-ratchet.md) (the classical ratchet this extends),
