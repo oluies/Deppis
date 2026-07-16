@@ -215,13 +215,12 @@ honest result — the analysis was built to make an *un*-change defensible too.
 ## 6. Provenance & reproduction notes
 
 - Tamarin `1.12.0` + Maude `3.5.1` + GraphViz `15.1.0`. Every step count in the docs is measured output.
-  In `render-attack-graphs.sh` the falsification, §5.2.1 step-count, and hijack-structural guards run on
-  every invocation and are stable; the SVG byte-comparison (only under `--check`) is not, because `dot`
-  layout is not byte-stable across graphviz versions. **The script is not a CI gate in any mode**:
-  `--check` folds the byte-comparison and the stable guards into one exit code (you cannot gate on one
-  and not the other), and the default mode rewrites `graphs/*.svg` in place. Run it locally and read a
-  non-zero `--check` as a human drift alarm. (§2 breaks the guards down; README §5.2.1 and the script
-  header state this same framing.)
+  `render-attack-graphs.sh` mechanically checks the falsification, §5.2.1 step-count, and
+  hijack-structural claims (§2 breaks the guards down). Its **CI-gating semantics differ by mode** (the
+  `--check` byte-comparison is graphviz-layout-unstable; the default mode's exit code is stable-guard-only
+  but rewrites the SVGs in place) — the exact, authoritative behaviour is documented in the **script's
+  own header NOTE**; read that rather than a second-hand summary. As a human, run it and treat a non-zero
+  result as a drift signal.
 - All merges have CI green including the labeling gate (`JVM — sbt test + labeling gate`), which fails a
   build that claims metadata privacy without an attested backend.
 - Deeper background: [`dh-ratchet.md`](dh-ratchet.md) (the classical ratchet this extends),

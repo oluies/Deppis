@@ -14,12 +14,16 @@
 #   ./render-attack-graphs.sh            # regenerate graphs/*.svg in place
 #   ./render-attack-graphs.sh --check    # exit 1 if the committed SVGs are stale
 #
-# NOTE — NOT a CI gate in any mode. The falsification / step-count / structural guards run on every
-# invocation and are stable, but `dot` layout is NOT byte-stable across graphviz versions so the SVG
-# byte-comparison (only under --check) can report STALE with no model change. --check's exit code merges
-# that byte-comparison with the stable guards (you cannot gate on one and not the other), and the
-# default mode rewrites the SVGs in place — so gate nothing on this script; run it locally and read a
-# non-zero --check as a human drift alarm. (README §5.2.1 states the same framing; keep the two in sync.)
+# NOTE — CI-gating semantics differ by mode. This header is the source of truth for that behaviour; the
+# design docs point here rather than restating it (so there is nothing to keep in sync).
+#   * `--check` is NOT a CI gate: its exit code merges the graphviz-unstable SVG byte-comparison with the
+#     stable guards, so you cannot gate on one and not the other. (`dot` layout is not byte-stable across
+#     graphviz versions, so the byte-comparison can report STALE with no model change.)
+#   * The DEFAULT mode's exit code IS stable-guard-only — it exits non-zero iff a falsification,
+#     step-count, or hijack-structural guard fired — so it CAN gate CI. But it rewrites graphs/*.svg in
+#     place, so run it only in a throwaway checkout and never pair it with `git diff --exit-code`, which
+#     would re-introduce the layout-drift false positive. Verified: a bad README step count makes the
+#     default (no-flag) run exit 1.
 set -euo pipefail
 
 cd "$(dirname "$0")"

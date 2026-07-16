@@ -322,11 +322,10 @@ Regenerate (never hand-edit the SVGs — a committed picture that drifts from it
 The script **fails loudly if a lemma stops falsifying** — if the control ever verifies, the negative
 control has silently stopped controlling anything, and no picture should be shipped until that is
 understood. Rendered with `tamarin-prover 1.12.0` + `graphviz 15.1.0`. The falsification, step-count,
-and hijack-structural guards run on every invocation and are stable; the SVG byte-comparison (only under
-`--check`) is not, because `dot` layout is not byte-stable across graphviz versions. **The script is not
-a CI gate in any mode**: `--check`'s exit code merges that byte-comparison with the stable guards (you
-cannot gate on one and not the other), and the default mode rewrites the SVGs in place. Run it locally
-and read a non-zero `--check` as a human drift alarm.
+and hijack-structural guards run on every invocation. Its CI-gating semantics differ by mode (the
+`--check` byte-comparison is graphviz-layout-unstable; the default mode's exit code is stable-guard-only
+but rewrites the SVGs in place) — the authoritative behaviour is defined in the **header NOTE of
+`render-attack-graphs.sh`**. As a human, run it and treat a non-zero result as a drift signal.
 
 ### 5.3 What this does NOT prove — the assumption that bounds it
 
