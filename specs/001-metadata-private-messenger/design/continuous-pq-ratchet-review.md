@@ -80,15 +80,18 @@ tamarin-prover interactive .                            # GUI at http://127.0.0.
 ```
 
 **The load-bearing result** is that `pq_post_compromise_security` **verifies with the fold and
-falsifies without it, every other lemma identical in both** — same model, same attacker, one line
-changed. That flip is the proof the fold does work, i.e. that the lemma is not vacuously true (design
-§6.2 explains why the *naive* lemma would be worthless: the Option-A pairing seed already blocks a
-purely passive harvester, so a green tick that survives fold-removal certifies nothing).
+falsifies without it, every other lemma identical in both** — same model, same attacker, exactly one
+line different: the anchor step derives `kdfEpoch(RK, ss)` (the fold) versus leaving `RK` unchanged (the
+`-nofold` control). That flip is the proof the fold does work, i.e. that the lemma is not vacuously true
+(design §6.2 explains why the *naive* lemma would be worthless: the Option-A pairing seed already blocks
+a purely passive harvester, so a green tick that survives fold-removal certifies nothing).
 
-To avoid two copies of measured numbers that would drift, this guide does **not** restate the exact
-step counts or the one-line `diff` recipe — **[`formal-analysis/README.md`](formal-analysis/README.md)
-§5.2 is the single source** for the reproduction command and the pinned step counts. Run it and confirm
-the flip yourself; that section is drift-checked against the models by `render-attack-graphs.sh`.
+To avoid a second copy of measured numbers that would drift, this guide does not restate the exact step
+counts or the verbatim one-line `diff` recipe — **[`formal-analysis/README.md`](formal-analysis/README.md)
+§5.2 is the single source** for those. (The commands above reproduce the *result*; §5.2 is where the
+control's exact `diff` and the pinned per-lemma step counts live.) The step counts in **§5.2.1**'s table
+are the one part machine-checked against the models — `render-attack-graphs.sh --check` fails if they
+drift; §5.2's prose and this guide are not, so confirm the flip by running it, not by trusting the text.
 
 The rendered counterexamples for reviewers who will not run the prover:
 [`formal-analysis/graphs/nofold-attack.svg`](formal-analysis/graphs/nofold-attack.svg) (the attack the
