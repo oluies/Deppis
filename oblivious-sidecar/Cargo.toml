@@ -12,11 +12,11 @@ tonic = "=0.14.6"
 # tonic 0.14 split the prost codec out of the core crate; the generated service code needs it.
 tonic-prost = "=0.14.6"
 prost = "=0.14.4"
-tokio = { version = "=1.52.3", features = ["rt-multi-thread", "macros", "net"] }
+tokio = { version = "=1.53.0", features = ["rt-multi-thread", "macros", "net"] }
 # RustCrypto ChaCha20-Poly1305 (IETF/RFC 8439) — vetted AEAD (Constitution I, not hand-rolled) used
 # to OPEN receiver-sealed notification tokens inside the sidecar. Interoperates with the Scala side
 # (libsodium ietf): same construction, 12-byte nonce, tag-appended.
-chacha20poly1305 = "=0.10.1"
+chacha20poly1305 = "=0.11.0"
 
 [build-dependencies]
 # tonic 0.14 moved prost-based .proto compilation into tonic-prost-build (configure().compile_protos).
