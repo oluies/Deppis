@@ -141,7 +141,7 @@ jobs:
           distribution: temurin
           java-version: "24"
       - uses: sbt/setup-sbt@v1
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: "22" # Scala.js tests run under Node
       - name: Install the vetted JS crypto dep (@noble/hashes, pinned)
