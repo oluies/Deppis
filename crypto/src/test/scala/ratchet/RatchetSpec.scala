@@ -1,6 +1,7 @@
 package ratchet
 
 import org.scalatest.funsuite.AnyFunSuite
+import org.signal.libsignal.protocol.state.PreKeyBundle
 
 /** T012: exercises the wrapped audited libsignal double ratchet end to end between two parties.
   * We assert the observable ratchet properties (round-trip both ways, the ratchet advances so the
@@ -85,7 +86,10 @@ class RatchetSpec extends AnyFunSuite:
     val kyberPub = bundle.getKyberPreKey
     assert(kyberPub != null, "bundle has no Kyber prekey — the handshake would be classic X3DH")
     // Kyber-1024 public keys are 1568 bytes, +1 for libsignal's key-type prefix byte.
-    assert(kyberPub.serialize().length == 1569, s"unexpected Kyber public key length")
+    assert(
+      kyberPub.serialize().length == 1569,
+      s"unexpected Kyber public key length: ${kyberPub.serialize().length}"
+    )
     val sig = bundle.getKyberPreKeySignature
     assert(sig != null && sig.nonEmpty, "Kyber prekey is unsigned")
     // The signature must verify under the SAME identity key that signs the classic signed prekey —
@@ -94,3 +98,27 @@ class RatchetSpec extends AnyFunSuite:
       bundle.getIdentityKey.getPublicKey.verifySignature(kyberPub.serialize(), sig),
       "Kyber prekey signature does not verify under the bundle's identity key"
     )
+
+  // The negative half of the above. Checking that a well-formed bundle verifies says nothing about
+  // whether anyone ENFORCES it: the positive test would pass just as happily against a library that
+  // skipped Kyber signature verification altogether. This asserts the actual threat named there —
+  // a Kyber arm swapped in by someone other than the bundle's owner must be REJECTED at handshake.
+  test("a bundle whose Kyber signature does not verify is rejected at startSession"):
+    val bob = new RatchetParty("bob")
+    val good = bob.publishBundle()
+    val sig = good.getKyberPreKeySignature
+    val forged = new PreKeyBundle(
+      good.getRegistrationId,
+      good.getDeviceId,
+      good.getPreKeyId,
+      good.getPreKey,
+      good.getSignedPreKeyId,
+      good.getSignedPreKey,
+      good.getSignedPreKeySignature,
+      good.getIdentityKey,
+      good.getKyberPreKeyId,
+      good.getKyberPreKey,
+      sig.updated(0, (sig(0) ^ 0x01).toByte) // one bit flipped: no longer the owner's signature
+    )
+    val alice = new RatchetParty("alice")
+    assertThrows[Exception](alice.startSession(bob.address, forged))

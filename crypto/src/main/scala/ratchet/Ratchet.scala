@@ -20,7 +20,7 @@ import org.signal.libsignal.protocol.util.KeyHelper
 
 /** Wrapper over the **audited** libsignal double-ratchet (T012, Constitution I — we wrap a vetted
   * implementation and NEVER reimplement the ratchet). Each [[RatchetParty]] is one local identity
-  * with its own protocol store; it publishes a prekey bundle (X3DH), establishes a session from a
+  * with its own protocol store; it publishes a prekey bundle (PQXDH), establishes a session from a
   * peer's bundle, and then exchanges messages. Forward secrecy and post-compromise security are
   * provided by the underlying library's double ratchet — this layer only adapts the API to Scala.
   *
@@ -70,6 +70,13 @@ final class RatchetParty(val name: String, deviceId: Int = 1):
   store.storePreKey(preKey.getId, preKey)
   store.storeSignedPreKey(signedPreKey.getId, signedPreKey)
   store.storeKyberPreKey(kyberPreKey.getId, kyberPreKey)
+  // DEV/TEST HARNESS SHAPE — NOT a production key lifecycle. All three prekeys use a fixed id of 1,
+  // are generated once per party, and are never rotated, replenished, or erased. libsignal treats a
+  // bundle-published one-time prekey and Kyber prekey as SINGLE USE (`markKyberPreKeyUsed`); the
+  // in-memory store no-ops that, which is why repeated sessions work here. A real store would reject
+  // the second inbound PREKEY message against the same id. Production needs prekey rotation, a
+  // replenished one-time pool, and erasure after use — the last of which also carries the project's
+  // rule that key material must not outlive its epoch (Constitution II).
 
   /** The PQXDH prekey bundle a peer uses to open a session with this party. */
   def publishBundle(): PreKeyBundle =
@@ -87,7 +94,7 @@ final class RatchetParty(val name: String, deviceId: Int = 1):
       kyberPreKey.getSignature
     )
 
-  /** Establish an outbound session to `peer` from its published bundle (X3DH). */
+  /** Establish an outbound session to `peer` from its published bundle (PQXDH). */
   def startSession(peer: SignalProtocolAddress, bundle: PreKeyBundle): Unit =
     new SessionBuilder(store, peer).process(bundle)
 
