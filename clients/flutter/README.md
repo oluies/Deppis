@@ -67,8 +67,7 @@ safe even though the generated bundle is not checked in.
 **Size.** The engine is a full E2E crypto stack (Scala.js runtime + the ratchet +
 the vetted `@noble` primitives, now including the post-quantum ones), so expect
 well over half a MB raw — but the over-the-wire size is what matters and it
-compresses well. Measured on Scala 3.3.8 — `build-web-bundle.sh` reports raw,
-gzip and brotli, so these stay reproducible without extra tooling:
+compresses well. Measured on Scala 3.3.8:
 
 | | raw | gzip | brotli |
 |---|---|---|---|
@@ -77,6 +76,10 @@ gzip and brotli, so these stay reproducible without extra tooling:
 
 Minify is a free ~65% raw / ~34% gzip win. Serve compressed (any CDN/nginx does
 this); don't optimize against the raw number.
+
+To refresh: the `--minify` row is what `build-web-bundle.sh` prints (its brotli
+column needs the `brotli` binary — it says so if absent). The `without` row is
+the same esbuild invocation with `--minify` dropped; the script never emits it.
 
 > These figures replace an earlier set (~370 KB raw / ~100 KB gzip) that was
 > ~60% low. They predated the post-quantum additions, and `build-web-bundle.sh`

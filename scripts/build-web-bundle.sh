@@ -43,14 +43,22 @@ ESB="node_modules/.bin/esbuild"
   --bundle --minify --global-name=__mm --format=iife \
   --outfile="$OUT"
 
-raw=$(wc -c < "$OUT")
-gz=$(gzip -c "$OUT" | wc -c)
-# brotli is what a CDN actually serves, and the README quotes it — report it here so those figures
-# stay reproducible from this script alone. Optional: not every machine has the binary.
+# BSD wc (macOS) right-aligns its count in a field, so strip padding from ALL of these or the
+# report comes out raggedly aligned.
+raw=$(wc -c < "$OUT" | tr -d ' ')
+gz=$(gzip -c "$OUT" | wc -c | tr -d ' ')
+# brotli is what a CDN actually serves, and the README quotes it. The binary ships by default on
+# neither macOS nor a stock Debian/Ubuntu image, so it is optional — but say so when it is missing
+# rather than silently dropping the column, which reads as "there is no brotli figure".
 if command -v brotli >/dev/null 2>&1; then
   br=", $(brotli -c "$OUT" | wc -c | tr -d ' ') bytes brotli"
+  hint=""
 else
   br=""
+  hint="    (install 'brotli' to also report the brotli size, which is what a CDN serves)"
 fi
 echo "==> built $OUT  (${raw} bytes raw, ${gz} bytes gzip${br})"
+# `if`, not `[ … ] && echo` — under `set -e` a false test in a bare AND-list can take the script's
+# exit status with it.
+if [ -n "$hint" ]; then echo "$hint"; fi
 echo "    add the script tags to web/index.html if not present, then: (cd clients/flutter && flutter build web)"
