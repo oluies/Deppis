@@ -9,12 +9,32 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-OPT="protocol-core-js/target/scala-3.3.4/protocol-core-js-opt/main.js"
 OUT="clients/flutter/web/protocol-engine.js"
 
 echo "==> 1/2 linking the Scala.js engine (fullLinkJS) …"
 sbt -batch -no-colors "protocolCoreJS/fullLinkJS" >/dev/null
-[ -f "$OPT" ] || { echo "link output not found: $OPT" >&2; exit 1; }
+
+# sbt 2.0 centralizes build outputs under target/out/<platform>/scala-<version>/… (this script used
+# to point at the sbt 1.x `protocol-core-js/target/…` layout, which had silently stopped resolving).
+# The Scala version is part of the path, so resolve it by glob — a `scalaVersion` bump must not need
+# a matching edit here. Insist on exactly one match so an ambiguous tree fails loudly.
+shopt -s nullglob
+BUNDLES=(target/out/sjs1/scala-*/protocol-core-js/protocol-core-js-opt/main.js)
+if [ ${#BUNDLES[@]} -ne 1 ]; then
+  echo "expected exactly 1 link output, found ${#BUNDLES[@]}: ${BUNDLES[*]:-<none>}" >&2
+  if [ ${#BUNDLES[@]} -eq 0 ]; then
+    echo "(the link step produced nothing under target/out/sjs1/ — check that fullLinkJS above" >&2
+    echo "   actually succeeded, and that you are running from the repo root)" >&2
+  else
+    # NOT `sbt clean`: verified that it removes only the CURRENT scalaVersion's output and leaves a
+    # tree from a previous one in place, so it cannot resolve this ambiguity. Delete the stale dir.
+    echo "(a leftover tree from an older scalaVersion — 'sbt clean' will NOT remove it:" >&2
+    echo "   rm -rf target/out/sjs1/scala-<old-version>)" >&2
+  fi
+  exit 1
+fi
+OPT="${BUNDLES[0]}"
+echo "    link output: $OPT"
 
 echo "==> 2/2 bundling + minifying for the browser (pinned esbuild) …"
 ESB="node_modules/.bin/esbuild"
@@ -23,7 +43,24 @@ ESB="node_modules/.bin/esbuild"
   --bundle --minify --global-name=__mm --format=iife \
   --outfile="$OUT"
 
-raw=$(wc -c < "$OUT")
-gz=$(gzip -c "$OUT" | wc -c)
-echo "==> built $OUT  (${raw} bytes raw, ${gz} bytes gzip)"
+# BSD wc (macOS) right-aligns its count in a field, so strip padding from ALL of these or the
+# report comes out raggedly aligned.
+raw=$(wc -c < "$OUT" | tr -d ' ')
+gz=$(gzip -c "$OUT" | wc -c | tr -d ' ')
+# brotli is what a CDN actually serves, and the README quotes it. The binary ships by default on
+# neither macOS nor a stock Debian/Ubuntu image, so it is optional — but say so when it is missing
+# rather than silently dropping the column, which reads as "there is no brotli figure".
+if command -v brotli >/dev/null 2>&1; then
+  br=", $(brotli -c "$OUT" | wc -c | tr -d ' ') bytes brotli"
+  hint=""
+else
+  br=""
+  hint="    (install 'brotli' to also report the brotli size, which is what a CDN serves)"
+fi
+echo "==> built $OUT  (${raw} bytes raw, ${gz} bytes gzip${br})"
+# To stderr: it is a note about the environment, not part of the size report, so it stays out of
+# the way of anything reading stdout. `if`, not a bare `[ … ] && echo`, because an AND-list whose
+# test is false exits 1 — harmless mid-script, but it silently becomes the SCRIPT's exit status if
+# it ever ends up last. (Verified: that is plain last-command-status, not a `set -e` effect.)
+if [ -n "$hint" ]; then echo "$hint" >&2; fi
 echo "    add the script tags to web/index.html if not present, then: (cd clients/flutter && flutter build web)"

@@ -5,7 +5,7 @@ import protocbridge.{Artifact, SandboxedJvmGenerator, Target}
 // compiles it for the JVM; the Scala.js cross-build (T019) and the server/sidecar/client
 // modules are added in later phases as their toolchains land.
 
-ThisBuild / scalaVersion := "3.3.4" // LTS
+ThisBuild / scalaVersion := "3.3.8" // LTS (3.3.x); the Next line is 3.8.x — stay on LTS
 ThisBuild / organization := "io.deppis.messenger"
 ThisBuild / version := "0.1.0-SNAPSHOT"
 

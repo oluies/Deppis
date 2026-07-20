@@ -159,7 +159,18 @@ jobs:
         run: sbt -batch -no-colors ';protocolCoreJS/test ;protocolCoreJS/fullLinkJS'
       - name: E2E — drive the linked bundle through the engine-api contract (as a consumer loads it)
         # sbt 2.0 centralizes build outputs under target/out/<platform>/… (was protocol-core-js/target/…).
-        run: node protocol-core/js/e2e/engine-contract.cjs target/out/sjs1/scala-3.3.4/protocol-core-js/protocol-core-js-opt/main.js
+        # The Scala version is part of that path, so RESOLVE it rather than pinning it here — pinning
+        # meant a `scalaVersion` bump in build.sbt silently needed a matching edit in this file.
+        # Fail loudly unless the glob finds exactly one bundle, so a miss can never pass as green.
+        run: |
+          shopt -s nullglob
+          bundles=(target/out/sjs1/scala-*/protocol-core-js/protocol-core-js-opt/main.js)
+          if [ ${#bundles[@]} -ne 1 ]; then
+            echo "::error::expected exactly 1 linked bundle, found ${#bundles[@]}: ${bundles[*]:-<none>}"
+            exit 1
+          fi
+          echo "bundle: ${bundles[0]}"
+          node protocol-core/js/e2e/engine-contract.cjs "${bundles[0]}"
 
   flutter:
     name: Flutter — analyze + widget tests (T005)

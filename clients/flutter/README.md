@@ -23,20 +23,37 @@ Constitution VII).
 
 ## Wiring the real engine for web
 
-The Scala.js bundle uses ES/CommonJS modules and imports the vetted
-`@noble/hashes`, so a browser build needs a bundler to expose the
+The Scala.js bundle uses ES/CommonJS modules and imports the vetted `@noble/*`
+packages (`hashes`, `curves`, `ciphers`, `post-quantum` — all pinned in the repo
+root `package.json`), so a browser build needs a bundler to expose the
 `ProtocolEngine` class as a global. Once `globalThis.ProtocolEngine` exists,
 `createEngine()` uses it automatically; otherwise it falls back to `DevEngine`.
+
+Use the script — it does both steps, resolves the link output safely, and reports the size:
+
+```sh
+scripts/build-web-bundle.sh
+```
+
+Equivalent by hand, if you want the steps (pinned esbuild from package.json — run
+`npm install` once):
 
 ```sh
 # 1. link the engine bundle (Scala.js full optimization)
 sbt 'protocolCoreJS/fullLinkJS'
-# 2. bundle + MINIFY it for the browser (pinned esbuild from package.json — run `npm install` once):
-npx esbuild protocol-core-js/target/scala-3.3.4/protocol-core-js-opt/main.js \
+# 2. bundle + MINIFY it for the browser. sbt 2.0 puts link output under
+#    target/out/sjs1/scala-<version>/…, so let the shell resolve the version rather than typing it —
+#    it changes whenever build.sbt's scalaVersion does.
+npx esbuild target/out/sjs1/scala-*/protocol-core-js/protocol-core-js-opt/main.js \
   --bundle --minify --global-name=__mm --format=iife \
   --outfile=clients/flutter/web/protocol-engine.js
-# (or just: scripts/build-web-bundle.sh, which does both steps + reports size)
 ```
+
+Unlike the script, that glob is **unguarded**: it assumes a clean tree. If a previous
+`scalaVersion` left a second `target/out/sjs1/scala-*` directory behind, esbuild gets two entry
+points and one `--outfile` and fails on *that* instead of on the real cause — delete the stale
+directory (`rm -rf target/out/sjs1/scala-<old-version>`; `sbt clean` will not, it only touches the
+current version's output).
 
 `web/index.html` already loads it (synchronously, before `flutter_bootstrap.js`):
 ```html
@@ -49,11 +66,26 @@ degrades gracefully to the labeled `DevEngine` — so committing the script tags
 safe even though the generated bundle is not checked in.
 
 **Size.** The engine is a full E2E crypto stack (Scala.js runtime + the ratchet +
-the vetted `@noble` primitives), so expect a few hundred KB raw — but the
-over-the-wire size is what matters and it compresses well. With `--minify`:
-~370 KB raw → **~100 KB gzip / ~80 KB brotli**. Serve compressed (any CDN/nginx
-does this); don't optimize against the raw number. (Without `--minify` it is
-~646 KB raw / ~118 KB gzip — minify is a free ~43% raw / ~15% gzip win.)
+the vetted `@noble` primitives, now including the post-quantum ones), so expect
+well over half a MB raw — but the over-the-wire size is what matters and it
+compresses well. Measured on Scala 3.3.8:
+
+| | raw | gzip | brotli |
+|---|---|---|---|
+| `--minify` | 580 KB | **164 KB** | **130 KB** |
+| without | 1.62 MB | 250 KB | 179 KB |
+
+Minify is a free ~65% raw / ~34% gzip win. Serve compressed (any CDN/nginx does
+this); don't optimize against the raw number.
+
+To refresh: the `--minify` row is what `build-web-bundle.sh` prints (its brotli
+column needs the `brotli` binary — it says so if absent). The `without` row is
+the same esbuild invocation with `--minify` dropped; the script never emits it.
+
+> These figures replace an earlier set (~370 KB raw / ~100 KB gzip) that was
+> ~60% low. They predated the post-quantum additions, and `build-web-bundle.sh`
+> had been unable to resolve its input since the sbt 2.0 layout change, so
+> nothing re-measured them. Re-measure when the crypto surface changes.
 
 (The bundling is a deployment build step — not part of `flutter test`/CI, which
 exercise the adapter via the fake handle and the engine via the Node e2e.)
