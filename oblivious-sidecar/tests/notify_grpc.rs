@@ -12,15 +12,13 @@ const KEY: [u8; 32] = [9u8; 32];
 /// where serialize = [8-byte big-endian round][2-byte big-endian bit][label]. (Interop + the round
 /// binding that prevents cross-round replay.)
 fn seal(round: u64, bit: u16, label: &[u8], nonce_seed: u8) -> Vec<u8> {
-    let cipher = ChaCha20Poly1305::new(Key::from_slice(&KEY));
+    let cipher = ChaCha20Poly1305::new(&Key::from(KEY));
     let nonce = [nonce_seed; 12];
     let mut pt = round.to_be_bytes().to_vec();
     pt.push((bit >> 8) as u8);
     pt.push((bit & 0xff) as u8);
     pt.extend_from_slice(label);
-    let ct = cipher
-        .encrypt(Nonce::from_slice(&nonce), pt.as_ref())
-        .unwrap();
+    let ct = cipher.encrypt(&Nonce::from(nonce), pt.as_ref()).unwrap();
     let mut sealed = nonce.to_vec();
     sealed.extend(ct);
     sealed

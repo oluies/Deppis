@@ -74,7 +74,9 @@ impl NotificationServer {
         max_signals_per_round: usize,
     ) -> Self {
         NotificationServer {
-            cipher: ChaCha20Poly1305::new(Key::from_slice(&server_key)),
+            // `server_key` is [u8; 32] and `Key` is a 32-byte array type, so this conversion is
+            // total — infallible at the type level, no length check to get wrong.
+            cipher: ChaCha20Poly1305::new(&Key::from(server_key)),
             state: Mutex::new(State {
                 rounds: HashMap::new(),
                 order: VecDeque::new(),
@@ -98,7 +100,13 @@ impl NotificationSvcTrait for NotificationServer {
         // replay; the per-round cap bounds same-round replay.
         if req.sealed_token.len() >= NONCE_LEN + TAG_LEN {
             let (nonce, ct) = req.sealed_token.split_at(NONCE_LEN);
-            if let Ok(pt) = self.cipher.decrypt(Nonce::from_slice(nonce), ct) {
+            // `split_at(NONCE_LEN)` already fixes the length, so the conversion cannot fail — but
+            // it is fallible in the type system, and a `Err` is folded into the same silent drop
+            // as a failed `decrypt` rather than unwrapped. Keeps the response uniform either way.
+            let opened = Nonce::try_from(nonce)
+                .ok()
+                .and_then(|n| self.cipher.decrypt(&n, ct).ok());
+            if let Some(pt) = opened {
                 // plaintext = [round(8 BE)][bit(2 BE)][label]
                 if pt.len() >= 10 {
                     let round = u64::from_be_bytes(pt[0..8].try_into().unwrap());
