@@ -21,8 +21,11 @@ class ChunkStreamCrossSpec extends AnyFunSuite:
     s.grouped(2).map(h => Integer.parseInt(h, 16).toByte).toArray
 
   test("the padded-payload budget is identical on both platforms"):
-    // Derived from DoubleRatchet.InnerSize (172) - ArqFrame.HeaderBytes (16) = 156, minus the
-    // 11-byte KEM_CHUNK header = 145 data bytes/chunk. Pinned so a drift on either platform fails.
+    // The whole chain, top to bottom: the 256-byte store frame (Frame.Size) less nonce 12 + sealed
+    // header 56 + tag 16 = DoubleRatchet.InnerSize 172; less ArqFrame.HeaderBytes 16 = 156; less
+    // the 11-byte KEM_CHUNK header = 145 data bytes/chunk. Pinned so a drift on either platform
+    // fails — and so the budget tables in ARCHITECTURE.md §7 and future-work.md cannot go stale
+    // silently, which is how the pre-ARQ 170 survived in three documents.
     assert(DoubleRatchet.WireSize == 256)
     assert(DoubleRatchet.InnerSize == 172)
     assert(ArqFrame.PayloadBytes == 156)
