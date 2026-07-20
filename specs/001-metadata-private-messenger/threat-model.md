@@ -59,8 +59,13 @@ The metadata-privacy claim is stated **relative to** the Phase C trust model:
    does not become trust in whoever controls the allowlist precisely because measurements are in
    an append-only log the client pins.
 3. **The crypto primitives are sound and correctly used** — vetted libraries only, no hand-rolled
-   crypto (Constitution I): AEAD/Blake2b from libsodium / `@noble`, the ratchet from
-   `org.signal:libsignal-client`.
+   crypto (Constitution I): AEAD/Blake2b from libsodium / `@noble`. **The content ratchet is NOT a
+   vetted third-party implementation**: it is `engine.DoubleRatchet`, *assembled* from those
+   primitives under Principle I's **construction amendment** (v1.1.0), because no audited
+   cross-platform ratchet exists for Scala.js (`design/dh-ratchet.md`). It is cross-checked on the
+   JVM against `org.signal:libsignal-client`, but that cross-check is not an audit of it. Anyone
+   auditing this trust base should treat the ratchet *construction* as in scope for review, unlike
+   the primitives it is built from.
 4. **The out-of-band pairing channel is authentic** — buddies compare a safety number in person /
    over a trusted channel; a tampered shared secret yields a mismatched safety number and the
    pairing is refused (FR-001, US1).

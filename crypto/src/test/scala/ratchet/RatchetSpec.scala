@@ -7,7 +7,10 @@ import org.signal.libsignal.protocol.state.PreKeyBundle
 /** T012: exercises the wrapped audited libsignal double ratchet end to end between two parties.
   * We assert the observable ratchet properties (round-trip both ways, the ratchet advances so the
   * same plaintext yields different ciphertexts, out-of-order delivery still decrypts) rather than
-  * re-deriving any crypto — the implementation is the vetted library's, not ours (Constitution I). */
+  * re-deriving any crypto — the implementation is the vetted library's, not ours (Constitution I).
+  *
+  * Scope: this covers the JVM **cross-check reference**, not the production content ratchet
+  * (`engine.DoubleRatchet`, covered by `DoubleRatchetModelSpec` and the cross-platform specs). */
 class RatchetSpec extends AnyFunSuite:
 
   /** A serialized ML-KEM-1024 public key: 1568 key bytes + 1 leading libsignal key-type byte. Named

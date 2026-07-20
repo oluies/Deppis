@@ -53,7 +53,7 @@ to Scala.js.
 |---|---|---|
 | `protocolCore` | `protocol-core/` (shared + `jvm/`) | `sbt "protocolCore/test"` |
 | `protocolCoreJS` | `protocol-core-js/` (shared + `js/`, runs under Node) | `npm ci && sbt "protocolCoreJS/test"` |
-| `crypto` | `crypto/` (libsodium FFM + libsignal ratchet) | `sbt "crypto/test"` |
+| `crypto` | `crypto/` (libsodium FFM + the libsignal cross-check ratchet) | `sbt "crypto/test"` |
 | `anonymity` | `anonymity/` | `sbt "anonymity/test"` |
 | `server` | `server/` (`pong`/`ping`/`provider`/`attestation`) | `sbt "server/test"` |
 | `transport` | `transport/` (gRPC fronts + `DeppisDemo`) | `sbt "transport/test"` |

@@ -63,7 +63,8 @@ model that makes metadata privacy work. v1 ships no media path at all.
 
 **What accommodates it later.** Voice/video would not run *over* the message rounds; it would attach
 as a separate backend behind the **`AnonymityLayer`** seam (Constitution VIII), reusing the
-out-of-band `pairKey` and the libsignal ratchet for media keys but negotiating a dedicated,
+out-of-band `pairKey` and the content ratchet (`engine.DoubleRatchet`) for media keys but
+negotiating a dedicated,
 constant-bitrate, padded media channel. The architecture already separates "which backend provides
 anonymity" from "the engine's protocol logic," so a streaming backend is an additive
 implementation, not a rewrite of `protocol-core`. The handshake/`pairKey` hierarchy (one root per
@@ -126,13 +127,15 @@ FR-010) versus how much the devices must pre-agree at pairing time.
 
 ## Post-quantum hybrid ratchet (Phase D)
 
-**Out of scope now.** Content E2E today is the libsignal double ratchet (T012). Its *session
-handshake* is no longer classical: libsignal 0.8x made the Kyber arm mandatory, so `RatchetParty`
-publishes a **PQXDH** bundle and cannot construct an X3DH-only one. That is Signal's own handshake
-going post-quantum and is **not** the deferred item here — the ratchet's ongoing DH steps remain
-classical, and the Deppis-side work is separate: hybrid **X25519 ⊕ ML-KEM** key agreement (FIPS 203)
-and **ML-DSA** signatures (FIPS 204) via liboqs, plus epoch forward secrecy via a verifiable OPRF.
-Do not read PQXDH at the handshake as covering either.
+**Out of scope now.** Content E2E today is `engine.DoubleRatchet`, whose DH steps are **X25519 —
+classical**. That is the deferred item: hybrid **X25519 ⊕ ML-KEM** key agreement (FIPS 203) and
+**ML-DSA** signatures (FIPS 204) via liboqs, plus epoch forward secrecy via a verifiable OPRF.
+
+Separately, and **not** the deferred item: the libsignal `RatchetParty` (T012, the JVM cross-check
+reference) had its *session handshake* go post-quantum — libsignal 0.8x makes the Kyber arm
+mandatory, so it publishes a **PQXDH** bundle and cannot construct an X3DH-only one. That is
+Signal's own handshake, on a component that is not the content path. Do not read it as covering
+either the content ratchet's classical DH steps or the Deppis hybrid work above.
 
 **What accommodates it later.** Crypto is isolated behind the `crypto/` module's vetted-library
 wrappers (Constitution I — no hand-rolled primitives), and the ratchet is a *wrapped* component

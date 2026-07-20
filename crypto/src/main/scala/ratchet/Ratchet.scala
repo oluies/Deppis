@@ -19,7 +19,14 @@ import org.signal.libsignal.protocol.state.impl.InMemorySignalProtocolStore
 import org.signal.libsignal.protocol.util.KeyHelper
 
 /** Wrapper over the **audited** libsignal double-ratchet (T012, Constitution I — we wrap a vetted
-  * implementation and NEVER reimplement the ratchet). Each [[RatchetParty]] is one local identity
+  * implementation and NEVER reimplement the ratchet).
+  *
+  * NOT THE CONTENT PATH. This is the JVM **cross-check reference**; the production content ratchet
+  * is `engine.DoubleRatchet` in `protocol-core`, assembled from vetted primitives under Principle
+  * I's construction amendment because no audited cross-platform ratchet exists for Scala.js (see
+  * `design/dh-ratchet.md`). This wrapper being audited says nothing about that one.
+  *
+  * Each [[RatchetParty]] is one local identity
   * with its own protocol store; it publishes a prekey bundle (PQXDH), establishes a session from a
   * peer's bundle, and then exchanges messages. Forward secrecy and post-compromise security are
   * provided by the underlying library's double ratchet — this layer only adapts the API to Scala.
