@@ -6,9 +6,15 @@ import org.signal.libsignal.protocol.{
   SessionCipher,
   SignalProtocolAddress
 }
-import org.signal.libsignal.protocol.ecc.Curve
+import org.signal.libsignal.protocol.ecc.ECKeyPair
+import org.signal.libsignal.protocol.kem.{KEMKeyPair, KEMKeyType}
 import org.signal.libsignal.protocol.message.{CiphertextMessage, PreKeySignalMessage, SignalMessage}
-import org.signal.libsignal.protocol.state.{PreKeyBundle, PreKeyRecord, SignedPreKeyRecord}
+import org.signal.libsignal.protocol.state.{
+  KyberPreKeyRecord,
+  PreKeyBundle,
+  PreKeyRecord,
+  SignedPreKeyRecord
+}
 import org.signal.libsignal.protocol.state.impl.InMemorySignalProtocolStore
 import org.signal.libsignal.protocol.util.KeyHelper
 
@@ -23,8 +29,11 @@ import org.signal.libsignal.protocol.util.KeyHelper
   * `org.whispersystems:signal-protocol-java`. It ships a bundled native library loaded by the JVM at
   * runtime (no separate install; CI exercises the real ratchet on linux/mac). This thin wrapper is
   * the ONLY coupling point, so the migration was localized to this file. We wrap the vetted ratchet
-  * and NEVER reimplement it (Constitution I). NOTE: this is the classic X3DH bundle (signed prekey +
-  * one-time prekey); the post-quantum Kyber prekey arm of PQXDH is intentionally not used here. */
+  * and NEVER reimplement it (Constitution I). NOTE: the handshake is PQXDH — as of libsignal 0.8x
+  * the Kyber prekey arm is MANDATORY (`PreKeyBundle` has one constructor and it requires the Kyber
+  * public key + signature), so the classic X3DH-only bundle this wrapper used to publish is no
+  * longer constructible. That is a strengthening, and it is independent of the hybrid ML-KEM work in
+  * `protocol-core` — this is Signal's own session handshake, not the Deppis epoch ratchet. */
 
 /** A ciphertext on the wire: the libsignal message `type` (PREKEY vs WHISPER) plus the serialized
   * body. The type tells the receiver how to reconstruct the message; no key material is exposed. */
@@ -37,21 +46,32 @@ final class RatchetParty(val name: String, deviceId: Int = 1):
   private val identity = IdentityKeyPair.generate()
   private val store = new InMemorySignalProtocolStore(identity, registrationId)
 
-  // One-time prekey + signed prekey this party publishes for others to start a session with.
+  // One-time prekey + signed prekey + KYBER prekey, published for others to start a session with.
   // libsignal-client exposes the primitives directly (the old KeyHelper.generatePreKeys/
-  // generateSignedPreKey convenience helpers were dropped), so we build the records ourselves:
-  // a fresh Curve keypair per prekey, and an identity-key signature over the signed prekey's
-  // serialized public key (exactly what SessionBuilder.process verifies during X3DH).
-  private val preKey: PreKeyRecord = new PreKeyRecord(1, Curve.generateKeyPair())
+  // generateSignedPreKey convenience helpers were dropped), so we build the records ourselves: a
+  // fresh keypair per prekey, and an identity-key signature over the prekey's serialized public key
+  // (exactly what SessionBuilder.process verifies during the handshake).
+  //
+  // The `Curve` static helper was removed in 0.8x — key generation moved onto the types themselves
+  // (`ECKeyPair.Companion.generate()`, Kotlin) and signing onto `ECPrivateKey.calculateSignature`.
+  private val preKey: PreKeyRecord = new PreKeyRecord(1, ECKeyPair.Companion.generate())
   private val signedPreKey: SignedPreKeyRecord =
-    val spkPair = Curve.generateKeyPair()
-    val signature =
-      Curve.calculateSignature(identity.getPrivateKey, spkPair.getPublicKey.serialize())
+    val spkPair = ECKeyPair.Companion.generate()
+    val signature = identity.getPrivateKey.calculateSignature(spkPair.getPublicKey.serialize())
     new SignedPreKeyRecord(1, System.currentTimeMillis(), spkPair, signature)
+  // PQXDH: as of libsignal 0.8x the Kyber arm is MANDATORY — `PreKeyBundle` has a single
+  // constructor and it requires the Kyber prekey + its signature, so a session can no longer be
+  // established with the classic X3DH bundle alone. Signed by the same identity key as the signed
+  // prekey. KYBER_1024 is the only KEMKeyType the library offers.
+  private val kyberPreKey: KyberPreKeyRecord =
+    val kyberPair = KEMKeyPair.generate(KEMKeyType.KYBER_1024)
+    val signature = identity.getPrivateKey.calculateSignature(kyberPair.getPublicKey.serialize())
+    new KyberPreKeyRecord(1, System.currentTimeMillis(), kyberPair, signature)
   store.storePreKey(preKey.getId, preKey)
   store.storeSignedPreKey(signedPreKey.getId, signedPreKey)
+  store.storeKyberPreKey(kyberPreKey.getId, kyberPreKey)
 
-  /** The X3DH prekey bundle a peer uses to open a session with this party. */
+  /** The PQXDH prekey bundle a peer uses to open a session with this party. */
   def publishBundle(): PreKeyBundle =
     new PreKeyBundle(
       registrationId,
@@ -61,7 +81,10 @@ final class RatchetParty(val name: String, deviceId: Int = 1):
       signedPreKey.getId,
       signedPreKey.getKeyPair.getPublicKey,
       signedPreKey.getSignature,
-      identity.getPublicKey
+      identity.getPublicKey,
+      kyberPreKey.getId,
+      kyberPreKey.getKeyPair.getPublicKey,
+      kyberPreKey.getSignature
     )
 
   /** Establish an outbound session to `peer` from its published bundle (X3DH). */

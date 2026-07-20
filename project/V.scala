@@ -9,6 +9,9 @@ object V {
   // classpath (codegen runs sandboxed — see project/plugins.sbt), so these are pinned here directly.
   val scalapb = "0.11.20"
   val grpcJava = "1.62.2"
+  // The audited Signal double-ratchet (Rust core + JNI bindings). Constitution I: we wrap this and
+  // never reimplement the ratchet, so keeping it current is a security concern, not just hygiene.
+  val libsignal = "0.86.5"
   // Pekko typed actors — the round-orchestration skeleton for the networked TLS server (T020).
   val pekko = "1.6.0"
   // Bouncy Castle — generates the dev self-signed TLS cert (T020); netty's built-in generator uses

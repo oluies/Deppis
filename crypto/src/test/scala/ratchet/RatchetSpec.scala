@@ -74,3 +74,23 @@ class RatchetSpec extends AnyFunSuite:
     val (alice, bob) = paired()
     val ct = alice.encrypt(bob.address, utf8("x"))
     assertThrows[IllegalArgumentException](bob.decrypt(alice.address, ct.copy(msgType = 99)))
+
+  // PQXDH: libsignal 0.8x made the Kyber arm mandatory, so the published bundle MUST carry a Kyber
+  // prekey and its signature. Pinned explicitly rather than left implicit in "the session works" —
+  // if a future version made the arm optional again, the round-trip tests above would keep passing
+  // while the handshake silently lost its post-quantum leg, which is exactly the regression this
+  // project cannot afford to miss.
+  test("the published bundle carries a signed Kyber prekey (PQXDH, not classic X3DH)"):
+    val bundle = new RatchetParty("carol").publishBundle()
+    val kyberPub = bundle.getKyberPreKey
+    assert(kyberPub != null, "bundle has no Kyber prekey — the handshake would be classic X3DH")
+    // Kyber-1024 public keys are 1568 bytes, +1 for libsignal's key-type prefix byte.
+    assert(kyberPub.serialize().length == 1569, s"unexpected Kyber public key length")
+    val sig = bundle.getKyberPreKeySignature
+    assert(sig != null && sig.nonEmpty, "Kyber prekey is unsigned")
+    // The signature must verify under the SAME identity key that signs the classic signed prekey —
+    // that binding is what stops a Kyber arm being swapped in by anyone but the bundle's owner.
+    assert(
+      bundle.getIdentityKey.getPublicKey.verifySignature(kyberPub.serialize(), sig),
+      "Kyber prekey signature does not verify under the bundle's identity key"
+    )

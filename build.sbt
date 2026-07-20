@@ -108,7 +108,7 @@ lazy val crypto = (project in file("crypto"))
       "com.lihaoyi" %% "upickle" % V.upickle,
       // Audited Signal double-ratchet (T012/T012a, Constitution I — no hand-rolled ratchet). The
       // MAINTAINED libsignal (Rust core + Java bindings); we wrap it, never reimplement the ratchet.
-      "org.signal" % "libsignal-client" % "0.61.0",
+      "org.signal" % "libsignal-client" % V.libsignal,
       // independent vetted Blake2b impl, used only to cross-validate libsodium in KATs
       "org.bouncycastle" % "bcprov-jdk18on" % "1.78.1" % Test
     )
