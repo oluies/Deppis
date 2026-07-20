@@ -9,12 +9,24 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-OPT="protocol-core-js/target/scala-3.3.4/protocol-core-js-opt/main.js"
 OUT="clients/flutter/web/protocol-engine.js"
 
 echo "==> 1/2 linking the Scala.js engine (fullLinkJS) …"
 sbt -batch -no-colors "protocolCoreJS/fullLinkJS" >/dev/null
-[ -f "$OPT" ] || { echo "link output not found: $OPT" >&2; exit 1; }
+
+# sbt 2.0 centralizes build outputs under target/out/<platform>/scala-<version>/… (this script used
+# to point at the sbt 1.x `protocol-core-js/target/…` layout, which had silently stopped resolving).
+# The Scala version is part of the path, so resolve it by glob — a `scalaVersion` bump must not need
+# a matching edit here. Insist on exactly one match so an ambiguous tree fails loudly.
+shopt -s nullglob
+BUNDLES=(target/out/sjs1/scala-*/protocol-core-js/protocol-core-js-opt/main.js)
+if [ ${#BUNDLES[@]} -ne 1 ]; then
+  echo "expected exactly 1 link output, found ${#BUNDLES[@]}: ${BUNDLES[*]:-<none>}" >&2
+  echo "(stale outputs from an older scalaVersion? try: sbt clean)" >&2
+  exit 1
+fi
+OPT="${BUNDLES[0]}"
+echo "    link output: $OPT"
 
 echo "==> 2/2 bundling + minifying for the browser (pinned esbuild) …"
 ESB="node_modules/.bin/esbuild"
