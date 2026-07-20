@@ -18,13 +18,14 @@ import org.signal.libsignal.protocol.state.{
 import org.signal.libsignal.protocol.state.impl.InMemorySignalProtocolStore
 import org.signal.libsignal.protocol.util.KeyHelper
 
-/** Wrapper over the **audited** libsignal double-ratchet (T012, Constitution I — we wrap a vetted
-  * implementation and NEVER reimplement the ratchet).
+/** Wrapper over the **audited** libsignal double-ratchet (T012). Constitution I as it applies to
+  * *this* component: it wraps a vetted implementation rather than reimplementing one.
   *
-  * NOT THE CONTENT PATH. This is the JVM **cross-check reference**; the production content ratchet
-  * is `engine.DoubleRatchet` in `protocol-core`, assembled from vetted primitives under Principle
-  * I's construction amendment because no audited cross-platform ratchet exists for Scala.js (see
-  * `design/dh-ratchet.md`). This wrapper being audited says nothing about that one.
+  * NOT THE CONTENT PATH, and the line above is not a repo-wide claim. This is the JVM **cross-check
+  * reference**; the production content ratchet is `engine.DoubleRatchet` in `protocol-core`,
+  * assembled in-repo from vetted primitives under Principle I's **construction amendment** (v1.1.0)
+  * because no audited cross-platform ratchet exists for Scala.js (see `design/dh-ratchet.md`). This
+  * wrapper being audited says nothing about that one.
   *
   * Each [[RatchetParty]] is one local identity
   * with its own protocol store; it publishes a prekey bundle (PQXDH), establishes a session from a
@@ -35,8 +36,10 @@ import org.signal.libsignal.protocol.util.KeyHelper
   * libsignal (Rust core + Java/JNI bindings), which superseded the archived/EOL pure-JVM
   * `org.whispersystems:signal-protocol-java`. It ships a bundled native library loaded by the JVM at
   * runtime (no separate install; CI exercises the real ratchet on linux/mac). This thin wrapper is
-  * the ONLY coupling point, so the migration was localized to this file. We wrap the vetted ratchet
-  * and NEVER reimplement it (Constitution I). NOTE: the handshake is PQXDH — as of libsignal 0.8x
+  * the ONLY coupling point, so the migration was localized to this file. This wrapper never
+  * reimplements libsignal's ratchet; the *content* ratchet is assembled separately under the
+  * construction amendment (see above) — do not read this paragraph as the repo-wide Constitution I
+  * position. NOTE: the handshake is PQXDH — as of libsignal 0.8x
   * the Kyber prekey arm is MANDATORY (`PreKeyBundle` has one constructor and it requires the Kyber
   * public key + signature), so the classic X3DH-only bundle this wrapper used to publish is no
   * longer constructible. That is a strengthening, and it is independent of the hybrid ML-KEM work in

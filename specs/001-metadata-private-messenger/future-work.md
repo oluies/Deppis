@@ -137,18 +137,25 @@ mandatory, so it publishes a **PQXDH** bundle and cannot construct an X3DH-only 
 Signal's own handshake, on a component that is not the content path. Do not read it as covering
 either the content ratchet's classical DH steps or the Deppis hybrid work above.
 
-**What accommodates it later.** Crypto is isolated behind the `crypto/` module's vetted-library
-wrappers (Constitution I — no hand-rolled primitives), and the ratchet is a *wrapped* component
-(`RatchetParty`), so swapping the X3DH/DH arm for a hybrid KEM is a change inside `crypto/`, not in
-`protocol-core`'s framing or token logic. The `pairKey`-rooted hierarchy is agnostic to how the root
-was agreed. The plan already names liboqs and pins the FIPS KAT harness as the integration contract
-(tasks T047–T049), so the seam is the existing crypto-wrapper boundary.
+**What accommodates it later.** The DH step sits behind the `x25519.X25519` primitive seam, which
+already has separate JVM (JCA) and JS (`@noble/curves`) implementations behind one shared API — so
+hybridization lands **in `protocol-core`** at that seam, plus a liboqs wrapper in `crypto/` for the
+ML-KEM half. It is *not* a change confined to `crypto/`: `engine.DoubleRatchet` lives in
+`protocol-core/shared/src/main/scala/engine/`. What it does not touch is framing or token logic —
+the `pairKey`-rooted hierarchy is agnostic to how the root was agreed. The plan already names liboqs
+and pins the FIPS KAT harness as the integration contract (tasks T047–T049).
 
-**Open problem.** A live JS ratchet for the Scala.js engine (today the ratchet is JVM-only; the
-frame path on the client cross-compiles but the inner forward-secret ratchet does not yet), and the
-hybrid's larger key/ciphertext sizes pressuring the 226-byte payload budget when ratchet output
-becomes the inner payload (the roadmap item noted in `ARCHITECTURE.md` §7). Epoch key evolution via
-verifiable OPRF with erasure / no-roll-forward is specified but unbuilt.
+**Open problem.** The hybrid's larger key/ciphertext sizes pressure the 226-byte payload budget when
+ratchet output becomes the inner payload (the roadmap item noted in `ARCHITECTURE.md` §7) — the same
+size pressure that forced the continuous-PQ-ratchet design to chunk ML-KEM material over ARQ rather
+than ride the header. Epoch key evolution via verifiable OPRF with erasure / no-roll-forward is
+specified but unbuilt.
+
+> An earlier revision of this section listed "a live JS ratchet for the Scala.js engine (today the
+> ratchet is JVM-only)" as the open problem. That was written when `RatchetParty` was believed to be
+> the content path. `engine.DoubleRatchet` is cross-platform — `protocol-core/shared/`, exercised by
+> `DoubleRatchetJsSpec` under Node — so that item was already done and is removed rather than
+> carried as phantom work.
 
 ---
 
