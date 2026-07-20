@@ -58,7 +58,9 @@ else
   hint="    (install 'brotli' to also report the brotli size, which is what a CDN serves)"
 fi
 echo "==> built $OUT  (${raw} bytes raw, ${gz} bytes gzip${br})"
-# `if`, not `[ … ] && echo` — under `set -e` a false test in a bare AND-list can take the script's
-# exit status with it.
-if [ -n "$hint" ]; then echo "$hint"; fi
+# To stderr: it is a note about the environment, not part of the size report, so it stays out of
+# the way of anything reading stdout. `if`, not a bare `[ … ] && echo`, because an AND-list whose
+# test is false exits 1 — harmless mid-script, but it silently becomes the SCRIPT's exit status if
+# it ever ends up last. (Verified: that is plain last-command-status, not a `set -e` effect.)
+if [ -n "$hint" ]; then echo "$hint" >&2; fi
 echo "    add the script tags to web/index.html if not present, then: (cd clients/flutter && flutter build web)"
