@@ -3,7 +3,6 @@ package ratchet
 import org.scalatest.funsuite.AnyFunSuite
 import org.signal.libsignal.protocol.kem.KEMKeyType
 import org.signal.libsignal.protocol.state.PreKeyBundle
-import scala.util.{Failure, Success, Try}
 
 /** T012: exercises the wrapped audited libsignal double ratchet end to end between two parties.
   * We assert the observable ratchet properties (round-trip both ways, the ratchet advances so the
@@ -15,6 +14,15 @@ class RatchetSpec extends AnyFunSuite:
     * rather than inlined so the assertion below says what it is pinning, and so a future libsignal
     * parameter-set or prefix change points here instead of at a bare number. */
   private val Kyber1024SerializedPubLen = 1568 + 1
+
+  /** `Throwable.toString` is class + `getMessage`, so a cause-only exception (which
+    * `InvalidKeyException` supports) renders as a bare class name — losing the very diagnostic the
+    * failure messages below exist to carry. Fall back to the cause when there is no message. */
+  private def describe(t: Throwable): String =
+    val detail = Option(t.getMessage)
+      .orElse(Option(t.getCause).map(c => s"caused by $c"))
+      .getOrElse("<no message or cause>")
+    s"${t.getClass.getName}: $detail"
 
   private def utf8(s: String): Array[Byte] = s.getBytes("UTF-8")
   private def str(b: Array[Byte]): String = new String(b, "UTF-8")
@@ -135,44 +143,31 @@ class RatchetSpec extends AnyFunSuite:
     val good = bob.publishBundle()
     val sig = good.getKyberPreKeySignature
 
-    // The POSITIVE CONTROL lives in the test, not in a commit message: the same reconstruction with
-    // the unmodified signature must SUCCEED. Without it, anything that made a rebuilt bundle fail
-    // for an unrelated reason (constructor field-order drift, a getter re-encoding a key) would
-    // leave the negative case green while it had stopped testing signature enforcement entirely.
-    // The control is the load-bearing half, so when it regresses the WHY has to survive. The cause
-    // is INTERPOLATED into the message, not just passed as `fail`'s cause argument: verified that
-    // sbt's reporter prints only the message, so `fail(msg, e)` alone would have shown a label and
-    // swallowed the reason — the same swallowing this is here to prevent.
-    Try(new RatchetParty("carol-ctl").startSession(bob.address, rebuilt(good, sig))) match
-      case Failure(e) =>
+    // Control: the same reconstruction with the signature UNMODIFIED must be accepted. Without it,
+    // anything that broke the rebuild itself (constructor field-order drift, a getter re-encoding a
+    // key) would leave the negative case below green while it no longer tested enforcement at all.
+    // Report the cause in the MESSAGE — sbt's reporter prints only that, not fail()'s cause arg.
+    try new RatchetParty("carol-ctl").startSession(bob.address, rebuilt(good, sig))
+    catch
+      case e: Throwable =>
         fail(
-          "positive control: a rebuilt bundle with the UNMODIFIED Kyber signature must be " +
-            s"accepted, but was rejected with: $e",
+          s"positive control: unmodified Kyber signature must be accepted, got ${describe(e)}",
           e
         )
-      case Success(_) => ()
 
-    // ...and one flipped bit in that same signature must be rejected. The type is pinned rather
-    // than `Exception`: a rejection for ANY other reason (native load failure, a future arity
-    // change, an untrusted-identity error) does not show the Kyber signature was verified.
-    // Verified empirically — libsignal raises InvalidKeyException("invalid signature detected").
-    //
-    // ATTRIBUTION IS LOAD-BEARING ON THE CONTROL ABOVE: libsignal raises this same type for a bad
-    // SIGNED-prekey signature and for malformed key material generally, so the type alone does not
-    // localise the failure to the Kyber arm. What does is that the control passes through the
-    // identical reconstruction and differs only in these signature bytes. Weaken or delete the
-    // control and this stops proving Kyber enforcement. The message is asserted too, so a rejection
-    // from a different cause that happens to share the type still fails.
+    // One flipped bit in that same signature must be rejected. Attribution rests on the control
+    // above: libsignal raises InvalidKeyException for a bad SIGNED-prekey signature and malformed
+    // key material too, so the type alone does not localise the failure to the Kyber arm — what
+    // does is that the control differs only in these bytes. Weaken the control and this stops
+    // proving Kyber enforcement.
     val ex = intercept[org.signal.libsignal.protocol.InvalidKeyException](
       new RatchetParty("alice-neg")
         .startSession(bob.address, rebuilt(good, sig.updated(0, (sig(0) ^ 0x01).toByte)))
     )
-    // Option(...) not a bare `.contains`: InvalidKeyException has cause-only constructors, so a null
-    // message is reachable across a library change, and an NPE here would fire BEFORE the assertion
-    // message could render — the same unattributable failure that pinning the type removed.
-    // The substring tracks a libsignal message string with no compatibility guarantee; if a version
-    // bump reworks it, update this rather than dropping the check.
+    // Substring tracks a libsignal message with no compatibility guarantee — update it on a bump,
+    // do not drop the check. Option(): InvalidKeyException has cause-only constructors, so
+    // getMessage can be null.
     assert(
       Option(ex.getMessage).exists(_.contains("invalid signature")),
-      s"rejected for the wrong reason: ${ex.getMessage}"
+      s"rejected for the wrong reason: ${describe(ex)}"
     )

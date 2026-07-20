@@ -22,7 +22,7 @@ app drives). The real oblivious privacy core is the Rust **`obsd`** sidecar.
 flowchart TB
     subgraph client["Client (per device)"]
         flutter["Flutter UI<br/><i>presentation only</i>"]
-        engine["protocol-core engine<br/>(Scala.js)<br/>handshake · framing · schedule<br/>retrieval-token PRF · notify digest"]
+        engine["protocol-core engine<br/>(Scala.js)<br/>handshake · DoubleRatchet (content E2E) · framing<br/>schedule · retrieval-token PRF · notify digest"]
         flutter -->|"platform channel<br/>(JSON, apiVersion)"| engine
     end
 
@@ -309,8 +309,9 @@ server.
 
 | Concern | Code |
 |---|---|
-| Engine, handshake, framing, token PRF, schedule, notify digest | `protocol-core/shared/src/main/scala/{engine,handshake,frame,token,schedule}` |
-| AEAD / KDF (libsodium FFM), double ratchet | `crypto/src/main/scala/{crypto,ratchet}` |
+| Engine, handshake, framing, token PRF, schedule, notify digest, **content double ratchet** (`engine.DoubleRatchet`) | `protocol-core/shared/src/main/scala/{engine,handshake,frame,token,schedule}` |
+| AEAD / KDF (libsodium FFM) | `crypto/src/main/scala/crypto` |
+| libsignal ratchet — JVM **cross-check reference**, not the content path | `crypto/src/main/scala/ratchet` |
 | gRPC fronts + round transport + the runnable demo | `transport/src/main/scala/transport` |
 | Oblivious store + sealed-notify aggregation | `oblivious-sidecar/src` (`obsd`) |
 | Dev store/notify + DCAP + OpenBao | `server/{pong,ping}/…`, `server/src/main/scala/attestation` |
