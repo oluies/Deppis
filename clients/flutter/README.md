@@ -23,8 +23,9 @@ Constitution VII).
 
 ## Wiring the real engine for web
 
-The Scala.js bundle uses ES/CommonJS modules and imports the vetted
-`@noble/hashes`, so a browser build needs a bundler to expose the
+The Scala.js bundle uses ES/CommonJS modules and imports the vetted `@noble/*`
+packages (`hashes`, `curves`, `ciphers`, `post-quantum` — all pinned in the repo
+root `package.json`), so a browser build needs a bundler to expose the
 `ProtocolEngine` class as a global. Once `globalThis.ProtocolEngine` exists,
 `createEngine()` uses it automatically; otherwise it falls back to `DevEngine`.
 
