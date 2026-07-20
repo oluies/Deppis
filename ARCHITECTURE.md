@@ -28,7 +28,7 @@ flowchart TB
 
     subgraph crypto["crypto (JVM, libsodium FFM)"]
         aead["AEAD ChaCha20-Poly1305<br/>+ Blake2b KDF"]
-        ratchet["libsignal double ratchet<br/><i>vetted; content E2E</i>"]
+        ratchet["libsignal ratchet<br/><i>vetted; JVM cross-check reference</i>"]
     end
 
     subgraph transport["transport (gRPC / TLS 1.3, ScalaPB)"]
@@ -246,7 +246,9 @@ flowchart TB
 | Cover traffic | random per-session `coverKey` | ephemeral | carrier frames indistinguishable from real |
 
 No hand-rolled primitives (Constitution I): AEAD/Blake2b come from libsodium (JVM) / `@noble`
-(JS), the ratchet from `org.signal:libsignal-client`.
+(JS), and the `crypto` **cross-check** ratchet from `org.signal:libsignal-client` — the production
+content ratchet is `engine.DoubleRatchet` above, hand-assembled from vetted primitives under the
+Constitution I construction amendment.
 
 > **Three different handshakes, easily confused.** The *Pairing* row above is Deppis's own
 > keyed-HMAC derivation from an already-shared secret — it is X3DH-*like* in role only, and is not a

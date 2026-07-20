@@ -3,7 +3,7 @@ package ratchet
 import org.scalatest.funsuite.AnyFunSuite
 import org.signal.libsignal.protocol.kem.KEMKeyType
 import org.signal.libsignal.protocol.state.PreKeyBundle
-import scala.util.Try
+import scala.util.{Failure, Success, Try}
 
 /** T012: exercises the wrapped audited libsignal double ratchet end to end between two parties.
   * We assert the observable ratchet properties (round-trip both ways, the ratchet advances so the
@@ -139,10 +139,18 @@ class RatchetSpec extends AnyFunSuite:
     // the unmodified signature must SUCCEED. Without it, anything that made a rebuilt bundle fail
     // for an unrelated reason (constructor field-order drift, a getter re-encoding a key) would
     // leave the negative case green while it had stopped testing signature enforcement entirely.
-    assert(
-      Try(new RatchetParty("carol-ctl").startSession(bob.address, rebuilt(good, sig))).isSuccess,
-      "positive control: a rebuilt bundle with the UNMODIFIED Kyber signature must be accepted"
-    )
+    // The control is the load-bearing half, so when it regresses the WHY has to survive. The cause
+    // is INTERPOLATED into the message, not just passed as `fail`'s cause argument: verified that
+    // sbt's reporter prints only the message, so `fail(msg, e)` alone would have shown a label and
+    // swallowed the reason — the same swallowing this is here to prevent.
+    Try(new RatchetParty("carol-ctl").startSession(bob.address, rebuilt(good, sig))) match
+      case Failure(e) =>
+        fail(
+          "positive control: a rebuilt bundle with the UNMODIFIED Kyber signature must be " +
+            s"accepted, but was rejected with: $e",
+          e
+        )
+      case Success(_) => ()
 
     // ...and one flipped bit in that same signature must be rejected. The type is pinned rather
     // than `Exception`: a rejection for ANY other reason (native load failure, a future arity
@@ -159,7 +167,12 @@ class RatchetSpec extends AnyFunSuite:
       new RatchetParty("alice-neg")
         .startSession(bob.address, rebuilt(good, sig.updated(0, (sig(0) ^ 0x01).toByte)))
     )
+    // Option(...) not a bare `.contains`: InvalidKeyException has cause-only constructors, so a null
+    // message is reachable across a library change, and an NPE here would fire BEFORE the assertion
+    // message could render — the same unattributable failure that pinning the type removed.
+    // The substring tracks a libsignal message string with no compatibility guarantee; if a version
+    // bump reworks it, update this rather than dropping the check.
     assert(
-      ex.getMessage.contains("invalid signature"),
+      Option(ex.getMessage).exists(_.contains("invalid signature")),
       s"rejected for the wrong reason: ${ex.getMessage}"
     )
