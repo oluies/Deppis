@@ -126,9 +126,13 @@ FR-010) versus how much the devices must pre-agree at pairing time.
 
 ## Post-quantum hybrid ratchet (Phase D)
 
-**Out of scope now.** Content E2E today is the classical libsignal double ratchet (X25519-based,
-T012). PQ is explicitly Phase D (`plan.md`): hybrid **X25519 ⊕ ML-KEM** key agreement (FIPS 203) and
-**ML-DSA** signatures (FIPS 204) via liboqs, plus epoch forward secrecy via a verifiable OPRF.
+**Out of scope now.** Content E2E today is the libsignal double ratchet (T012). Its *session
+handshake* is no longer classical: libsignal 0.8x made the Kyber arm mandatory, so `RatchetParty`
+publishes a **PQXDH** bundle and cannot construct an X3DH-only one. That is Signal's own handshake
+going post-quantum and is **not** the deferred item here — the ratchet's ongoing DH steps remain
+classical, and the Deppis-side work is separate: hybrid **X25519 ⊕ ML-KEM** key agreement (FIPS 203)
+and **ML-DSA** signatures (FIPS 204) via liboqs, plus epoch forward secrecy via a verifiable OPRF.
+Do not read PQXDH at the handshake as covering either.
 
 **What accommodates it later.** Crypto is isolated behind the `crypto/` module's vetted-library
 wrappers (Constitution I — no hand-rolled primitives), and the ratchet is a *wrapped* component
@@ -142,6 +146,26 @@ frame path on the client cross-compiles but the inner forward-secret ratchet doe
 hybrid's larger key/ciphertext sizes pressuring the 226-byte payload budget when ratchet output
 becomes the inner payload (the roadmap item noted in `ARCHITECTURE.md` §7). Epoch key evolution via
 verifiable OPRF with erasure / no-roll-forward is specified but unbuilt.
+
+---
+
+## Prekey lifecycle in the ratchet wrapper (rotation, replenishment, erasure)
+
+**Out of scope now.** `RatchetParty` (`crypto/.../ratchet/Ratchet.scala`) generates one one-time
+prekey, one signed prekey and one Kyber prekey, all with a **fixed id of 1**, once per party, and
+never rotates, replenishes or erases them. This is a **dev/test harness shape, not a production key
+lifecycle** — the wrapper is exercised only by `RatchetSpec` and the demo today.
+
+**Why the tests do not catch it.** libsignal treats a bundle-published one-time prekey and Kyber
+prekey as **single use** (`markKyberPreKeyUsed`). `InMemorySignalProtocolStore` no-ops that, which is
+the only reason repeated sessions against the same published bundle work here. Any real store would
+reject the second inbound PREKEY message against the same id, so this shape fails the moment the
+store becomes persistent — it is not a latent-but-harmless simplification.
+
+**Open problem.** Production needs prekey **rotation**, a **replenished one-time pool** sized against
+consumption, and **erasure after use**. The last of these also carries the project's own rule that
+key material must not outlive its epoch (Constitution II) — the current wrapper holds all three
+prekeys for the lifetime of the party object and zeroes nothing.
 
 ---
 

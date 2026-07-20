@@ -103,22 +103,39 @@ class RatchetSpec extends AnyFunSuite:
   // whether anyone ENFORCES it: the positive test would pass just as happily against a library that
   // skipped Kyber signature verification altogether. This asserts the actual threat named there —
   // a Kyber arm swapped in by someone other than the bundle's owner must be REJECTED at handshake.
+  /** Rebuild `b`'s fields into a fresh bundle, substituting `kyberSig`. Both halves of the test
+    * below go through this, so the ONLY difference between them is the signature bytes. */
+  private def rebuilt(b: PreKeyBundle, kyberSig: Array[Byte]): PreKeyBundle =
+    new PreKeyBundle(
+      b.getRegistrationId,
+      b.getDeviceId,
+      b.getPreKeyId,
+      b.getPreKey,
+      b.getSignedPreKeyId,
+      b.getSignedPreKey,
+      b.getSignedPreKeySignature,
+      b.getIdentityKey,
+      b.getKyberPreKeyId,
+      b.getKyberPreKey,
+      kyberSig
+    )
+
   test("a bundle whose Kyber signature does not verify is rejected at startSession"):
     val bob = new RatchetParty("bob")
     val good = bob.publishBundle()
     val sig = good.getKyberPreKeySignature
-    val forged = new PreKeyBundle(
-      good.getRegistrationId,
-      good.getDeviceId,
-      good.getPreKeyId,
-      good.getPreKey,
-      good.getSignedPreKeyId,
-      good.getSignedPreKey,
-      good.getSignedPreKeySignature,
-      good.getIdentityKey,
-      good.getKyberPreKeyId,
-      good.getKyberPreKey,
-      sig.updated(0, (sig(0) ^ 0x01).toByte) // one bit flipped: no longer the owner's signature
+
+    // The POSITIVE CONTROL lives in the test, not in a commit message: the same reconstruction with
+    // the unmodified signature must SUCCEED. Without it, anything that made a rebuilt bundle fail
+    // for an unrelated reason (constructor field-order drift, a getter re-encoding a key) would
+    // leave the negative case green while it had stopped testing signature enforcement entirely.
+    new RatchetParty("carol-ctl").startSession(bob.address, rebuilt(good, sig))
+
+    // ...and one flipped bit in that same signature must be rejected. The type is pinned rather
+    // than `Exception`: a rejection for ANY other reason (native load failure, a future arity
+    // change, an untrusted-identity error) does not show the Kyber signature was verified.
+    // Verified empirically — libsignal raises InvalidKeyException("invalid signature detected").
+    assertThrows[org.signal.libsignal.protocol.InvalidKeyException](
+      new RatchetParty("alice-neg")
+        .startSession(bob.address, rebuilt(good, sig.updated(0, (sig(0) ^ 0x01).toByte)))
     )
-    val alice = new RatchetParty("alice")
-    assertThrows[Exception](alice.startSession(bob.address, forged))

@@ -76,7 +76,9 @@ final class RatchetParty(val name: String, deviceId: Int = 1):
   // in-memory store no-ops that, which is why repeated sessions work here. A real store would reject
   // the second inbound PREKEY message against the same id. Production needs prekey rotation, a
   // replenished one-time pool, and erasure after use — the last of which also carries the project's
-  // rule that key material must not outlive its epoch (Constitution II).
+  // rule that key material must not outlive its epoch (Constitution II). Tracked in
+  // specs/001-metadata-private-messenger/future-work.md ("Prekey lifecycle in the ratchet wrapper")
+  // so this requirement is not carried solely by a source comment.
 
   /** The PQXDH prekey bundle a peer uses to open a session with this party. */
   def publishBundle(): PreKeyBundle =
