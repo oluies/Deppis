@@ -42,12 +42,14 @@ object DoubleRatchet:
   private val Tag: Int = Aead.TagBytes // 16
   private val SealedHeader: Int = HeaderPlain + Tag // 56
   val WireSize: Int = frame.Frame.Size // 256
-  /** The plaintext inner block the ratchet seals per message (what `sendMessage` pads into). */
-  // 172. NOT the app payload: the live path always carries the 16-byte ARQ header, so the message
-  // region is ArqFrame.PayloadBytes (156) and the app payload is Frame.maxPayload(156) = 154.
-  // Chunked objects get ChunkStream.ChunkCapacity = 145. (170 = maxPayload(172) is the PRE-ARQ
-  // figure and no live path delivers it.)
-  val InnerSize: Int = WireSize - Nonce - SealedHeader - Tag
+  /** The plaintext inner block the ratchet seals per message (what `sendMessage` pads into) — 172 B.
+    *
+    * '''NOT the app payload.''' The live path always carries the 16-byte ARQ header, so the message
+    * region is `ArqFrame.PayloadBytes` (156) and the app payload is
+    * `Frame.maxPayload(ArqFrame.PayloadBytes)` = '''154'''. Chunked objects get less again:
+    * `ChunkStream.ChunkCapacity` = '''145'''. (170 = `maxPayload(172)` is the PRE-ARQ figure; no
+    * live path delivers it. All four are asserted in `ChunkStreamCrossSpec`.) */
+  val InnerSize: Int = WireSize - Nonce - SealedHeader - Tag // 172
   private val HeaderOffset: Int = Nonce // 12
   private val MsgOffset: Int = Nonce + SealedHeader // 68
 
