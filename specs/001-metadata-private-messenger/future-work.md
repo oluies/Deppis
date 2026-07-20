@@ -31,7 +31,8 @@ The load-bearing seams referenced throughout:
 ## OOS-002 — Large media / attachments (vs the fixed 256-byte frame)
 
 **Out of scope now.** Every wire frame is exactly **256 bytes** (`nonce(12) ‖ AEAD(inner 228) ‖
-tag(16)`), capping the payload at 226 bytes (FR-015a). A photo or file does not fit, and v1 sends
+tag(16)`), capping the payload at 226 bytes pre-ratchet — **154 today**, see the budget table under
+"Post-quantum hybrid ratchet" below (FR-015a). A photo or file does not fit either way, and v1 sends
 none. The fixed size is not an accident — it is the cover-traffic invariant: real and carrier
 frames must be byte-indistinguishable (US6/FR-012), which a variable-length frame would break.
 
@@ -63,11 +64,11 @@ model that makes metadata privacy work. v1 ships no media path at all.
 
 **What accommodates it later.** Voice/video would not run *over* the message rounds; it would attach
 as a separate backend behind the **`AnonymityLayer`** seam (Constitution VIII), reusing the
-out-of-band `pairKey` and the libsignal ratchet for media keys but negotiating a dedicated,
-constant-bitrate, padded media channel. The architecture already separates "which backend provides
-anonymity" from "the engine's protocol logic," so a streaming backend is an additive
-implementation, not a rewrite of `protocol-core`. The handshake/`pairKey` hierarchy (one root per
-buddy pair) gives such a channel its keys for free.
+out-of-band `pairKey` and the content ratchet (`engine.DoubleRatchet`) for media keys but
+negotiating a dedicated, constant-bitrate, padded media channel. The architecture separates "which
+backend provides anonymity" from "the engine's protocol logic," so a streaming backend is an
+additive implementation, not a rewrite of `protocol-core`. The handshake/`pairKey` hierarchy (one
+root per buddy pair) gives such a channel its keys for free.
 
 **Open problem.** Real-time metadata privacy is genuinely hard: a constant-bitrate padded stream
 hides content and volume but a *call still happens at a wall-clock instant for a duration*, which
@@ -124,24 +125,84 @@ FR-010) versus how much the devices must pre-agree at pairing time.
 
 ---
 
-## Post-quantum hybrid ratchet (Phase D)
+## Post-quantum hybrid ratchet — BUILT, NOT VERIFIED (was Phase D)
 
-**Out of scope now.** Content E2E today is the classical libsignal double ratchet (X25519-based,
-T012). PQ is explicitly Phase D (`plan.md`): hybrid **X25519 ⊕ ML-KEM** key agreement (FIPS 203) and
-**ML-DSA** signatures (FIPS 204) via liboqs, plus epoch forward secrecy via a verifiable OPRF.
+> **Labeling, first.** "Built" is not "verified". Phase 5 formal analysis is done, **human security
+> review is outstanding**, and `DEV, NO METADATA PRIVACY` **stands**. See
+> `design/continuous-pq-ratchet.md` §0 and §6.3. Nothing below licenses a privacy claim.
 
-**What accommodates it later.** Crypto is isolated behind the `crypto/` module's vetted-library
-wrappers (Constitution I — no hand-rolled primitives), and the ratchet is a *wrapped* component
-(`RatchetParty`), so swapping the X3DH/DH arm for a hybrid KEM is a change inside `crypto/`, not in
-`protocol-core`'s framing or token logic. The `pairKey`-rooted hierarchy is agnostic to how the root
-was agreed. The plan already names liboqs and pins the FIPS KAT harness as the integration contract
-(tasks T047–T049), so the seam is the existing crypto-wrapper boundary.
+**No longer deferred.** This section used to read as unbuilt future work; that is wrong as of
+PRs #83–#85. The live content ratchet folds a hybrid **X25519 ⊕ ML-KEM-768** secret into its root:
+`KeySchedule.pqContentRoot` at pairing, then a continuous epoch rekey driven by the state machine in
+`Engine.scala` (keygen / encaps / decaps / confirm). Status header:
+`design/continuous-pq-ratchet.md` — *"PHASES 1–3 IMPLEMENTED … PHASE 5 FORMAL ANALYSIS DONE"*.
 
-**Open problem.** A live JS ratchet for the Scala.js engine (today the ratchet is JVM-only; the
-frame path on the client cross-compiles but the inner forward-secret ratchet does not yet), and the
-hybrid's larger key/ciphertext sizes pressuring the 226-byte payload budget when ratchet output
-becomes the inner payload (the roadmap item noted in `ARCHITECTURE.md` §7). Epoch key evolution via
-verifiable OPRF with erasure / no-roll-forward is specified but unbuilt.
+**How it actually lands — not at the DH step.** Hybrid material rides `kem.HybridKem`, which is
+already a cross-platform `protocol-core` seam (`protocol-core/{jvm,js}/src/main/scala/kem/`), the
+JVM copy delegating to the vetted `crypto.HybridKem` (X25519 via JCA, ML-KEM-768 via liboqs). It
+enters the ratchet as an **epoch fold into the root**, *not* by hybridizing the `x25519.X25519` DH
+step — a 1216-byte hybrid public key cannot ride a 32-byte header slot. That is the core tension in
+`design/continuous-pq-ratchet.md` §2.1, and why the KEM bytes are chunked over ARQ (`ChunkStream`)
+inside the MK-sealed inner block instead. The ongoing per-message DH steps stay **classical X25519**
+by design; the PQ hardening is the root fold, not the DH arm.
+
+**Separately, and not this work:** the libsignal `RatchetParty` (T012, the JVM cross-check
+reference) had its own *session handshake* go post-quantum — libsignal 0.8x makes the Kyber arm
+mandatory, so it publishes a **PQXDH** bundle and cannot construct an X3DH-only one. Different
+component, different key schedule. It covers neither the content ratchet nor the fold above.
+
+**What genuinely remains.** The hybrid KEM is done — wired and cross-platform; it is in the table
+only as contrast. The other two primitives are built and KAT-tested in `crypto/` but **not wired
+into the engine**, and both are JVM-only:
+
+| | built | wired into the engine | cross-platform |
+|---|---|---|---|
+| Hybrid X25519 ⊕ ML-KEM-768 *(done — for contrast)* | yes | **yes** (`kem.HybridKem`) | yes (jvm + js) |
+| ML-DSA-65 signatures (FIPS 204) | yes (`crypto.Oqs`) | **no** | no (JVM/liboqs only) |
+| Epoch evolution, 2HashDH VOPRF | yes (`crypto.{Voprf,EpochEvolution}`) | **no** | no (JVM only) |
+
+So the deferred work is *wiring and porting*, not building: attaching ML-DSA and the VOPRF epoch
+evolution (with erasure / no-roll-forward) to the engine, and giving both a JS counterpart, since
+the real client is Scala.js.
+
+**Budget to size that against — pick the right layer.** Each layer takes a header, so quoting the
+enclosing container's size overstates what the thing inside actually gets. The live chain, all
+figures from code, and every live row is asserted in `ChunkStreamCrossSpec` so it cannot drift out
+from under this table:
+
+| Layer | Bytes | From |
+|---|---|---|
+| Wire frame | 256 | `Frame.Size` |
+| ...pre-ratchet payload *(historical — `ARCHITECTURE.md` §7)* | 226 | 256 − 12 nonce − 16 tag − 2 len |
+| Ratchet inner block | 172 | `DoubleRatchet.InnerSize` |
+| ARQ envelope | 156 | `ArqFrame.PayloadBytes` = 172 − 16 hdr |
+| **App payload today** | **154** | `Frame.maxPayload(ArqFrame.PayloadBytes)` — *not* bare `Frame.MaxPayload`, which is 254 |
+| **Chunked over ARQ** | **145 / frame** | `ChunkStream.ChunkCapacity` = 156 − 11 hdr |
+
+So an ML-DSA-65 signature (~3309 B) chunked over ARQ is **23 frames** (⌈3309 / 145⌉), not 22 — and
+nothing like the ~15 that the stale 226 figure would suggest. **226 has not been the budget since
+ratchet output became the inner payload; 170 in `design/dh-ratchet.md` is the pre-ARQ intermediate
+and is also not the live number.**
+
+---
+
+## Prekey lifecycle in the ratchet wrapper (rotation, replenishment, erasure)
+
+**Out of scope now.** `RatchetParty` (`crypto/.../ratchet/Ratchet.scala`) generates one one-time
+prekey, one signed prekey and one Kyber prekey, all with a **fixed id of 1**, once per party, and
+never rotates, replenishes or erases them. This is a **dev/test harness shape, not a production key
+lifecycle** — the wrapper is exercised only by `RatchetSpec` and the demo today.
+
+**Why the tests do not catch it.** libsignal treats a bundle-published one-time prekey and Kyber
+prekey as **single use** (`markKyberPreKeyUsed`). `InMemorySignalProtocolStore` no-ops that, which is
+the only reason repeated sessions against the same published bundle work here. Any real store would
+reject the second inbound PREKEY message against the same id, so this shape fails the moment the
+store becomes persistent — it is not a latent-but-harmless simplification.
+
+**Open problem.** Production needs prekey **rotation**, a **replenished one-time pool** sized against
+consumption, and **erasure after use**. The last of these also carries the project's own rule that
+key material must not outlive its epoch (Constitution II) — the current wrapper holds all three
+prekeys for the lifetime of the party object and zeroes nothing.
 
 ---
 

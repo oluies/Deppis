@@ -21,8 +21,12 @@ class ChunkStreamCrossSpec extends AnyFunSuite:
     s.grouped(2).map(h => Integer.parseInt(h, 16).toByte).toArray
 
   test("the padded-payload budget is identical on both platforms"):
-    // Derived from DoubleRatchet.InnerSize (172) - ArqFrame.HeaderBytes (16) = 156, minus the
-    // 11-byte KEM_CHUNK header = 145 data bytes/chunk. Pinned so a drift on either platform fails.
+    // The whole chain: the 256-byte store frame (Frame.Size), less nonce 12 + sealed header 56 +
+    // tag 16 = DoubleRatchet.InnerSize 172, less ArqFrame.HeaderBytes 16 = 156. From 156 there are
+    // two SIBLING consumers, not further steps: a plain message gets Frame.maxPayload(156) = 154
+    // after the 2-byte len prefix; a chunked object gets 156 − the 11-byte KEM_CHUNK header = 145
+    // data bytes/chunk. Pinned so a drift on either platform fails.
+    assert(DoubleRatchet.WireSize == 256)
     assert(DoubleRatchet.InnerSize == 172)
     assert(ArqFrame.PayloadBytes == 156)
     assert(EnvelopeBytes == 156)
@@ -30,6 +34,11 @@ class ChunkStreamCrossSpec extends AnyFunSuite:
     assert(ChunkCapacity == 145)
     assert(ConfirmTagBytes == 32)
     assert(MaxChunkCount == 32)
+    // The APP payload — the row the budget tables in ARCHITECTURE.md §7 and future-work.md quote.
+    // It lived only in comments until now, so it could drift silently while those docs cited it,
+    // and it did: the pre-ARQ 170 (= maxPayload(172)) survived in three documents. Pinned so the
+    // number a planner reads has a test behind it like every other row.
+    assert(frame.Frame.maxPayload(ArqFrame.PayloadBytes) == 154)
 
   test("KEM_CHUNK byte layout is pinned: type|epoch(4 BE)|role|part|idx|count|len(2 BE)|data|pad"):
     val data = Array.tabulate[Byte](5)(i => (0xa0 + i).toByte) // a0 a1 a2 a3 a4

@@ -17,8 +17,11 @@ These come from [`.specify/memory/constitution.md`](.specify/memory/constitution
 and are not up for debate in a PR:
 
 - **No hand-rolled crypto (Constitution I).** AEAD / Blake2b / KDF come from libsodium (JVM,
-  via the Foreign Function & Memory API) or `@noble/hashes` (Scala.js); the double ratchet is
-  `org.signal:libsignal-client`. Do not reimplement a primitive, ever.
+  via the Foreign Function & Memory API) or `@noble/hashes` (Scala.js). The **content** double
+  ratchet is `engine.DoubleRatchet`, assembled from those vetted primitives under the Constitution I
+  construction amendment (`.specify/memory/constitution.md` §I) because no audited cross-platform
+  ratchet exists for Scala.js; the JVM **cross-check reference** is `org.signal:libsignal-client`.
+  Do not reimplement a primitive, ever.
 - **The `DEV, NO METADATA PRIVACY` labeling rule (Constitution IV).** A build may claim
   metadata privacy *only* after a real hardware attestation passes. The CI labeling gate
   fails the build if a dev build reports anything else — see the JVM CI job.
@@ -50,7 +53,7 @@ to Scala.js.
 |---|---|---|
 | `protocolCore` | `protocol-core/` (shared + `jvm/`) | `sbt "protocolCore/test"` |
 | `protocolCoreJS` | `protocol-core-js/` (shared + `js/`, runs under Node) | `npm ci && sbt "protocolCoreJS/test"` |
-| `crypto` | `crypto/` (libsodium FFM + libsignal ratchet) | `sbt "crypto/test"` |
+| `crypto` | `crypto/` (libsodium FFM + the libsignal cross-check ratchet) | `sbt "crypto/test"` |
 | `anonymity` | `anonymity/` | `sbt "anonymity/test"` |
 | `server` | `server/` (`pong`/`ping`/`provider`/`attestation`) | `sbt "server/test"` |
 | `transport` | `transport/` (gRPC fronts + `DeppisDemo`) | `sbt "transport/test"` |

@@ -168,7 +168,11 @@ header = DHs.pub(32) ‖ PN(4) ‖ Ns(4)      = 40 plaintext  → +16 tag = 56  
 
 ```
 nonce(12) ‖ AEAD(HK, header)(56) ‖ AEAD(MK, inner)(188)   = 256
-inner (MK-sealed plaintext) = 172 B  ⇒ Frame.maxPayload after len-prefix = 170 B
+inner (MK-sealed plaintext) = 172 B
+  ⇒ ARQ envelope    = 156 B  (ArqFrame.PayloadBytes = 172 − 16 B ARQ header)
+  ⇒ app payload     = 154 B  (Frame.maxPayload(156), after the 2-byte len prefix)
+  ⇒ chunked payload = 145 B  (ChunkStream.ChunkCapacity = 156 − 11 B chunk header)
+(170 = maxPayload(172) is the PRE-ARQ figure; no live path delivers it.)
 ```
 
 An X25519 ratchet public key is **32 bytes** — it fits in the 40-byte header plaintext with room for

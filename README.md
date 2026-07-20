@@ -44,8 +44,8 @@ Foreign Function & Memory API — JEP 454, GA in JDK 22 — to call libsodium). 
 
 | Component | Tech | Role |
 |---|---|---|
-| `protocol-core` | Scala 3 (JVM + Scala.js) | Single source of truth: handshake, notification codec, retrieval-token PRF, schedule, framing, the client **engine** |
-| `crypto` | Scala 3 JVM + FFM | Wrappers over libsodium + the audited `org.signal:libsignal-client` double ratchet, with KATs |
+| `protocol-core` | Scala 3 (JVM + Scala.js) | Single source of truth: handshake, notification codec, retrieval-token PRF, schedule, framing, the client **engine**, and `engine.DoubleRatchet` — the **content** double ratchet |
+| `crypto` | Scala 3 JVM + FFM | Wrappers over libsodium, with KATs; plus the audited `org.signal:libsignal-client` ratchet as the JVM **cross-check reference** (not the content path) |
 | `server` | JVM Scala | PING/PONG/provider/attestation fronts; dev store + notify; DCAP attestation + OpenBao key release |
 | `oblivious-sidecar` | Rust | Oblivious primitives + PONG store + sealed-notification aggregation (`obsd` — the real privacy core) |
 | `transport` | Scala + gRPC (ScalaPB) | gRPC contracts + the client engine's `RoundTransport` over the sidecar; the `DeppisDemo` launcher |

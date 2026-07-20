@@ -22,13 +22,13 @@ app drives). The real oblivious privacy core is the Rust **`obsd`** sidecar.
 flowchart TB
     subgraph client["Client (per device)"]
         flutter["Flutter UI<br/><i>presentation only</i>"]
-        engine["protocol-core engine<br/>(Scala.js)<br/>handshake · framing · schedule<br/>retrieval-token PRF · notify digest"]
+        engine["protocol-core engine<br/>(Scala.js)<br/>handshake · DoubleRatchet (content E2E) · framing<br/>schedule · retrieval-token PRF · notify digest"]
         flutter -->|"platform channel<br/>(JSON, apiVersion)"| engine
     end
 
     subgraph crypto["crypto (JVM, libsodium FFM)"]
         aead["AEAD ChaCha20-Poly1305<br/>+ Blake2b KDF"]
-        ratchet["libsignal double ratchet<br/><i>vetted; content E2E</i>"]
+        ratchet["libsignal ratchet<br/><i>vetted; JVM cross-check reference</i>"]
     end
 
     subgraph transport["transport (gRPC / TLS 1.3, ScalaPB)"]
@@ -246,7 +246,17 @@ flowchart TB
 | Cover traffic | random per-session `coverKey` | ephemeral | carrier frames indistinguishable from real |
 
 No hand-rolled primitives (Constitution I): AEAD/Blake2b come from libsodium (JVM) / `@noble`
-(JS), the ratchet from `org.signal:libsignal-client`.
+(JS), and the `crypto` **cross-check** ratchet from `org.signal:libsignal-client` — the production
+content ratchet is `engine.DoubleRatchet` above, hand-assembled from vetted primitives under the
+Constitution I construction amendment.
+
+> **Three different handshakes, easily confused.** The *Pairing* row above is Deppis's own
+> keyed-HMAC derivation from an already-shared secret — it is X3DH-*like* in role only, and is not a
+> KEM handshake. Separately, `crypto`'s libsignal `RatchetParty` (the JVM cross-check reference, not
+> the production content path) performs libsignal's own session handshake, which as of
+> libsignal 0.8x is **PQXDH** — the Kyber arm is mandatory and an X3DH-only bundle is no longer
+> constructible. Neither of those is the hybrid X25519 ⊕ ML-KEM epoch work in `protocol-core`. A
+> post-quantum claim about one says nothing about the other two.
 
 ### Wire frame layout (256 bytes, fixed — FR-015a)
 
@@ -257,6 +267,15 @@ flowchart LR
 
 `256 = 12 (nonce) + 228 (inner plaintext) + 16 (tag)`; `inner`'s 2-byte length prefix caps the
 payload at 226 bytes. Every frame — real or carrier — is exactly this shape.
+
+> **226 is the pre-ratchet figure — do not size new payloads against it.** 226 still describes
+> this wire frame, but every layer below takes a header, and the live app payload is **154 B**:
+> `DoubleRatchet.InnerSize` 172 → less the 16-byte ARQ header = `ArqFrame.PayloadBytes` **156**
+> → less the 2-byte length prefix, i.e. `Frame.maxPayload(ArqFrame.PayloadBytes)` = **154** (not
+> bare `Frame.MaxPayload`, which is 254). Anything *chunked* over ARQ gets less again:
+> `ChunkStream.ChunkCapacity` = 156 − 11 = **145 B per frame** (pinned by `ChunkStreamCrossSpec`).
+> The 170 in `design/dh-ratchet.md` is a pre-ARQ intermediate and is not the live number either.
+> `specs/001-metadata-private-messenger/future-work.md` carries the full layer table.
 
 ---
 
@@ -299,8 +318,9 @@ server.
 
 | Concern | Code |
 |---|---|
-| Engine, handshake, framing, token PRF, schedule, notify digest | `protocol-core/shared/src/main/scala/{engine,handshake,frame,token,schedule}` |
-| AEAD / KDF (libsodium FFM), double ratchet | `crypto/src/main/scala/{crypto,ratchet}` |
+| Engine, handshake, framing, token PRF, schedule, notify digest, **content double ratchet** (`engine.DoubleRatchet`) | `protocol-core/shared/src/main/scala/{engine,handshake,frame,token,schedule}` |
+| AEAD / KDF (libsodium FFM) | `crypto/src/main/scala/crypto` |
+| libsignal ratchet — JVM **cross-check reference**, not the content path | `crypto/src/main/scala/ratchet` |
 | gRPC fronts + round transport + the runnable demo | `transport/src/main/scala/transport` |
 | Oblivious store + sealed-notify aggregation | `oblivious-sidecar/src` (`obsd`) |
 | Dev store/notify + DCAP + OpenBao | `server/{pong,ping}/…`, `server/src/main/scala/attestation` |
