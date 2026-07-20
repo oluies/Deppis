@@ -268,6 +268,13 @@ flowchart LR
 `256 = 12 (nonce) + 228 (inner plaintext) + 16 (tag)`; `inner`'s 2-byte length prefix caps the
 payload at 226 bytes. Every frame — real or carrier — is exactly this shape.
 
+> **226 is the pre-ratchet figure — do not size new payloads against it.** Once `DoubleRatchet`
+> output became the inner payload, the encrypted header took part of that budget:
+> `DoubleRatchet.InnerSize` = **172** ⇒ app payload **170** (`design/dh-ratchet.md` documents the
+> 226 → 170 shrink), and anything chunked over ARQ gets `ArqFrame.PayloadBytes` =
+> `172 − 16` = **156** (pinned by `ChunkStreamCrossSpec`). 226 still describes the wire frame; it is
+> not the budget any new payload actually has.
+
 ---
 
 ## 8. Attestation & key provisioning (Phase C, Constitution IX)

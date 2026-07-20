@@ -65,10 +65,9 @@ model that makes metadata privacy work. v1 ships no media path at all.
 as a separate backend behind the **`AnonymityLayer`** seam (Constitution VIII), reusing the
 out-of-band `pairKey` and the content ratchet (`engine.DoubleRatchet`) for media keys but
 negotiating a dedicated, constant-bitrate, padded media channel. The architecture separates "which
-backend provides
-anonymity" from "the engine's protocol logic," so a streaming backend is an additive
-implementation, not a rewrite of `protocol-core`. The handshake/`pairKey` hierarchy (one root per
-buddy pair) gives such a channel its keys for free.
+backend provides anonymity" from "the engine's protocol logic," so a streaming backend is an
+additive implementation, not a rewrite of `protocol-core`. The handshake/`pairKey` hierarchy (one
+root per buddy pair) gives such a channel its keys for free.
 
 **Open problem.** Real-time metadata privacy is genuinely hard: a constant-bitrate padded stream
 hides content and volume but a *call still happens at a wall-clock instant for a duration*, which
@@ -151,19 +150,26 @@ reference) had its own *session handshake* go post-quantum — libsignal 0.8x ma
 mandatory, so it publishes a **PQXDH** bundle and cannot construct an X3DH-only one. Different
 component, different key schedule. It covers neither the content ratchet nor the fold above.
 
-**What genuinely remains.** Two primitives are built and KAT-tested in `crypto/` but **not wired
+**What genuinely remains.** The hybrid KEM is done — wired and cross-platform; it is in the table
+only as contrast. The other two primitives are built and KAT-tested in `crypto/` but **not wired
 into the engine**, and both are JVM-only:
 
 | | built | wired into the engine | cross-platform |
 |---|---|---|---|
-| Hybrid X25519 ⊕ ML-KEM-768 | yes | **yes** (`kem.HybridKem`) | yes (jvm + js) |
+| Hybrid X25519 ⊕ ML-KEM-768 *(done — for contrast)* | yes | **yes** (`kem.HybridKem`) | yes (jvm + js) |
 | ML-DSA-65 signatures (FIPS 204) | yes (`crypto.Oqs`) | **no** | no (JVM/liboqs only) |
 | Epoch evolution, 2HashDH VOPRF | yes (`crypto.{Voprf,EpochEvolution}`) | **no** | no (JVM only) |
 
 So the deferred work is *wiring and porting*, not building: attaching ML-DSA and the VOPRF epoch
 evolution (with erasure / no-roll-forward) to the engine, and giving both a JS counterpart, since
-the real client is Scala.js. Size pressure on the 226-byte payload budget (`ARCHITECTURE.md` §7)
-remains the live constraint on any of it.
+the real client is Scala.js.
+
+**Budget to size that against: 156 bytes, not 226.** `ArqFrame.PayloadBytes` = `DoubleRatchet.InnerSize`
+(172) − `ArqFrame.HeaderBytes` (16) = **156**, pinned by `ChunkStreamCrossSpec`. The 226 B figure in
+`ARCHITECTURE.md` §7 is the *pre-ratchet* frame budget (256 = 12 + 228 + 16, less a 2-byte length
+prefix); it stopped being the relevant number once ratchet output became the inner payload, which it
+is today. Anything chunked over ARQ — an ML-DSA-65 signature is ~3309 B — must be sized against 156,
+or it is planned against a budget ~45% too large.
 
 ---
 
