@@ -164,12 +164,23 @@ So the deferred work is *wiring and porting*, not building: attaching ML-DSA and
 evolution (with erasure / no-roll-forward) to the engine, and giving both a JS counterpart, since
 the real client is Scala.js.
 
-**Budget to size that against: 156 bytes, not 226.** `ArqFrame.PayloadBytes` = `DoubleRatchet.InnerSize`
-(172) − `ArqFrame.HeaderBytes` (16) = **156**, pinned by `ChunkStreamCrossSpec`. The 226 B figure in
-`ARCHITECTURE.md` §7 is the *pre-ratchet* frame budget (256 = 12 + 228 + 16, less a 2-byte length
-prefix); it stopped being the relevant number once ratchet output became the inner payload, which it
-is today. Anything chunked over ARQ — an ML-DSA-65 signature is ~3309 B — must be sized against 156,
-or it is planned against a budget ~45% too large.
+**Budget to size that against — pick the right layer.** Each layer takes a header, so quoting the
+enclosing container's size overstates what the thing inside actually gets. The live chain, all
+figures from code and pinned by specs:
+
+| Layer | Bytes | From |
+|---|---|---|
+| Wire frame | 256 | `Frame.Size` |
+| ...pre-ratchet payload *(historical — `ARCHITECTURE.md` §7)* | 226 | 256 − 12 nonce − 16 tag − 2 len |
+| Ratchet inner block | 172 | `DoubleRatchet.InnerSize` |
+| ARQ envelope | 156 | `ArqFrame.PayloadBytes` = 172 − 16 hdr |
+| **App payload today** | **154** | 156 − 2-byte length prefix (`Frame.maxPayload`) |
+| **Chunked over ARQ** | **145 / frame** | `ChunkStream.ChunkCapacity` = 156 − 11 hdr |
+
+So an ML-DSA-65 signature (~3309 B) chunked over ARQ is **23 frames** (⌈3309 / 145⌉), not 22 — and
+nothing like the ~15 that the stale 226 figure would suggest. **226 has not been the budget since
+ratchet output became the inner payload; 170 in `design/dh-ratchet.md` is the pre-ARQ intermediate
+and is also not the live number.**
 
 ---
 

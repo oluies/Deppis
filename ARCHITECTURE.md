@@ -268,12 +268,13 @@ flowchart LR
 `256 = 12 (nonce) + 228 (inner plaintext) + 16 (tag)`; `inner`'s 2-byte length prefix caps the
 payload at 226 bytes. Every frame — real or carrier — is exactly this shape.
 
-> **226 is the pre-ratchet figure — do not size new payloads against it.** Once `DoubleRatchet`
-> output became the inner payload, the encrypted header took part of that budget:
-> `DoubleRatchet.InnerSize` = **172** ⇒ app payload **170** (`design/dh-ratchet.md` documents the
-> 226 → 170 shrink), and anything chunked over ARQ gets `ArqFrame.PayloadBytes` =
-> `172 − 16` = **156** (pinned by `ChunkStreamCrossSpec`). 226 still describes the wire frame; it is
-> not the budget any new payload actually has.
+> **226 is the pre-ratchet figure — do not size new payloads against it.** 226 still describes
+> this wire frame, but every layer below takes a header, and the live app payload is **154 B**:
+> `DoubleRatchet.InnerSize` 172 → less the 16-byte ARQ header = `ArqFrame.PayloadBytes` **156**
+> → less `Frame`'s 2-byte length prefix = **154**. Anything *chunked* over ARQ gets less again:
+> `ChunkStream.ChunkCapacity` = 156 − 11 = **145 B per frame** (pinned by `ChunkStreamCrossSpec`).
+> The 170 in `design/dh-ratchet.md` is a pre-ARQ intermediate and is not the live number either.
+> `specs/001-metadata-private-messenger/future-work.md` carries the full layer table.
 
 ---
 
