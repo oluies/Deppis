@@ -22,7 +22,10 @@ shopt -s nullglob
 BUNDLES=(target/out/sjs1/scala-*/protocol-core-js/protocol-core-js-opt/main.js)
 if [ ${#BUNDLES[@]} -ne 1 ]; then
   echo "expected exactly 1 link output, found ${#BUNDLES[@]}: ${BUNDLES[*]:-<none>}" >&2
-  echo "(stale outputs from an older scalaVersion? try: sbt clean)" >&2
+  # NOT `sbt clean`: verified that it removes only the CURRENT scalaVersion's output and leaves a
+  # tree from a previous one in place, so it cannot resolve this ambiguity. Delete the stale dir.
+  echo "(>1 usually means a leftover tree from an older scalaVersion:" >&2
+  echo "   rm -rf target/out/sjs1/scala-<old-version>)" >&2
   exit 1
 fi
 OPT="${BUNDLES[0]}"
