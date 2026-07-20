@@ -64,8 +64,8 @@ model that makes metadata privacy work. v1 ships no media path at all.
 **What accommodates it later.** Voice/video would not run *over* the message rounds; it would attach
 as a separate backend behind the **`AnonymityLayer`** seam (Constitution VIII), reusing the
 out-of-band `pairKey` and the content ratchet (`engine.DoubleRatchet`) for media keys but
-negotiating a dedicated,
-constant-bitrate, padded media channel. The architecture already separates "which backend provides
+negotiating a dedicated, constant-bitrate, padded media channel. The architecture separates "which
+backend provides
 anonymity" from "the engine's protocol logic," so a streaming backend is an additive
 implementation, not a rewrite of `protocol-core`. The handshake/`pairKey` hierarchy (one root per
 buddy pair) gives such a channel its keys for free.
@@ -125,37 +125,45 @@ FR-010) versus how much the devices must pre-agree at pairing time.
 
 ---
 
-## Post-quantum hybrid ratchet (Phase D)
+## Post-quantum hybrid ratchet — BUILT, NOT VERIFIED (was Phase D)
 
-**Out of scope now.** Content E2E today is `engine.DoubleRatchet`, whose DH steps are **X25519 —
-classical**. That is the deferred item: hybrid **X25519 ⊕ ML-KEM** key agreement (FIPS 203) and
-**ML-DSA** signatures (FIPS 204) via liboqs, plus epoch forward secrecy via a verifiable OPRF.
+> **Labeling, first.** "Built" is not "verified". Phase 5 formal analysis is done, **human security
+> review is outstanding**, and `DEV, NO METADATA PRIVACY` **stands**. See
+> `design/continuous-pq-ratchet.md` §0 and §6.3. Nothing below licenses a privacy claim.
 
-Separately, and **not** the deferred item: the libsignal `RatchetParty` (T012, the JVM cross-check
-reference) had its *session handshake* go post-quantum — libsignal 0.8x makes the Kyber arm
-mandatory, so it publishes a **PQXDH** bundle and cannot construct an X3DH-only one. That is
-Signal's own handshake, on a component that is not the content path. Do not read it as covering
-either the content ratchet's classical DH steps or the Deppis hybrid work above.
+**No longer deferred.** This section used to read as unbuilt future work; that is wrong as of
+PRs #83–#85. The live content ratchet folds a hybrid **X25519 ⊕ ML-KEM-768** secret into its root:
+`KeySchedule.pqContentRoot` at pairing, then a continuous epoch rekey driven by the state machine in
+`Engine.scala` (keygen / encaps / decaps / confirm). Status header:
+`design/continuous-pq-ratchet.md` — *"PHASES 1–3 IMPLEMENTED … PHASE 5 FORMAL ANALYSIS DONE"*.
 
-**What accommodates it later.** The DH step sits behind the `x25519.X25519` primitive seam, which
-already has separate JVM (JCA) and JS (`@noble/curves`) implementations behind one shared API — so
-hybridization lands **in `protocol-core`** at that seam, plus a liboqs wrapper in `crypto/` for the
-ML-KEM half. It is *not* a change confined to `crypto/`: `engine.DoubleRatchet` lives in
-`protocol-core/shared/src/main/scala/engine/`. What it does not touch is framing or token logic —
-the `pairKey`-rooted hierarchy is agnostic to how the root was agreed. The plan already names liboqs
-and pins the FIPS KAT harness as the integration contract (tasks T047–T049).
+**How it actually lands — not at the DH step.** Hybrid material rides `kem.HybridKem`, which is
+already a cross-platform `protocol-core` seam (`protocol-core/{jvm,js}/src/main/scala/kem/`), the
+JVM copy delegating to the vetted `crypto.HybridKem` (X25519 via JCA, ML-KEM-768 via liboqs). It
+enters the ratchet as an **epoch fold into the root**, *not* by hybridizing the `x25519.X25519` DH
+step — a 1216-byte hybrid public key cannot ride a 32-byte header slot. That is the core tension in
+`design/continuous-pq-ratchet.md` §2.1, and why the KEM bytes are chunked over ARQ (`ChunkStream`)
+inside the MK-sealed inner block instead. The ongoing per-message DH steps stay **classical X25519**
+by design; the PQ hardening is the root fold, not the DH arm.
 
-**Open problem.** The hybrid's larger key/ciphertext sizes pressure the 226-byte payload budget when
-ratchet output becomes the inner payload (the roadmap item noted in `ARCHITECTURE.md` §7) — the same
-size pressure that forced the continuous-PQ-ratchet design to chunk ML-KEM material over ARQ rather
-than ride the header. Epoch key evolution via verifiable OPRF with erasure / no-roll-forward is
-specified but unbuilt.
+**Separately, and not this work:** the libsignal `RatchetParty` (T012, the JVM cross-check
+reference) had its own *session handshake* go post-quantum — libsignal 0.8x makes the Kyber arm
+mandatory, so it publishes a **PQXDH** bundle and cannot construct an X3DH-only one. Different
+component, different key schedule. It covers neither the content ratchet nor the fold above.
 
-> An earlier revision of this section listed "a live JS ratchet for the Scala.js engine (today the
-> ratchet is JVM-only)" as the open problem. That was written when `RatchetParty` was believed to be
-> the content path. `engine.DoubleRatchet` is cross-platform — `protocol-core/shared/`, exercised by
-> `DoubleRatchetJsSpec` under Node — so that item was already done and is removed rather than
-> carried as phantom work.
+**What genuinely remains.** Two primitives are built and KAT-tested in `crypto/` but **not wired
+into the engine**, and both are JVM-only:
+
+| | built | wired into the engine | cross-platform |
+|---|---|---|---|
+| Hybrid X25519 ⊕ ML-KEM-768 | yes | **yes** (`kem.HybridKem`) | yes (jvm + js) |
+| ML-DSA-65 signatures (FIPS 204) | yes (`crypto.Oqs`) | **no** | no (JVM/liboqs only) |
+| Epoch evolution, 2HashDH VOPRF | yes (`crypto.{Voprf,EpochEvolution}`) | **no** | no (JVM only) |
+
+So the deferred work is *wiring and porting*, not building: attaching ML-DSA and the VOPRF epoch
+evolution (with erasure / no-roll-forward) to the engine, and giving both a JS counterpart, since
+the real client is Scala.js. Size pressure on the 226-byte payload budget (`ARCHITECTURE.md` §7)
+remains the live constraint on any of it.
 
 ---
 

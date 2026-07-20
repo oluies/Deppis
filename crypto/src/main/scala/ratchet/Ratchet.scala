@@ -24,7 +24,8 @@ import org.signal.libsignal.protocol.util.KeyHelper
   * NOT THE CONTENT PATH, and the line above is not a repo-wide claim. This is the JVM **cross-check
   * reference**; the production content ratchet is `engine.DoubleRatchet` in `protocol-core`,
   * assembled in-repo from vetted primitives under Principle I's **construction amendment** (v1.1.0)
-  * because no audited cross-platform ratchet exists for Scala.js (see `design/dh-ratchet.md`). This
+  * because no audited cross-platform ratchet exists for Scala.js (see
+  * `specs/001-metadata-private-messenger/design/dh-ratchet.md`). This
   * wrapper being audited says nothing about that one.
   *
   * Each [[RatchetParty]] is one local identity
