@@ -248,6 +248,14 @@ flowchart TB
 No hand-rolled primitives (Constitution I): AEAD/Blake2b come from libsodium (JVM) / `@noble`
 (JS), the ratchet from `org.signal:libsignal-client`.
 
+> **Three different handshakes, easily confused.** The *Pairing* row above is Deppis's own
+> keyed-HMAC derivation from an already-shared secret — it is X3DH-*like* in role only, and is not a
+> KEM handshake. Separately, `crypto`'s libsignal `RatchetParty` (the JVM cross-check reference, not
+> the production content path) performs libsignal's own session handshake, which as of
+> libsignal 0.8x is **PQXDH** — the Kyber arm is mandatory and an X3DH-only bundle is no longer
+> constructible. Neither of those is the hybrid X25519 ⊕ ML-KEM epoch work in `protocol-core`. A
+> post-quantum claim about one says nothing about the other two.
+
 ### Wire frame layout (256 bytes, fixed — FR-015a)
 
 ```mermaid

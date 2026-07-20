@@ -1,13 +1,20 @@
 package ratchet
 
 import org.scalatest.funsuite.AnyFunSuite
+import org.signal.libsignal.protocol.kem.KEMKeyType
 import org.signal.libsignal.protocol.state.PreKeyBundle
+import scala.util.Try
 
 /** T012: exercises the wrapped audited libsignal double ratchet end to end between two parties.
   * We assert the observable ratchet properties (round-trip both ways, the ratchet advances so the
   * same plaintext yields different ciphertexts, out-of-order delivery still decrypts) rather than
   * re-deriving any crypto — the implementation is the vetted library's, not ours (Constitution I). */
 class RatchetSpec extends AnyFunSuite:
+
+  /** A serialized ML-KEM-1024 public key: 1568 key bytes + 1 leading libsignal key-type byte. Named
+    * rather than inlined so the assertion below says what it is pinning, and so a future libsignal
+    * parameter-set or prefix change points here instead of at a bare number. */
+  private val Kyber1024SerializedPubLen = 1568 + 1
 
   private def utf8(s: String): Array[Byte] = s.getBytes("UTF-8")
   private def str(b: Array[Byte]): String = new String(b, "UTF-8")
@@ -85,10 +92,10 @@ class RatchetSpec extends AnyFunSuite:
     val bundle = new RatchetParty("carol").publishBundle()
     val kyberPub = bundle.getKyberPreKey
     assert(kyberPub != null, "bundle has no Kyber prekey — the handshake would be classic X3DH")
-    // Kyber-1024 public keys are 1568 bytes, +1 for libsignal's key-type prefix byte.
     assert(
-      kyberPub.serialize().length == 1569,
-      s"unexpected Kyber public key length: ${kyberPub.serialize().length}"
+      kyberPub.serialize().length == Kyber1024SerializedPubLen,
+      s"unexpected Kyber public key length: ${kyberPub.serialize().length} " +
+        s"(expected $Kyber1024SerializedPubLen for ${KEMKeyType.KYBER_1024})"
     )
     val sig = bundle.getKyberPreKeySignature
     assert(sig != null && sig.nonEmpty, "Kyber prekey is unsigned")
@@ -99,12 +106,11 @@ class RatchetSpec extends AnyFunSuite:
       "Kyber prekey signature does not verify under the bundle's identity key"
     )
 
-  // The negative half of the above. Checking that a well-formed bundle verifies says nothing about
-  // whether anyone ENFORCES it: the positive test would pass just as happily against a library that
-  // skipped Kyber signature verification altogether. This asserts the actual threat named there —
-  // a Kyber arm swapped in by someone other than the bundle's owner must be REJECTED at handshake.
   /** Rebuild `b`'s fields into a fresh bundle, substituting `kyberSig`. Both halves of the test
-    * below go through this, so the ONLY difference between them is the signature bytes. */
+    * below construct their bundle through this, so the bundles differ only in the signature bytes.
+    * (The two halves do use different INITIATING parties — a store that had already processed this
+    * bundle would not re-exercise the same path — so they differ in initiator identity too. The
+    * shared reconstruction is what makes the comparison meaningful, not total isolation.) */
   private def rebuilt(b: PreKeyBundle, kyberSig: Array[Byte]): PreKeyBundle =
     new PreKeyBundle(
       b.getRegistrationId,
@@ -120,6 +126,10 @@ class RatchetSpec extends AnyFunSuite:
       kyberSig
     )
 
+  // The negative half of the above. Checking that a well-formed bundle verifies says nothing about
+  // whether anyone ENFORCES it: the positive test would pass just as happily against a library that
+  // skipped Kyber signature verification altogether. This asserts the actual threat named there —
+  // a Kyber arm swapped in by someone other than the bundle's owner must be REJECTED at handshake.
   test("a bundle whose Kyber signature does not verify is rejected at startSession"):
     val bob = new RatchetParty("bob")
     val good = bob.publishBundle()
@@ -129,13 +139,27 @@ class RatchetSpec extends AnyFunSuite:
     // the unmodified signature must SUCCEED. Without it, anything that made a rebuilt bundle fail
     // for an unrelated reason (constructor field-order drift, a getter re-encoding a key) would
     // leave the negative case green while it had stopped testing signature enforcement entirely.
-    new RatchetParty("carol-ctl").startSession(bob.address, rebuilt(good, sig))
+    assert(
+      Try(new RatchetParty("carol-ctl").startSession(bob.address, rebuilt(good, sig))).isSuccess,
+      "positive control: a rebuilt bundle with the UNMODIFIED Kyber signature must be accepted"
+    )
 
     // ...and one flipped bit in that same signature must be rejected. The type is pinned rather
     // than `Exception`: a rejection for ANY other reason (native load failure, a future arity
     // change, an untrusted-identity error) does not show the Kyber signature was verified.
     // Verified empirically — libsignal raises InvalidKeyException("invalid signature detected").
-    assertThrows[org.signal.libsignal.protocol.InvalidKeyException](
+    //
+    // ATTRIBUTION IS LOAD-BEARING ON THE CONTROL ABOVE: libsignal raises this same type for a bad
+    // SIGNED-prekey signature and for malformed key material generally, so the type alone does not
+    // localise the failure to the Kyber arm. What does is that the control passes through the
+    // identical reconstruction and differs only in these signature bytes. Weaken or delete the
+    // control and this stops proving Kyber enforcement. The message is asserted too, so a rejection
+    // from a different cause that happens to share the type still fails.
+    val ex = intercept[org.signal.libsignal.protocol.InvalidKeyException](
       new RatchetParty("alice-neg")
         .startSession(bob.address, rebuilt(good, sig.updated(0, (sig(0) ^ 0x01).toByte)))
+    )
+    assert(
+      ex.getMessage.contains("invalid signature"),
+      s"rejected for the wrong reason: ${ex.getMessage}"
     )
