@@ -31,7 +31,8 @@ The load-bearing seams referenced throughout:
 ## OOS-002 — Large media / attachments (vs the fixed 256-byte frame)
 
 **Out of scope now.** Every wire frame is exactly **256 bytes** (`nonce(12) ‖ AEAD(inner 228) ‖
-tag(16)`), capping the payload at 226 bytes (FR-015a). A photo or file does not fit, and v1 sends
+tag(16)`), capping the payload at 226 bytes pre-ratchet — **154 today**, see the budget table under
+"Post-quantum hybrid ratchet" below (FR-015a). A photo or file does not fit either way, and v1 sends
 none. The fixed size is not an accident — it is the cover-traffic invariant: real and carrier
 frames must be byte-indistinguishable (US6/FR-012), which a variable-length frame would break.
 
@@ -166,7 +167,8 @@ the real client is Scala.js.
 
 **Budget to size that against — pick the right layer.** Each layer takes a header, so quoting the
 enclosing container's size overstates what the thing inside actually gets. The live chain, all
-figures from code and pinned by specs:
+figures from code, and every live row is asserted in `ChunkStreamCrossSpec` so it cannot drift out
+from under this table:
 
 | Layer | Bytes | From |
 |---|---|---|
@@ -174,7 +176,7 @@ figures from code and pinned by specs:
 | ...pre-ratchet payload *(historical — `ARCHITECTURE.md` §7)* | 226 | 256 − 12 nonce − 16 tag − 2 len |
 | Ratchet inner block | 172 | `DoubleRatchet.InnerSize` |
 | ARQ envelope | 156 | `ArqFrame.PayloadBytes` = 172 − 16 hdr |
-| **App payload today** | **154** | 156 − 2-byte length prefix (`Frame.maxPayload`) |
+| **App payload today** | **154** | `Frame.maxPayload(ArqFrame.PayloadBytes)` — *not* bare `Frame.MaxPayload`, which is 254 |
 | **Chunked over ARQ** | **145 / frame** | `ChunkStream.ChunkCapacity` = 156 − 11 hdr |
 
 So an ML-DSA-65 signature (~3309 B) chunked over ARQ is **23 frames** (⌈3309 / 145⌉), not 22 — and

@@ -30,6 +30,11 @@ class ChunkStreamCrossSpec extends AnyFunSuite:
     assert(ChunkCapacity == 145)
     assert(ConfirmTagBytes == 32)
     assert(MaxChunkCount == 32)
+    // The APP payload, which the budget tables in ARCHITECTURE.md §7 and future-work.md quote.
+    // Previously stated only in comments, so it could drift silently while those docs kept citing
+    // it — and it did: 170 (the pre-ARQ maxPayload(172)) survived in three documents. Pinned now,
+    // so the number a planner reads has a test behind it like every other row.
+    assert(frame.Frame.maxPayload(ArqFrame.PayloadBytes) == 154)
 
   test("KEM_CHUNK byte layout is pinned: type|epoch(4 BE)|role|part|idx|count|len(2 BE)|data|pad"):
     val data = Array.tabulate[Byte](5)(i => (0xa0 + i).toByte) // a0 a1 a2 a3 a4

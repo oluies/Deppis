@@ -271,7 +271,8 @@ payload at 226 bytes. Every frame — real or carrier — is exactly this shape.
 > **226 is the pre-ratchet figure — do not size new payloads against it.** 226 still describes
 > this wire frame, but every layer below takes a header, and the live app payload is **154 B**:
 > `DoubleRatchet.InnerSize` 172 → less the 16-byte ARQ header = `ArqFrame.PayloadBytes` **156**
-> → less `Frame`'s 2-byte length prefix = **154**. Anything *chunked* over ARQ gets less again:
+> → less the 2-byte length prefix, i.e. `Frame.maxPayload(ArqFrame.PayloadBytes)` = **154** (not
+> bare `Frame.MaxPayload`, which is 254). Anything *chunked* over ARQ gets less again:
 > `ChunkStream.ChunkCapacity` = 156 − 11 = **145 B per frame** (pinned by `ChunkStreamCrossSpec`).
 > The 170 in `design/dh-ratchet.md` is a pre-ARQ intermediate and is not the live number either.
 > `specs/001-metadata-private-messenger/future-work.md` carries the full layer table.
