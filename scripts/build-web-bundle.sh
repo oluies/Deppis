@@ -22,10 +22,15 @@ shopt -s nullglob
 BUNDLES=(target/out/sjs1/scala-*/protocol-core-js/protocol-core-js-opt/main.js)
 if [ ${#BUNDLES[@]} -ne 1 ]; then
   echo "expected exactly 1 link output, found ${#BUNDLES[@]}: ${BUNDLES[*]:-<none>}" >&2
-  # NOT `sbt clean`: verified that it removes only the CURRENT scalaVersion's output and leaves a
-  # tree from a previous one in place, so it cannot resolve this ambiguity. Delete the stale dir.
-  echo "(>1 usually means a leftover tree from an older scalaVersion:" >&2
-  echo "   rm -rf target/out/sjs1/scala-<old-version>)" >&2
+  if [ ${#BUNDLES[@]} -eq 0 ]; then
+    echo "(the link step produced nothing under target/out/sjs1/ — check that fullLinkJS above" >&2
+    echo "   actually succeeded, and that you are running from the repo root)" >&2
+  else
+    # NOT `sbt clean`: verified that it removes only the CURRENT scalaVersion's output and leaves a
+    # tree from a previous one in place, so it cannot resolve this ambiguity. Delete the stale dir.
+    echo "(a leftover tree from an older scalaVersion — 'sbt clean' will NOT remove it:" >&2
+    echo "   rm -rf target/out/sjs1/scala-<old-version>)" >&2
+  fi
   exit 1
 fi
 OPT="${BUNDLES[0]}"
@@ -40,5 +45,12 @@ ESB="node_modules/.bin/esbuild"
 
 raw=$(wc -c < "$OUT")
 gz=$(gzip -c "$OUT" | wc -c)
-echo "==> built $OUT  (${raw} bytes raw, ${gz} bytes gzip)"
+# brotli is what a CDN actually serves, and the README quotes it — report it here so those figures
+# stay reproducible from this script alone. Optional: not every machine has the binary.
+if command -v brotli >/dev/null 2>&1; then
+  br=", $(brotli -c "$OUT" | wc -c | tr -d ' ') bytes brotli"
+else
+  br=""
+fi
+echo "==> built $OUT  (${raw} bytes raw, ${gz} bytes gzip${br})"
 echo "    add the script tags to web/index.html if not present, then: (cd clients/flutter && flutter build web)"

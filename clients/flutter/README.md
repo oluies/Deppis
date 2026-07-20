@@ -67,7 +67,8 @@ safe even though the generated bundle is not checked in.
 **Size.** The engine is a full E2E crypto stack (Scala.js runtime + the ratchet +
 the vetted `@noble` primitives, now including the post-quantum ones), so expect
 well over half a MB raw — but the over-the-wire size is what matters and it
-compresses well. Measured on Scala 3.3.8 with `--minify`:
+compresses well. Measured on Scala 3.3.8 — `build-web-bundle.sh` reports raw,
+gzip and brotli, so these stay reproducible without extra tooling:
 
 | | raw | gzip | brotli |
 |---|---|---|---|
