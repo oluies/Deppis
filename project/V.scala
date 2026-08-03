@@ -3,7 +3,7 @@
 object V {
   val scalatest = "3.3.0-alpha.2"
   val scalatestPlus = "3.3.0.0-alpha.2"
-  val upickle = "4.0.2"
+  val upickle = "4.4.3"
   // ScalaPB runtime + the grpc-java version it targets. Formerly read from
   // `scalapb.compiler.Version`, but ScalaPB's compilerplugin is no longer on the sbt 2.0 metabuild
   // classpath (codegen runs sandboxed — see project/plugins.sbt), so these are pinned here directly.
