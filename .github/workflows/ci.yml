@@ -68,6 +68,37 @@ jobs:
             && echo "$gate" | grep -q 'DEV, NO METADATA PRIVACY' \
             || { echo "::error::labeling gate failed — a dev build must report no metadata privacy (Constitution IV)"; exit 1; }
 
+      # The staged CLIs carry a JEP 483 AOT cache (see the block in build.sbt). This step exists
+      # because the cache's failure mode is SILENT: a missing/stale/JDK-mismatched cache makes the
+      # JVM print `[error][aot] ...` lines ON STDOUT and still exit 0, which would corrupt the JSON
+      # contract above without failing anything. So we assert stdout purity directly, on the same
+      # JDK 24 CI actually ships — the measurements in build.sbt were taken on JDK 26.
+      - name: Staged CLI + AOT cache — stdout stays pure JSON
+        run: |
+          set -o pipefail
+          sbt -batch -no-colors 'protocolCore/stageCli' 2>&1 | tee /tmp/stage.out
+          cli="$(find target -type d -name cli -path '*protocol-core*' | head -1)"
+          [ -n "$cli" ] || { echo "::error::stageCli produced no staged directory"; exit 1; }
+          # JEP 483 landed in JDK 24, so on this runner the cache MUST have been produced. If it was
+          # not, the task fell back silently and we would lose the speedup without noticing.
+          [ -f "$cli/pstatus.aot" ] || { echo "::error::no AOT cache staged — JEP 483 expected on JDK 24"; exit 1; }
+          # Exactly one line, and it must be the gate JSON: proves no AOT/CDS diagnostics leaked.
+          out="$("$cli/pstatus" show)"
+          echo "staged pstatus -> $out"
+          [ "$(printf '%s' "$out" | wc -l | tr -d ' ')" = "0" ] \
+            || { echo "::error::staged CLI wrote more than one stdout line — AOT diagnostics leaked into the JSON contract"; exit 1; }
+          echo "$out" | grep -q '"metadataPrivate":false' \
+            && echo "$out" | grep -q 'DEV, NO METADATA PRIVACY' \
+            || { echo "::error::staged CLI stdout is not the expected labeling JSON"; exit 1; }
+          # The fallback path must be correct too: with the cache removed the launcher still has to
+          # emit the same single clean line (this is what -Xlog:disable buys us).
+          mv "$cli/pstatus.aot" "$cli/pstatus.aot.off"
+          fb="$("$cli/pstatus" show)"
+          [ "$fb" = "$out" ] \
+            || { echo "::error::fallback (no cache) stdout differs from cached stdout: [$fb]"; exit 1; }
+          mv "$cli/pstatus.aot.off" "$cli/pstatus.aot"
+          echo "AOT cache verified: cached and fallback stdout identical, single clean JSON line."
+
   lint:
     name: Lint — scalafmt (Scala formatting)
     runs-on: ubuntu-latest
