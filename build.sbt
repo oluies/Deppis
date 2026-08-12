@@ -110,7 +110,7 @@ lazy val crypto = (project in file("crypto"))
       // MAINTAINED libsignal (Rust core + Java bindings); we wrap it, never reimplement the ratchet.
       "org.signal" % "libsignal-client" % V.libsignal,
       // independent vetted Blake2b impl, used only to cross-validate libsodium in KATs
-      "org.bouncycastle" % "bcprov-jdk18on" % "1.78.1" % Test
+      "org.bouncycastle" % "bcprov-jdk18on" % V.bouncycastle % Test
     )
   )
 
