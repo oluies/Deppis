@@ -77,8 +77,19 @@ jobs:
         run: |
           set -o pipefail
           sbt -batch -no-colors 'protocolCore/stageCli' 2>&1 | tee /tmp/stage.out
-          cli="$(find target -type d -name cli -path '*protocol-core*' | head -1)"
-          [ -n "$cli" ] || { echo "::error::stageCli produced no staged directory"; exit 1; }
+          # Match the staged dir by its EXACT parent (`<module>/cli`), not by a loose `*protocol-core*`
+          # substring: `cli` is also the package name, so every compiled output tree carries a `cli/`
+          # (classes/cli, test-classes/cli, and the same again per Scala version and for the JS build).
+          # A `find | head -1` over those picks whichever entry the filesystem happens to return first,
+          # which is directory order, not sorted — so it selected the right one by luck and later
+          # failed with the caches sitting on disk. Assert exactly one match, like the scalajs job's
+          # bundle glob does, so an ambiguous layout fails loudly instead of silently choosing wrong.
+          mapfile -t clis < <(find target -type d -path '*/protocol-core/cli')
+          if [ ${#clis[@]} -ne 1 ]; then
+            echo "::error::expected exactly 1 staged CLI dir, found ${#clis[@]}: ${clis[*]:-<none>}"
+            exit 1
+          fi
+          cli="${clis[0]}"
           # JEP 483 landed in JDK 24, so on this runner the cache MUST have been produced. If it was
           # not, the task fell back silently and we would lose the speedup without noticing.
           [ -f "$cli/pstatus.aot" ] || { echo "::error::no AOT cache staged — JEP 483 expected on JDK 24"; exit 1; }
