@@ -21,6 +21,40 @@ lazy val testDeps = Seq(
 
 lazy val commonScalac = Seq("-deprecation", "-feature", "-unchecked", "-Wunused:all")
 
+// ---------------------------------------------------------------------------------------------
+// AOT cache (JEP 483, "Ahead-of-Time Class Loading & Linking", JDK 24+).
+//
+// The CLIs are short-lived: measured on `cli.Pcore schedule-next`, ~235 ms of a ~280 ms run was
+// classloading the Scala stdlib + upickle + libsignal. A training run records what gets loaded and
+// linked; `AOTMode=create` bakes it into a cache the real run maps in. Measured (JDK 26, arm64):
+// ~280 ms -> ~60 ms wall and 70 MB -> 50 MB peak RSS, with byte-identical stdout.
+//
+// TWO HAZARDS, both handled below and in the generated launcher:
+//
+//   1. STDOUT POISONING. A missing, stale, or JDK-mismatched cache does NOT fail the run — the JVM
+//      prints `[error][aot] ...` lines ON STDOUT, ahead of the program's output, and exits 0. These
+//      CLIs emit JSON on stdout (Constitution V) and CI's labeling gate greps it (ci.yml), so that
+//      would corrupt the contract silently. `-Xlog:disable` is therefore NOT optional: it is what
+//      keeps stdout to the program's own output no matter what state the cache is in.
+//
+//   2. UNSUPPORTED JDK. A JDK without JEP 483 rejects -XX:AOTMode outright ("Improperly specified
+//      VM option") and refuses to start, so the flags are only emitted after probing the JDK, and
+//      the launcher only passes -XX:AOTCache when the cache file actually exists.
+//
+// The cache is keyed to the exact JDK and classpath that produced it, so it is a build artifact
+// (target/, never committed) and `stageCli` records it against the SAME staged lib/ it writes the
+// launcher for. Moving the staged directory or changing JDK invalidates it — which degrades to the
+// plain ~280 ms path rather than breaking, thanks to the two guards above.
+lazy val aotSupported = taskKey[Boolean]("True if the JDK running sbt supports JEP 483 AOT caches.")
+lazy val aotTrainings =
+  settingKey[Seq[(String, Seq[String], String)]]("(mainClass, args, stdin) AOT training runs.")
+
+ThisBuild / aotSupported := {
+  val javaBin = (file(sys.props("java.home")) / "bin" / "java").getAbsolutePath
+  val quiet = scala.sys.process.ProcessLogger(_ => (), _ => ())
+  scala.sys.process.Process(Seq(javaBin, "-XX:AOTMode=auto", "-version")).!(quiet) == 0
+}
+
 // protocol-core is the single source of truth (Constitution VII), cross-compiled to JVM + Scala.js
 // from ONE set of `shared/` sources. The ONLY platform-specific file is `kdf/Kdf.scala` (JVM = JCA
 // HMAC; JS = @noble/hashes HMAC) — both vetted, both synchronous, so the two builds are identical.
@@ -57,6 +91,103 @@ lazy val protocolCore = (project in file("protocol-core"))
     Test / fork := true,
     Test / javaOptions += "--enable-native-access=ALL-UNNAMED",
     run / javaOptions += "--enable-native-access=ALL-UNNAMED",
+    // Training runs for the AOT cache (see the JEP 483 block above). One cache per entry point:
+    // `AOTMode=record` writes one config per run, and these are separate main classes. Each entry
+    // is (mainClass, args, stdin) — the stdin is representative input, since the point is to load
+    // the classes a real invocation loads, not to assert on the output.
+    aotTrainings := Seq(
+      ("cli.Pcore", Seq("schedule-next"), "{}"),
+      ("cli.Pstatus", Seq("show"), "")
+    ),
+    // Stage the CLIs as a self-contained directory: lib/ jars, one AOT cache per entry point, and a
+    // launcher per entry point. Mirrors `transport/stageServer` (sbt-native-packager has no sbt-2
+    // build), but additionally records each cache against the SAME absolute lib/ classpath the
+    // launcher will use — recording against the module classpath instead would silently invalidate
+    // the cache at runtime and cost the entire speedup while still appearing to work.
+    // `Unit`, not `File`: sbt 2.0 will not cache a task whose output type is java.io.File/Path
+    // (it wants a VirtualFileRef) — same reason `transport/stageServer` returns Unit.
+    TaskKey[Unit]("stageCli") := {
+      val log = streams.value.log
+      val conv = fileConverter.value
+      val out = target.value / "cli"
+      val lib = out / "lib"
+      IO.delete(out); IO.createDirectory(lib)
+      (Runtime / fullClasspathAsJars).value
+        .map(ref => conv.toPath(ref.data).toFile)
+        .foreach(f => IO.copyFile(f, lib / f.getName))
+      // The classpath string baked into both the training runs and the launchers. Absolute, so the
+      // recorded cache and the launcher agree; the wildcard keeps it stable as lib/ contents change.
+      val cp = s"${lib.getAbsolutePath}/*"
+      val javaBin = (file(sys.props("java.home")) / "bin" / "java").getAbsolutePath
+      val quiet = scala.sys.process.ProcessLogger(_ => (), _ => ())
+      val canAot = aotSupported.value
+      if (!canAot)
+        log.warn(
+          s"stageCli: this JDK (${sys.props("java.version")}) has no JEP 483 AOT support — " +
+            "staging without caches; launchers fall back to the plain (slower) start path."
+        )
+      aotTrainings.value.foreach { case (mainClass, args, stdin) =>
+        val base = mainClass.split('.').last.toLowerCase
+        val cache = out / s"$base.aot"
+        if (canAot) {
+          val conf = out / s"$base.aotconf"
+          val record = scala.sys.process.Process(
+            Seq(
+              javaBin,
+              "-XX:AOTMode=record",
+              s"-XX:AOTConfiguration=${conf.getAbsolutePath}",
+              "--enable-native-access=ALL-UNNAMED",
+              "-cp",
+              cp,
+              mainClass
+            ) ++ args
+          ) #< new java.io.ByteArrayInputStream(stdin.getBytes("UTF-8"))
+          val create = scala.sys.process.Process(
+            Seq(
+              javaBin,
+              "-XX:AOTMode=create",
+              s"-XX:AOTConfiguration=${conf.getAbsolutePath}",
+              s"-XX:AOTCache=${cache.getAbsolutePath}",
+              "--enable-native-access=ALL-UNNAMED",
+              "-cp",
+              cp
+            )
+          )
+          // Fail soft: a training run that cannot execute here (missing liboqs, sandbox) must not
+          // break packaging — the launcher just takes the plain path, which is correct, only slower.
+          if (record.!(quiet) == 0 && create.!(quiet) == 0)
+            log.info(
+              s"stageCli: AOT cache for $mainClass -> ${cache.getName} " +
+                s"(${cache.length() / (1024 * 1024)} MB)"
+            )
+          else {
+            log.warn(
+              s"stageCli: AOT training failed for $mainClass — launcher falls back to plain start."
+            )
+            IO.delete(cache)
+          }
+          IO.delete(conf)
+        }
+        // `-Xlog:disable` is load-bearing, not cosmetic — see hazard (1) in the JEP 483 block. The
+        // -f test is hazard (2)'s other half: never name a cache file that is not there.
+        val launcher = out / base
+        IO.write(
+          launcher,
+          s"""|#!/usr/bin/env bash
+              |set -euo pipefail
+              |# Generated by `protocolCore/stageCli` — do not edit; regenerate instead.
+              |DIR="$$(cd "$$(dirname "$${BASH_SOURCE[0]}")" && pwd)"
+              |CACHE="$$DIR/$base.aot"
+              |AOT=()
+              |[[ -f "$$CACHE" ]] && AOT=(-XX:AOTCache="$$CACHE")
+              |exec java -Xlog:disable "$${AOT[@]}" --enable-native-access=ALL-UNNAMED \\
+              |  -cp "$$DIR/lib/*" $mainClass "$$@"
+              |""".stripMargin
+        )
+        launcher.setExecutable(true)
+      }
+      log.info(s"stageCli: staged ${aotTrainings.value.size} launcher(s) to $out")
+    },
     libraryDependencies ++= Seq(
       "com.lihaoyi" %% "upickle" % V.upickle,
       "org.scalatest" %% "scalatest" % V.scalatest % Test,
