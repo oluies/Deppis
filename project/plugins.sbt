@@ -8,7 +8,7 @@
 // protoc-bridge's `SandboxedJvmGenerator` (its own isolated classloader resolves compilerplugin_2.13
 // + protoc-bridge_2.13), so the two protoc-bridge versions never meet. Revisit when ScalaPB ships a
 // protoc-bridge_3 compilerplugin and sbt-protoc GAs for sbt 2.
-addSbtPlugin("com.thesamet" % "sbt-protoc" % "1.1.0-RC1")
+addSbtPlugin("com.thesamet" % "sbt-protoc" % "1.1.0-RC2")
 
 // Scala.js (T019): cross-compile protocol-core to JS for the Flutter engine bundle (pinned).
 addSbtPlugin("org.scala-js" % "sbt-scalajs" % "1.22.0")

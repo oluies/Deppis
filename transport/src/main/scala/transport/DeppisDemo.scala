@@ -126,7 +126,9 @@ object DeppisDemo:
       val aliceReal = !ad.carrier
       log(
         "alice",
-        f"round $round: wrote ${if aliceReal then "REAL  frame" else "cover frame"} (256B, indistinguishable)"
+        f"round $round: wrote ${
+            if aliceReal then "REAL  frame" else "cover frame"
+          } (256B, indistinguishable)"
       )
 
       bob.tick(round)
