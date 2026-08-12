@@ -16,5 +16,5 @@ object V {
   val pekko = "1.6.0"
   // Bouncy Castle — generates the dev self-signed TLS cert (T020); netty's built-in generator uses
   // sun.security internals removed in modern JDKs. Vetted lib (Constitution I).
-  val bouncycastle = "1.78.1"
+  val bouncycastle = "1.85.2"
 }
