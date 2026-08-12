@@ -21,3 +21,8 @@ jobs:
           # A PAT or GitHub App token (secret SCALA_STEWARD_TOKEN) is recommended so Steward's PRs
           # trigger CI; falls back to the workflow token (PRs then won't re-trigger workflows).
           github-token: ${{ secrets.SCALA_STEWARD_TOKEN || github.token }}
+          # Required because the token's account keeps its email private: Steward asks the API for a
+          # commit address, gets none, and aborts *after* doing all its work. This is the noreply
+          # address GitHub reserves for that account, so automated commits stay attributable without
+          # publishing a personal address (and without turning the privacy setting off).
+          author-email: 150961+oluies@users.noreply.github.com
