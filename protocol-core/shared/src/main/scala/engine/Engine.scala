@@ -659,7 +659,8 @@ final class Engine(
         else
           val recovered =
             try Right(HybridKem.decaps(done.bytes, a.kemSecret))
-            catch case _: Throwable => Left(())
+            catch
+              case _: Throwable => Left(())
           // §4.4 "wipe on completion": the 2464-byte keypair secret has served its ONE purpose, so
           // it dies here — on the failure path too, before anything else can throw past it. This is
           // also what makes the post-commit window safe to leave un-timed-out (see PqRekey).

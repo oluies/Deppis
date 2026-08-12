@@ -8,7 +8,7 @@ object V {
   // `scalapb.compiler.Version`, but ScalaPB's compilerplugin is no longer on the sbt 2.0 metabuild
   // classpath (codegen runs sandboxed — see project/plugins.sbt), so these are pinned here directly.
   val scalapb = "0.11.20"
-  val grpcJava = "1.62.2"
+  val grpcJava = "1.83.1"
   // The audited Signal double-ratchet (Rust core + JNI bindings). Constitution I: we wrap this and
   // never reimplement the ratchet, so keeping it current is a security concern, not just hygiene.
   val libsignal = "0.86.5"
@@ -16,5 +16,5 @@ object V {
   val pekko = "1.6.0"
   // Bouncy Castle — generates the dev self-signed TLS cert (T020); netty's built-in generator uses
   // sun.security internals removed in modern JDKs. Vetted lib (Constitution I).
-  val bouncycastle = "1.78.1"
+  val bouncycastle = "1.85"
 }
