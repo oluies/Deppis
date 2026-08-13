@@ -113,16 +113,48 @@ jobs:
   lint:
     name: Lint — scalafmt (Scala formatting)
     runs-on: ubuntu-latest
+    env:
+      # Pinned (Constitution XI) and used in both the cache key and the download URL.
+      CS_VERSION: 2.1.25-M26
     steps:
       - uses: actions/checkout@v7
-      # Standalone scalafmt via Coursier — no sbt cold start, so this gate is fast and parallel.
-      # Pinned to the .scalafmt.conf version; generated code is excluded there (project.excludePaths).
-      - uses: coursier/setup-action@v3
+      - uses: actions/setup-java@v5
         with:
-          jvm: temurin:24
-          apps: scalafmt:3.8.3
+          distribution: temurin
+          java-version: "24"
+      # The Coursier launcher comes from GitHub releases, the flakiest hop in this workflow: it failed
+      # three times in one evening with `socket hang up`, red-flagging PRs whose code was fine. Cache
+      # the binary so a healthy run touches that host ZERO times, and retry when a cache miss forces
+      # it. `--retry-all-errors` matters — plain `--retry` ignores connection-level failures, which is
+      # exactly what we saw. Keyed by launcher version, so bumping it re-downloads once.
+      - name: Cache the Coursier launcher + scalafmt artifacts
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cache/deppis-bin
+            ~/.cache/coursier
+          key: scalafmt-cs${{ env.CS_VERSION }}-${{ runner.os }}-${{ hashFiles('.scalafmt.conf') }}
+          restore-keys: scalafmt-cs${{ env.CS_VERSION }}-${{ runner.os }}-
+      - name: Install the Coursier launcher (cached)
+        run: |
+          mkdir -p ~/.cache/deppis-bin
+          if [ ! -x ~/.cache/deppis-bin/cs ]; then
+            curl -sSfL --retry 6 --retry-all-errors --retry-delay 5 \
+              "https://github.com/coursier/coursier/releases/download/v${CS_VERSION}/cs-x86_64-pc-linux.gz" \
+              | gzip -d > ~/.cache/deppis-bin/cs
+            chmod +x ~/.cache/deppis-bin/cs
+          fi
+          echo "$HOME/.cache/deppis-bin" >> "$GITHUB_PATH"
+      # Read the version from .scalafmt.conf rather than repeating it here. The old `apps:
+      # scalafmt:3.8.3` claimed in a comment to track that file but could not: when Scala Steward
+      # moved .scalafmt.conf to 3.8.6 (#106) this pin stayed at 3.8.3, so the gate silently ran a
+      # different formatter than the repo declares. Derived, it cannot drift again.
       - name: Check Scala formatting (scalafmt --test)
-        run: scalafmt --test
+        run: |
+          ver="$(sed -n 's/^version = "\(.*\)"/\1/p' .scalafmt.conf)"
+          [ -n "$ver" ] || { echo "::error::could not read the version field from .scalafmt.conf"; exit 1; }
+          echo "scalafmt $ver (from .scalafmt.conf)"
+          cs launch "scalafmt:$ver" -- --test
 
   rust:
     name: Rust — fmt + clippy + test
@@ -234,6 +266,9 @@ jobs:
   hygiene:
     name: Hygiene — pinned deps + secret scan (T007)
     runs-on: ubuntu-latest
+    env:
+      # Pinned (Constitution XI) and used in both the cache key and the download URL.
+      GITLEAKS_VERSION: 8.21.2
     steps:
       - uses: actions/checkout@v7
         with:
@@ -244,8 +279,22 @@ jobs:
           test -f oblivious-sidecar/Cargo.lock || { echo "::error::Cargo.lock must be committed"; exit 1; }
           test -f package-lock.json || { echo "::error::package-lock.json must be committed (pinned JS deps)"; exit 1; }
           echo "pinned-deps OK"
+      # Same GitHub-releases flakiness as the lint job: this download failed twice in one evening
+      # (`503`, then `curl: (56) Connection died`), failing the secret scan for network reasons. A
+      # security gate that goes red on a CDN hiccup trains people to ignore it, so cache the binary
+      # and retry on a miss. `--retry-all-errors` covers the connection-level failure `--retry` alone
+      # would let through. The scan itself is unchanged.
+      - name: Cache gitleaks
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/deppis-bin
+          key: gitleaks-${{ env.GITLEAKS_VERSION }}-${{ runner.os }}
       - name: Secret scan (gitleaks)
         run: |
-          VER=8.21.2
-          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${VER}/gitleaks_${VER}_linux_x64.tar.gz" | tar -xz gitleaks
-          ./gitleaks detect --no-git --source . --config .gitleaks.toml --redact --no-banner
+          mkdir -p ~/.cache/deppis-bin
+          if [ ! -x ~/.cache/deppis-bin/gitleaks ]; then
+            curl -sSfL --retry 6 --retry-all-errors --retry-delay 5 \
+              "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+              | tar -xz -C ~/.cache/deppis-bin gitleaks
+          fi
+          ~/.cache/deppis-bin/gitleaks detect --no-git --source . --config .gitleaks.toml --redact --no-banner
