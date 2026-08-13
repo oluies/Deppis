@@ -328,9 +328,14 @@ lazy val transport = (project in file("transport"))
       // Pekko typed actors — the round-orchestration skeleton for the networked TLS server (T020).
       "org.apache.pekko" %% "pekko-actor-typed" % V.pekko,
       "org.apache.pekko" %% "pekko-actor-testkit-typed" % V.pekko % Test,
-      // Bouncy Castle — dev self-signed TLS cert generation for TlsRoundServer (T020).
+      // Bouncy Castle — dev self-signed TLS cert generation for TlsRoundServer (T020), and the JSSE
+      // provider that supplies the RFC 10024 hybrid key agreement (bctls; see PqTls). The JDK's own
+      // JSSE offers NO hybrid group even on JDK 26 — measured, see PqTls's doc comment — so the
+      // provider swap is what makes post-quantum TLS possible at all. bcutil is bctls's dependency.
       "org.bouncycastle" % "bcprov-jdk18on" % V.bouncycastle,
-      "org.bouncycastle" % "bcpkix-jdk18on" % V.bouncycastle
+      "org.bouncycastle" % "bcpkix-jdk18on" % V.bouncycastle,
+      "org.bouncycastle" % "bctls-jdk18on" % V.bouncycastle,
+      "org.bouncycastle" % "bcutil-jdk18on" % V.bouncycastle
     ) ++ testDeps
   )
 
