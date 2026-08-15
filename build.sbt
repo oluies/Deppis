@@ -282,6 +282,13 @@ lazy val transport = (project in file("transport"))
   .settings(
     name := "transport",
     scalacOptions ++= Seq("-deprecation", "-feature"),
+    // Suites here must not run concurrently. `PqTls.enforce` reads and writes the process-wide
+    // `jdk.tls.namedGroups` (it has to — netty's SslContextBuilder exposes no per-context named
+    // groups), and PqTlsSpec deliberately sets that property to a conflicting value to prove
+    // enforce() fails closed. Any TlsRoundServer.bind landing inside that window would throw
+    // IllegalStateException and fail a test that has nothing to do with the property. sbt runs
+    // suites in parallel by default, so serialize them.
+    Test / parallelExecution := false,
     // the notification service front loads libsodium (crypto, FFM) -> fork w/ native access.
     Test / fork := true,
     Test / javaOptions += "--enable-native-access=ALL-UNNAMED",
