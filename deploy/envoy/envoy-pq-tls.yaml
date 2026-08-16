@@ -1,0 +1,117 @@
+# Envoy: the **TLS-terminating** browser front, with post-quantum key agreement per RFC 10024.
+#
+# This is the deployment counterpart to `envoy.yaml`. That file terminates no TLS — it is the
+# plaintext gRPC-web listener used by the local smoke harness and by topologies where TLS is
+# terminated above Envoy. This one terminates TLS itself, so it is where the browser hop actually
+# gets post-quantum protection.
+#
+# Why it matters here specifically: `transport`'s TlsRoundServer (see transport.round.PqTls) has no
+# external clients — browser → Envoy is the only TLS hop a real user traverses, so it is the one
+# that decides whether user traffic is harvest-now-decrypt-later resistant.
+#
+# ## Hybrid-ONLY, deliberately
+#
+# `ecdh_curves` lists X25519MLKEM768 (RFC 10024, codepoint 4588) and nothing else, matching the
+# posture of transport.round.PqTls: there is no classical group to negotiate down to, so a recorded
+# session cannot be broken later by an adversary who acquires a quantum computer.
+#
+# THE COST IS REAL AND INTENDED: a browser that cannot do ML-KEM-768 cannot load the app at all.
+# This is not a soft degradation — it is a failed TLS handshake. Before exposing this listener,
+# confirm the client population supports the group; to accept classical clients instead, append
+# "X25519" to ecdh_curves (hybrid stays preferred, classical becomes reachable).
+#
+# ## Minimum Envoy version
+#
+# Verified against real containers:
+#   envoyproxy/envoy:v1.31.2  -> REFUSES TO START: "Failed to initialize ECDH curves X25519MLKEM768"
+#   envoyproxy/envoy:v1.36.1  -> starts; openssl reports "Negotiated TLS1.3 group: X25519MLKEM768"
+#                                and a classical-only client gets "handshake failure"
+# So the image pin is load-bearing, not hygiene: an older Envoy cannot serve this config at all.
+#
+# ## Certificates
+#
+# Supply operator/CA-issued certs at the paths below (mount them read-only). They are deliberately
+# NOT generated here: a self-signed cert would make a browser-facing listener fail closed in a way
+# that looks like the PQ posture misfiring.
+#
+#   envoy -c deploy/envoy/envoy-pq-tls.yaml
+#
+# Pinned image (reproducible builds, Constitution XI): envoyproxy/envoy:v1.36.1
+
+static_resources:
+  listeners:
+    - name: grpc_web_tls_listener
+      address:
+        socket_address: { address: 0.0.0.0, port_value: 8443 }
+      filter_chains:
+        - transport_socket:
+            name: envoy.transport_sockets.tls
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext
+              common_tls_context:
+                tls_params:
+                  # TLS 1.3 only: the RFC 10024 groups exist only there, and pinning the floor stops
+                  # a downgrade to a version where the hybrid group cannot be negotiated at all.
+                  tls_minimum_protocol_version: TLSv1_3
+                  tls_maximum_protocol_version: TLSv1_3
+                  # The whole point of this file. One group, no fallback.
+                  ecdh_curves: ["X25519MLKEM768"]
+                alpn_protocols: ["h2", "http/1.1"]
+                tls_certificates:
+                  - certificate_chain: { filename: "/etc/envoy/certs/cert.pem" }
+                    private_key: { filename: "/etc/envoy/certs/key.pem" }
+          filters:
+            - name: envoy.filters.network.http_connection_manager
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                stat_prefix: ingress_grpc_web_tls
+                codec_type: AUTO
+                route_config:
+                  name: local_route
+                  virtual_hosts:
+                    - name: backend
+                      domains: ["*"]
+                      routes:
+                        - match: { prefix: "/" }
+                          route:
+                            cluster: scala_grpc
+                            # Matches envoy.yaml: round cadence is minute-order (SC-001).
+                            timeout: 30s
+                      typed_per_filter_config:
+                        envoy.filters.http.cors:
+                          "@type": type.googleapis.com/envoy.extensions.filters.http.cors.v3.CorsPolicy
+                          # RESTRICT to the real app origin in production (not "*").
+                          allow_origin_string_match:
+                            - exact: "https://mm.example"
+                          allow_methods: "GET, POST, OPTIONS"
+                          allow_headers: "keep-alive,user-agent,cache-control,content-type,content-transfer-encoding,x-grpc-web,grpc-timeout"
+                          expose_headers: "grpc-status,grpc-message"
+                          max_age: "1728000"
+                http_filters:
+                  - name: envoy.filters.http.grpc_web
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.grpc_web.v3.GrpcWeb
+                  - name: envoy.filters.http.cors
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.cors.v3.Cors
+                  - name: envoy.filters.http.router
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+
+  clusters:
+    - name: scala_grpc
+      type: STRICT_DNS
+      lb_policy: ROUND_ROBIN
+      # The server speaks HTTP/2 gRPC (h2c — this is an internal hop; see envoy.yaml).
+      typed_extension_protocol_options:
+        envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+          "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+          explicit_http_config:
+            http2_protocol_options: {}
+      load_assignment:
+        cluster_name: scala_grpc
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address: { address: messenger-server, port_value: 9090 }
