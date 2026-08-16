@@ -47,7 +47,7 @@ echoed `round_id` + `grpc-status: 0` come back through Envoy. It cleans up on ex
   | image | result |
   | --- | --- |
   | `envoyproxy/envoy:v1.31.2` | refuses to start — `Failed to initialize ECDH curves X25519MLKEM768` |
-  | `envoyproxy/envoy:v1.36.1` | `Negotiated TLS1.3 group: X25519MLKEM768`, ALPN `h2`; a classical-only client gets `handshake failure` |
+  | `envoyproxy/envoy:v1.38.3` | `Negotiated TLS1.3 group: X25519MLKEM768`, ALPN `h2`; a classical-only client gets `handshake failure` |
 - **`client.js`** — a dependency-free gRPC-web client (hand-framed `application/grpc-web+proto`): it
   exercises the real wire format (5-byte framing, trailers) rather than a generated stub, so a
   regression in Envoy's translation or the service contract fails the smoke.
@@ -61,7 +61,7 @@ echoed `round_id` + `grpc-status: 0` come back through Envoy. It cleans up on ex
   **container IP** on a shared network and substitutes the server IP into the Envoy config at runtime.
   `compose.yaml` is the declarative equivalent (service-name DNS) for `docker compose` or an
   apple/container setup that has a DNS domain configured.
-- **Pinned:** `envoyproxy/envoy:v1.36.1`, `eclipse-temurin:26-jre`, `node:22-bookworm-slim`
+- **Pinned:** `envoyproxy/envoy:v1.38.3`, `eclipse-temurin:26-jre`, `node:22-bookworm-slim`
   (Constitution XI). The server is staged as a plain `lib/` of jars (`sbt transport/stageServer`)
   because sbt-native-packager has no sbt-2 build yet.
 

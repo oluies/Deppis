@@ -20,13 +20,35 @@
 # confirm the client population supports the group; to accept classical clients instead, append
 # "X25519" to ecdh_curves (hybrid stays preferred, classical becomes reachable).
 #
-# ## Minimum Envoy version
+# ## WHAT THIS DOES NOT PROTECT
+#
+# Everything past Envoy is plaintext h2c: the `scala_grpc` cluster below has no upstream TLS and no
+# upstream authentication. So the traffic just given hybrid PQ protection travels the NEXT segment
+# in the clear, where anyone with access to it can read or inject it. That is only acceptable when
+# Envoy and the backend share a trust boundary — same pod, or loopback. **Do not run this config
+# with the backend across a network you do not control**; give the cluster an `UpstreamTlsContext`
+# first (TlsRoundServer already speaks this same hybrid-only group).
+#
+# Constitution IV: the `scala_grpc` endpoint in this repo resolves to `GrpcWebBackendServer`, the
+# **dev in-memory ObliviousStore, which provides NO metadata privacy** and says so in its own logs.
+# PQ TLS on this hop is transport protection only — it does not make the stack private.
+#
+# ## Keep in sync with envoy.yaml
+#
+# The HCM block, route, timeout, CORS policy and cluster below are duplicated from `envoy.yaml`.
+# Nothing enforces that, so a change to the allowed origin, `allow_headers`, the 30s timeout or the
+# upstream must be made in BOTH files or production will drift from the harness.
+#
+# ## Envoy version
 #
 # Verified against real containers:
 #   envoyproxy/envoy:v1.31.2  -> REFUSES TO START: "Failed to initialize ECDH curves X25519MLKEM768"
-#   envoyproxy/envoy:v1.36.1  -> starts; openssl reports "Negotiated TLS1.3 group: X25519MLKEM768"
+#   envoyproxy/envoy:v1.38.3  -> starts; openssl reports "Negotiated TLS1.3 group: X25519MLKEM768"
 #                                and a classical-only client gets "handshake failure"
-# So the image pin is load-bearing, not hygiene: an older Envoy cannot serve this config at all.
+# The pin is load-bearing, not hygiene: an older Envoy cannot serve this config at all. v1.36.1 was
+# the first release found to work, but the pin tracks the newest patch of a supported line rather
+# than that floor — this terminates internet-facing TLS, so it takes the security patches.
+# `deploy/envoy/verify-pq-tls.sh` re-checks the negotiation after any bump.
 #
 # ## Certificates
 #
@@ -36,7 +58,7 @@
 #
 #   envoy -c deploy/envoy/envoy-pq-tls.yaml
 #
-# Pinned image (reproducible builds, Constitution XI): envoyproxy/envoy:v1.36.1
+# Pinned image (reproducible builds, Constitution XI): envoyproxy/envoy:v1.38.3
 
 static_resources:
   listeners:
@@ -48,6 +70,15 @@ static_resources:
             name: envoy.transport_sockets.tls
             typed_config:
               "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext
+              # Session resumption is OFF, and that is a privacy decision rather than a TLS one.
+              # A resumed connection carries its ticket/PSK identity in the ClientHello in the clear,
+              # which is a cross-connection handle linking one client's visits to each other — on the
+              # single hop every real user traverses, in a system whose whole promise is
+              # unlinkability. (There is no PQ weakness: TLS 1.3 resumption chains back to the
+              # original hybrid handshake. The cost of disabling it is a full handshake per
+              # connection, which is the right trade here.)
+              disable_stateless_session_resumption: true
+              disable_stateful_session_resumption: true
               common_tls_context:
                 tls_params:
                   # TLS 1.3 only: the RFC 10024 groups exist only there, and pinning the floor stops

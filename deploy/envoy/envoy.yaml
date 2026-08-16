@@ -4,7 +4,7 @@
 # — pin the image, restrict CORS to the real app origin, and terminate TLS at/above Envoy.
 #
 # Run:  envoy -c deploy/envoy/envoy.yaml
-# Pinned image (reproducible builds, Constitution XI):  envoyproxy/envoy:v1.36.1
+# Pinned image (reproducible builds, Constitution XI):  envoyproxy/envoy:v1.38.3
 
 static_resources:
   listeners:
