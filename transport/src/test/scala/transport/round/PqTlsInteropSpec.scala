@@ -9,6 +9,7 @@ import java.util.Comparator
 import scala.concurrent.ExecutionContext.Implicits.global
 import scala.concurrent.duration.*
 import scala.sys.process.{Process, ProcessLogger}
+import scala.util.control.NonFatal
 import scala.util.{Failure, Success, Using}
 
 /** Cross-stack interop for the RFC 10024 hybrid-only bind (see [[PqTls]]).
@@ -65,11 +66,15 @@ class PqTlsInteropSpec extends AnyFunSuite with BeforeAndAfterAll:
     val started =
       try Some(builder.#<(new ByteArrayInputStream(Array.emptyByteArray)).run(logger))
       catch
+        case t: InterruptedException =>
+          Thread.currentThread().interrupt() // same restore-and-rethrow as the wait below
+          throw t
         // A missing executable surfaces as exit code -1 in this piped shape rather than an
         // exception (verified), but that is a platform detail not worth depending on. Record the
         // throwable: probe() only looks at the code, while a collect() failure here would otherwise
-        // report an empty Output: and throw away the one line that explains it.
-        case t: Throwable =>
+        // report an empty Output: and throw away the one line that explains it. NonFatal, so an
+        // OutOfMemoryError is not miscast as "tool absent".
+        case NonFatal(t) =>
           out.append(s"LAUNCH_FAILED: $t").append('\n')
           None
     started match
@@ -84,6 +89,13 @@ class PqTlsInteropSpec extends AnyFunSuite with BeforeAndAfterAll:
           case t: InterruptedException =>
             Thread.currentThread().interrupt() // don't swallow the interrupt flag
             throw t
+          // In the `#<` shape the child starts on a spawned thread, so a failed start can surface
+          // from exitValue() rather than from run(). Guarding only the launch would let that escape
+          // and make probe() throw instead of reporting the tool absent. The `finally` below still
+          // guarantees no live child, so a broad handler here cannot reintroduce an orphaned peer.
+          case NonFatal(t) =>
+            out.append(s"RUN_FAILED: $t").append('\n')
+            (Int.MinValue, out.toString, false)
         // Every exit path — normal, timed out, interrupted — leaves no live child behind.
         finally if p.isAlive() then p.destroy()
 
