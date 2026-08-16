@@ -16,6 +16,9 @@ jobs:
   jvm:
     name: JVM — sbt test + labeling gate
     runs-on: ubuntu-latest
+    env:
+      # Cross-stack PQ TLS interop must actually run here, not cancel. See PqTlsInteropSpec.
+      REQUIRE_PQ_INTEROP: "1"
     steps:
       - uses: actions/checkout@v7
       - name: Install libsodium (crypto FFM tests)
@@ -40,6 +43,14 @@ jobs:
           distribution: temurin
           java-version: "24" # Foreign Function & Memory API is final since 22
       - uses: sbt/setup-sbt@v1
+      # Go is the independent TLS stack that PqTlsInteropSpec drives against the hybrid-only PQ bind
+      # (transport). Its crypto/tls has had X25519MLKEM768 on by default since 1.24. Pinned like
+      # every other toolchain here (Constitution XI) rather than relying on whatever the runner image
+      # happens to preinstall — and REQUIRE_PQ_INTEROP below turns "Go missing" from a silent skip
+      # into a failure, because a permanently-cancelled test reads exactly like a passing one.
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.6"
       # No Node here: the JS engine tests run in the `scalajs` job, so this job stays JVM-only.
       - uses: actions/cache@v6
         with:
