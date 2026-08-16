@@ -44,7 +44,7 @@ grep -q "address: $SRV_IP," /tmp/deppis-envoy.runtime.yaml \
   || { echo "[run] envoy upstream address substitution failed (envoy.yaml endpoint format changed?)" >&2; exit 1; }
 container run -d --name envoy --network "$NET" -p 8080:8080 \
   -v "/tmp/deppis-envoy.runtime.yaml:/etc/envoy/envoy.yaml" \
-  envoyproxy/envoy:v1.36.1 -c /etc/envoy/envoy.yaml --log-level warning >/dev/null
+  envoyproxy/envoy:v1.38.3 -c /etc/envoy/envoy.yaml --log-level warning >/dev/null
 sleep 6
 ENVOY_IP="$(ipof envoy)"; [ -n "$ENVOY_IP" ] || { echo "[run] no envoy IP" >&2; exit 1; }
 
