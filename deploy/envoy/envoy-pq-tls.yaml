@@ -28,8 +28,10 @@
 # Verified against real clients before enabling (the listener offers ONLY the hybrid group, so
 # connecting at all proves support):
 #   Chrome 151          -> handshake completes (reaches Envoy's HTTP layer)
-#   Safari, macOS 27    -> handshake completes (a cert warning, which is POST-handshake; a group
-#                          mismatch instead yields "can't establish a secure connection")
+#   Safari, macOS 27    -> handshake completes (a cert warning, which can only arise AFTER key
+#                          agreement: the group is settled in ClientHello/ServerHello, before the
+#                          certificate is sent. A group mismatch instead yields "can't establish a
+#                          secure connection" — confirmed against a plaintext listener.)
 # Published support agrees: Chrome default since 131, Firefox/Edge default-on, Apple system-wide in
 # iOS 26 / macOS Tahoe 26.
 #

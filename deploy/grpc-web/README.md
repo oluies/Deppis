@@ -50,7 +50,7 @@ echoed `round_id` + `grpc-status: 0` come back through Envoy. It cleans up on ex
   | client | result |
   | --- | --- |
   | Chrome 151 | handshake completes — reaches Envoy's HTTP layer |
-  | Safari, macOS 27 | handshake completes — cert warning, which is *post*-handshake (a group mismatch instead gives "can't establish a secure connection") |
+  | Safari, macOS 27 | handshake completes — a cert warning, which can only arise *after* key agreement: the group is settled in ClientHello/ServerHello, before the certificate is sent (a group mismatch instead gives "can't establish a secure connection") |
 
   Published support agrees: Chrome default since 131, Firefox/Edge default-on, Apple system-wide in
   iOS 26 / macOS Tahoe 26. The residual risk is not modern browsers but (a) clients predating those
