@@ -44,13 +44,14 @@ echoed `round_id` + `grpc-status: 0` come back through Envoy. It cleans up on ex
   in front** rather than relaxing this listener — a classical group added here applies silently to
   every user, and a downgrade path is much harder to remove than to avoid taking.
 
-  Verified against real clients before enabling (the listener offers *only* the hybrid group, so
-  connecting at all proves support):
+  Verified against real clients before enabling. The listener offers *only* the hybrid group, so
+  reaching key agreement at all proves the client supports it — which is what each row records, and
+  is a weaker claim than "the connection succeeded":
 
   | client | result |
   | --- | --- |
   | Chrome 151 | handshake completes — reaches Envoy's HTTP layer |
-  | Safari, macOS 27 | handshake completes — cert warning, which is *post*-handshake (a group mismatch instead gives "can't establish a secure connection") |
+  | Safari, macOS 27 | **key agreement** completes — a cert warning. Not the full handshake: Safari evaluates the certificate inside the handshake and aborts before sending `Finished`. It still proves the group, because the group is settled in ClientHello/ServerHello *before the certificate is sent*. A failed handshake instead gives Safari's generic "can't establish a secure connection" page — observed against a *plaintext* listener, which is a different failure surfacing the same message rather than a reproduced group mismatch; the group-mismatch negative is covered by the classical-only check in `verify-pq-tls.sh`. |
 
   Published support agrees: Chrome default since 131, Firefox/Edge default-on, Apple system-wide in
   iOS 26 / macOS Tahoe 26. The residual risk is not modern browsers but (a) clients predating those

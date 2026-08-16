@@ -25,11 +25,19 @@
 # adapter in front, NOT relaxing this listener: a classical group added here silently applies to
 # every user, and a downgrade path is far harder to remove than it is to avoid taking.
 #
-# Verified against real clients before enabling (the listener offers ONLY the hybrid group, so
-# connecting at all proves support):
+# Verified against real clients before enabling. The listener offers ONLY the hybrid group, so
+# reaching key agreement at all proves the client supports it — which is the property each row
+# below records, and is weaker than "the connection succeeded":
 #   Chrome 151          -> handshake completes (reaches Envoy's HTTP layer)
-#   Safari, macOS 27    -> handshake completes (a cert warning, which is POST-handshake; a group
-#                          mismatch instead yields "can't establish a secure connection")
+#   Safari, macOS 27    -> KEY AGREEMENT completes (cert warning). Not the full handshake: Safari
+#                          evaluates the certificate inside the handshake and aborts on the warning
+#                          before sending its Finished. That still proves the group, because the
+#                          group is settled in ClientHello/ServerHello — before the certificate is
+#                          sent at all. A failed handshake instead yields Safari's generic "can't
+#                          establish a secure connection" page, observed against a PLAINTEXT
+#                          listener; that is a different failure that happens to surface the same
+#                          message, not a reproduction of a group mismatch. The group-mismatch
+#                          negative is covered by the classical-only check in verify-pq-tls.sh.
 # Published support agrees: Chrome default since 131, Firefox/Edge default-on, Apple system-wide in
 # iOS 26 / macOS Tahoe 26.
 #
