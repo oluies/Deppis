@@ -58,22 +58,34 @@ class PqTlsInteropSpec extends AnyFunSuite with BeforeAndAfterAll:
     val out = new StringBuffer
     val logger = ProcessLogger(l => { out.append(l).append('\n'); () })
     val builder = cwd.fold(Process(cmd))(d => Process(cmd, d.toFile))
-    try
-      // Empty stdin so peers that read from it (s_client) see EOF and exit after the handshake.
-      val p = builder.#<(new ByteArrayInputStream(Array.emptyByteArray)).run(logger)
-      val deadline = System.nanoTime() + timeout.toNanos
-      while p.isAlive() && System.nanoTime() < deadline do Thread.sleep(50)
-      if p.isAlive() then
-        p.destroy()
-        (Int.MinValue, out.toString, true)
-      else (p.exitValue(), out.toString, false)
-    catch
-      // A missing executable surfaces here as exit code -1 rather than an exception, because the
-      // `#<` shape starts the process on its own thread (verified: hybridOpenssl probes Homebrew
-      // paths that do not exist on the CI runners, and both OpenSSL tests cancel cleanly there).
-      // That is a platform detail this must not depend on, so treat any launch failure as "did not
-      // run" — probe() then reports the tool absent and the caller cancels instead of erroring.
-      case _: Throwable => (Int.MinValue, out.toString, false)
+    // Guard ONLY the launch. A wider try would also cover the wait loop, and an interrupt there
+    // would return "did not run" while the child is still alive and still holding its connection to
+    // TlsRoundServer — the orphaned-peer condition PeerTimeout and the compiled binary exist to
+    // prevent. Empty stdin so peers that read it (s_client) see EOF and exit after the handshake.
+    val started =
+      try Some(builder.#<(new ByteArrayInputStream(Array.emptyByteArray)).run(logger))
+      catch
+        // A missing executable surfaces as exit code -1 in this piped shape rather than an
+        // exception (verified), but that is a platform detail not worth depending on. Record the
+        // throwable: probe() only looks at the code, while a collect() failure here would otherwise
+        // report an empty Output: and throw away the one line that explains it.
+        case t: Throwable =>
+          out.append(s"LAUNCH_FAILED: $t").append('\n')
+          None
+    started match
+      case None => (Int.MinValue, out.toString, false)
+      case Some(p) =>
+        try
+          val deadline = System.nanoTime() + timeout.toNanos
+          while p.isAlive() && System.nanoTime() < deadline do Thread.sleep(50)
+          if p.isAlive() then (Int.MinValue, out.toString, true)
+          else (p.exitValue(), out.toString, false)
+        catch
+          case t: InterruptedException =>
+            Thread.currentThread().interrupt() // don't swallow the interrupt flag
+            throw t
+        // Every exit path — normal, timed out, interrupted — leaves no live child behind.
+        finally if p.isAlive() then p.destroy()
 
   /** Bounded run for test bodies: a timeout is a test failure, with whatever the peer managed to say. */
   private def collect(cmd: Seq[String], cwd: Option[Path] = None): (Int, String) =
