@@ -18,7 +18,7 @@ services:
       - "9090"
 
   envoy:
-    image: envoyproxy/envoy:v1.31.2
+    image: envoyproxy/envoy:v1.36.1
     command: ["-c", "/etc/envoy/envoy.yaml", "--log-level", "warning"]
     volumes:
       - ../envoy/envoy.yaml:/etc/envoy/envoy.yaml:ro
