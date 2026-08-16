@@ -37,7 +37,10 @@ echoed `round_id` + `grpc-status: 0` come back through Envoy. It cleans up on ex
 
   It is **hybrid-only**, matching `PqTls`: no classical group is offered, so there is nothing to
   downgrade to — and, deliberately, **a browser without ML-KEM-768 cannot load the app**. That is a
-  failed handshake, not a soft degradation.
+  failed handshake, not a soft degradation: browsers surface it as a generic connection-security
+  error (Safari: "can't establish a secure connection"), and **nothing the user or operator sees
+  names the key-agreement group** — so it reads like an outage or a cert problem. Check this
+  listener's `ecdh_curves` against the client before chasing anything else.
 
   **That cost is accepted.** Deppis is a new service with no installed base, so there is no legacy
   client population to strand. If such a client ever has to be supported, the answer is an **adapter

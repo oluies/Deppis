@@ -16,8 +16,11 @@
 # session cannot be broken later by an adversary who acquires a quantum computer.
 #
 # THE COST IS REAL AND INTENDED: a browser that cannot do ML-KEM-768 cannot load the app at all.
-# This is not a soft degradation — it is a failed TLS handshake, so it presents as a blank page with
-# nothing pointing at TLS.
+# This is not a soft degradation — it is a failed TLS handshake, which browsers surface as a generic
+# connection-security error (Safari: "can't establish a secure connection"). Nothing in what the user
+# or the operator sees names the key-agreement group, so a report of this reads like an outage or a
+# certificate problem. That is the thing to remember when triaging: check this listener's ecdh_curves
+# against the client before chasing anything else.
 #
 # THAT COST IS ACCEPTED, DELIBERATELY. Deppis is a new service with no installed base, so there is no
 # legacy client population to strand — the posture is free here in a way it would not be for an
