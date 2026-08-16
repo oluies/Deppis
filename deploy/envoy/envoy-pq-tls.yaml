@@ -16,9 +16,26 @@
 # session cannot be broken later by an adversary who acquires a quantum computer.
 #
 # THE COST IS REAL AND INTENDED: a browser that cannot do ML-KEM-768 cannot load the app at all.
-# This is not a soft degradation — it is a failed TLS handshake. Before exposing this listener,
-# confirm the client population supports the group; to accept classical clients instead, append
-# "X25519" to ecdh_curves (hybrid stays preferred, classical becomes reachable).
+# This is not a soft degradation — it is a failed TLS handshake, so it presents as a blank page with
+# nothing pointing at TLS.
+#
+# THAT COST IS ACCEPTED, DELIBERATELY. Deppis is a new service with no installed base, so there is no
+# legacy client population to strand — the posture is free here in a way it would not be for an
+# existing product. If a client that cannot do ML-KEM-768 ever has to be supported, the answer is an
+# adapter in front, NOT relaxing this listener: a classical group added here silently applies to
+# every user, and a downgrade path is far harder to remove than it is to avoid taking.
+#
+# Verified against real clients before enabling (the listener offers ONLY the hybrid group, so
+# connecting at all proves support):
+#   Chrome 151          -> handshake completes (reaches Envoy's HTTP layer)
+#   Safari, macOS 27    -> handshake completes (a cert warning, which is POST-handshake; a group
+#                          mismatch instead yields "can't establish a secure connection")
+# Published support agrees: Chrome default since 131, Firefox/Edge default-on, Apple system-wide in
+# iOS 26 / macOS Tahoe 26.
+#
+# The residual risk is NOT modern browsers. It is (a) clients predating those versions, and (b)
+# TLS-inspecting corporate middleboxes, where the PROXY's stack must support ML-KEM-768 rather than
+# the browser's — the latter cannot be detected from outside such a network.
 #
 # ## WHAT THIS DOES NOT PROTECT
 #

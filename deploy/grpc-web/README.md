@@ -37,8 +37,25 @@ echoed `round_id` + `grpc-status: 0` come back through Envoy. It cleans up on ex
 
   It is **hybrid-only**, matching `PqTls`: no classical group is offered, so there is nothing to
   downgrade to — and, deliberately, **a browser without ML-KEM-768 cannot load the app**. That is a
-  failed handshake, not a soft degradation. To accept classical clients instead, append `"X25519"`
-  to `ecdh_curves`; hybrid stays preferred and classical becomes reachable.
+  failed handshake, not a soft degradation.
+
+  **That cost is accepted.** Deppis is a new service with no installed base, so there is no legacy
+  client population to strand. If such a client ever has to be supported, the answer is an **adapter
+  in front** rather than relaxing this listener — a classical group added here applies silently to
+  every user, and a downgrade path is much harder to remove than to avoid taking.
+
+  Verified against real clients before enabling (the listener offers *only* the hybrid group, so
+  connecting at all proves support):
+
+  | client | result |
+  | --- | --- |
+  | Chrome 151 | handshake completes — reaches Envoy's HTTP layer |
+  | Safari, macOS 27 | handshake completes — cert warning, which is *post*-handshake (a group mismatch instead gives "can't establish a secure connection") |
+
+  Published support agrees: Chrome default since 131, Firefox/Edge default-on, Apple system-wide in
+  iOS 26 / macOS Tahoe 26. The residual risk is not modern browsers but (a) clients predating those
+  versions and (b) TLS-inspecting corporate middleboxes, where the *proxy's* stack must support
+  ML-KEM-768 — undetectable from outside such a network.
 
   Certs are not generated: mount operator/CA-issued ones at `/etc/envoy/certs/`.
 
