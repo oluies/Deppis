@@ -9,7 +9,7 @@ import java.util.Comparator
 import scala.concurrent.ExecutionContext.Implicits.global
 import scala.concurrent.duration.*
 import scala.sys.process.{Process, ProcessLogger}
-import scala.util.Using
+import scala.util.{Failure, Success, Using}
 
 /** Cross-stack interop for the RFC 10024 hybrid-only bind (see [[PqTls]]).
   *
@@ -58,14 +58,22 @@ class PqTlsInteropSpec extends AnyFunSuite with BeforeAndAfterAll:
     val out = new StringBuffer
     val logger = ProcessLogger(l => { out.append(l).append('\n'); () })
     val builder = cwd.fold(Process(cmd))(d => Process(cmd, d.toFile))
-    // Empty stdin so peers that read from it (s_client) see EOF and exit after the handshake.
-    val p = builder.#<(new ByteArrayInputStream(Array.emptyByteArray)).run(logger)
-    val deadline = System.nanoTime() + timeout.toNanos
-    while p.isAlive() && System.nanoTime() < deadline do Thread.sleep(50)
-    if p.isAlive() then
-      p.destroy()
-      (Int.MinValue, out.toString, true)
-    else (p.exitValue(), out.toString, false)
+    try
+      // Empty stdin so peers that read from it (s_client) see EOF and exit after the handshake.
+      val p = builder.#<(new ByteArrayInputStream(Array.emptyByteArray)).run(logger)
+      val deadline = System.nanoTime() + timeout.toNanos
+      while p.isAlive() && System.nanoTime() < deadline do Thread.sleep(50)
+      if p.isAlive() then
+        p.destroy()
+        (Int.MinValue, out.toString, true)
+      else (p.exitValue(), out.toString, false)
+    catch
+      // A missing executable surfaces here as exit code -1 rather than an exception, because the
+      // `#<` shape starts the process on its own thread (verified: hybridOpenssl probes Homebrew
+      // paths that do not exist on the CI runners, and both OpenSSL tests cancel cleanly there).
+      // That is a platform detail this must not depend on, so treat any launch failure as "did not
+      // run" — probe() then reports the tool absent and the caller cancels instead of erroring.
+      case _: Throwable => (Int.MinValue, out.toString, false)
 
   /** Bounded run for test bodies: a timeout is a test failure, with whatever the peer managed to say. */
   private def collect(cmd: Seq[String], cwd: Option[Path] = None): (Int, String) =
@@ -98,8 +106,8 @@ class PqTlsInteropSpec extends AnyFunSuite with BeforeAndAfterAll:
     assert(code != 0, s"a classical-only client must NOT be able to connect. Output:\n$text")
     assert(!t.contains("dial_failed"), s"never reached a handshake — transport failure:\n$text")
     assert(
-      t.contains("handshake failure") || t.contains("remote error: tls:") || t.contains("alert"),
-      s"expected a TLS handshake refusal, not some other failure. Output:\n$text"
+      t.contains("handshake failure"),
+      s"expected a TLS handshake-failure alert, not some other failure. Output:\n$text"
     )
 
   private def withServer[A](body: TlsRoundServer => A): A =
@@ -110,7 +118,13 @@ class PqTlsInteropSpec extends AnyFunSuite with BeforeAndAfterAll:
   override def afterAll(): Unit =
     try
       scratch.foreach { dir =>
-        Using(Files.walk(dir))(_.sorted(Comparator.reverseOrder()).forEach(Files.deleteIfExists(_)))
+        // Don't discard the Try: a failed walk or delete would otherwise leave the module directory
+        // (and the compiled client binary) behind silently — the exact symptom this removes.
+        Using(Files.walk(dir))(
+          _.sorted(Comparator.reverseOrder()).forEach(Files.deleteIfExists(_))
+        ) match
+          case Success(_) => scratch = None
+          case Failure(e) => Console.err.println(s"[PqTlsInteropSpec] could not remove $dir: $e")
       }
     finally super.afterAll()
 
