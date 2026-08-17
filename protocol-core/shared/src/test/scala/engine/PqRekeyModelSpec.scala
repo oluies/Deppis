@@ -24,29 +24,13 @@ import scala.collection.mutable
   * commit's anchor chosen at send time) and a fixed script visits exactly one path through them.
   *
   * ==The adversary drops LIVE FRAMES, not map entries (and this is load-bearing)==
-  * Loss is injected by swallowing a `retrieve` that would have returned a live frame ([[Lossy]]),
-  * so every drop is exactly one real frame the peer wrote — countable, and impossible to waste.
-  * (What that count does and does not mean is spelled out on [[Lossy]]: live frames swallowed —
-  * content, control, or ack — not deliveries prevented.)
-  *
-  * The obvious alternative — reach into the store map and `remove` a random key — is a TRAP, and an
-  * earlier revision of this test fell into it. `FakeBackend.store` is append-only apart from
-  * successfully-retrieved directional tokens: cover writes go under a `coverKey`-derived token that
-  * is NEVER retrieved, so they accumulate forever. Measured on a warmed pair over 700 rounds: an
-  * idle pair leaves ~1,200 dead cover entries against ~1 live frame, and a uniformly random
-  * `remove` hit a live frame 7 times out of 233 — the "lossy network" was almost fictional, and
-  * `assert(drops > 0)` could not tell, because it counted map removals rather than lost deliveries.
-  * (A busy pair happens to fare better — its store stays nearly empty — which is exactly how such a
-  * bug hides: it is invisible in the case you look at first.) Counting retransmissions instead
-  * would not have saved it either: stop-and-wait re-presents an unacked head EVERY round, so
-  * retransmits are ~1,000 per run even with a perfectly clean network.
-  *
-  * The adversary may not forge or reorder: every frame is AEAD-sealed under keys the network does
-  * not have, so a tampered frame is simply a dropped one (covered by the ratchet's
-  * no-mutation-on-undecryptable invariant), and round-derived addressing plus stop-and-wait mean an
-  * in-flight frame cannot be overtaken. Modeling those would be inventing an adversary the
-  * transport does not admit — the forged-envelope cases are exercised where they ARE reachable
-  * (a malicious PEER) in `PqRekeyCrossSpec`.
+  * Loss is injected by swallowing a `retrieve` that would have returned a live frame
+  * ([[PqTestKit.UnreliableTransport]]), so every drop is exactly one real frame the peer wrote —
+  * countable, and impossible to waste. That class's doc carries the full account: what `lost` does
+  * and does not mean, why reaching into `FakeBackend.store` to `remove` a key is a TRAP that an
+  * earlier revision of this test fell into, and why counting retransmissions would not have caught
+  * it either. The adversary may not forge or reorder; the forged-envelope cases are exercised where
+  * they ARE reachable (a malicious PEER) in `PqRekeyCrossSpec`.
   *
   * ==What this model does NOT reach (measured, not guessed)==
   * LANE ARBITRATION is not pinned. Busy cases DO run the two lanes together — content flows for the
@@ -83,37 +67,10 @@ import scala.collection.mutable
   * remaining gate is human security review, not this suite. */
 class PqRekeyModelSpec extends AnyFunSuite with ScalaCheckPropertyChecks:
 
-  /** A network that eats live frames: swallows a `retrieve` that would have returned one, one in
-    * `dropOneIn` (0 = clean). `retrieve` has already consumed the frame from the store, so it is
-    * gone for good and ARQ must recover it.
-    *
-    * `lost` counts LIVE FRAMES SWALLOWED — content, control, or ack-only — not "deliveries
-    * prevented". Every `Some` here really is a live frame the peer wrote under the pair's
-    * directional token (a cover read uses a `cover-read` token nothing is written under and always
-    * returns `None` — `Engine.scala:1602-1603`), so the count can never be inflated by cover
-    * traffic, which is the failure the old `store.remove` metric had. But it is not a delivery
-    * count: the frame may be an ack, or a cached content retransmit the ratchet rejects. Stating it
-    * as "deliveries prevented" would overclaim by exactly the margin that made the old metric
-    * untrustworthy. */
-  private final class Lossy(inner: RoundTransport, rng: scala.util.Random) extends RoundTransport:
-    var dropOneIn: Int = 0
-    var lost: Int = 0
-    def submit(token: Array[Byte], frame: Array[Byte]): Boolean = inner.submit(token, frame)
-    def retrieve(token: Array[Byte]): Option[Array[Byte]] =
-      inner.retrieve(token) match
-        case Some(_) if dropOneIn > 0 && rng.nextInt(dropOneIn) == 0 =>
-          lost += 1
-          None
-        case other => other
-    override def signal(roundId: Long, label: Array[Byte], bit: Int): Unit =
-      inner.signal(roundId, label, bit)
-    def fetchDigest(roundId: Long, clientLabel: Array[Byte]): Array[Byte] =
-      inner.fetchDigest(roundId, clientLabel)
-
   private final case class Pair(
       be: FakeBackend,
-      la: Lossy,
-      lb: Lossy,
+      la: PqTestKit.UnreliableTransport,
+      lb: PqTestKit.UnreliableTransport,
       alice: Engine,
       bob: Engine,
       pid: String
@@ -125,8 +82,8 @@ class PqRekeyModelSpec extends AnyFunSuite with ScalaCheckPropertyChecks:
     * with the most to gain from the fold. */
   private def pair(rng: scala.util.Random): Pair =
     val be = FakeBackend()
-    val la = Lossy(be.transport(), rng)
-    val lb = Lossy(be.transport(), rng)
+    val la = PqTestKit.UnreliableTransport(be.transport(), rng)
+    val lb = PqTestKit.UnreliableTransport(be.transport(), rng)
     val alice = Engine(Some(la), clientLabel = "alice".getBytes("UTF-8"))
     val bob = Engine(Some(lb), clientLabel = "bob".getBytes("UTF-8"))
     val oob = "oob-shared-secret".getBytes("UTF-8")
