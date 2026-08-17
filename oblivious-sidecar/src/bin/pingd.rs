@@ -25,7 +25,7 @@
 //! This build therefore remains `DEV, NO METADATA PRIVACY`, and running `pingd` does not change any
 //! label. It removes one structural obstacle to Phase C; it does not deliver Phase C.
 
-use oblivious_sidecar::env::{hex_key_var, KeyVar};
+use oblivious_sidecar::env::{hex_key_osvar, KeyVar};
 use oblivious_sidecar::grpc_notify::pb::notification_service_server::NotificationServiceServer;
 use oblivious_sidecar::grpc_notify::NotificationServer;
 
@@ -40,14 +40,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // otherwise start a notify front on the key published in this source — ACKing every signal
     // (`signal` returns a uniform response for tokens it cannot open), delivering no bits, and
     // letting anyone forge a bit for any label. Same fail-closed rule as `OBSD_SERVICES`.
-    let notify_key = match hex_key_var(std::env::var("PINGD_NOTIFY_KEY").ok().as_deref()) {
-        KeyVar::Parsed(k) => *k,
+    let notify_key = match hex_key_osvar(std::env::var_os("PINGD_NOTIFY_KEY").as_deref()) {
+        KeyVar::Parsed(k) => k,
         KeyVar::Unset => {
             eprintln!("pingd: PINGD_NOTIFY_KEY unset — using the DEV key (not secret, dev only)");
             [0x01u8; 32]
         }
         KeyVar::Malformed => {
-            eprintln!("pingd: PINGD_NOTIFY_KEY is set but not 64 hex chars — refusing to start");
+            eprintln!("pingd: PINGD_NOTIFY_KEY is set but is not 64 hex chars — refusing to start");
             std::process::exit(2);
         }
     };
