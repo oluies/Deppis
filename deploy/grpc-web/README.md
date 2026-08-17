@@ -41,17 +41,34 @@ echoed `round_id` + `grpc-status: 0` come back through Envoy. It cleans up on ex
   error, and **nothing the *user* sees names the key-agreement group** — so it reads like an outage
   or a cert problem. (Safari's wording is "can't establish a secure connection", but that was
   observed against a *plaintext* listener rather than a real group mismatch; the reproduced negative
-  is openssl's `handshake failure` in `verify-pq-tls.sh`.)
+  is openssl's `handshake failure`, asserted in `verify-pq-tls.sh`.)
 
-  The **operator** does get a direct signal, and it is the cheapest confirmation — Envoy logs the
-  reason per connection at `debug` level:
+  The **operator** does get a direct signal — Envoy logs the reason per connection:
 
   ```
   TLS_error:|268435722:SSL routines:OPENSSL_internal:NO_SHARED_GROUP:TLS_error_end
   ```
 
-  It does not appear at the default `warning` level, so raise the log level when triaging, then
-  compare this listener's `ecdh_curves` against the client.
+  Two caveats come with getting it:
+
+  - **There is no admin listener** in this config, so no runtime `POST /logging`. The level can only
+    be raised by *restarting* Envoy — which drops every live connection and captures nothing about
+    the handshake that prompted the report, so the client has to retry afterwards.
+  - **Do not raise the global level to `debug`.** This is the user-facing TLS terminator of a
+    metadata-private messenger, and Envoy debug logging is not scoped to TLS — it writes
+    per-connection peer addresses and stream/header detail to disk, the very linkability this
+    listener disables session resumption to avoid. Use the narrowest component instead:
+
+    ```
+    --log-level warning --component-log-level connection:debug
+    ```
+
+    Measured on this config: **4 log lines vs 396** for global debug, same signal. Even then the
+    line carries the client's address — keep the window short and discard the logs.
+
+  Then compare this listener's `ecdh_curves` against the client. `verify-pq-tls.sh` asserts the
+  `NO_SHARED_GROUP` string, so an Envoy bump that changes it fails the check rather than silently
+  invalidating this guidance.
 
   **That cost is accepted.** Deppis is a new service with no installed base, so there is no legacy
   client population to strand. If such a client ever has to be supported, the answer is an **adapter
