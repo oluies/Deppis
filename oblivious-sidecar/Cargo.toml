@@ -36,3 +36,7 @@ path = "src/bin/obsx.rs"
 [[bin]]
 name = "obsd"
 path = "src/bin/obsd.rs"
+
+[[bin]]
+name = "pingd"
+path = "src/bin/pingd.rs"
