@@ -50,8 +50,31 @@ mkdir -p "$TMP/certs"
 
 echo "[verify] $IMAGE, config $(basename "$CONFIG"), port $PORT"
 
-# Start Envoy with the given extra flags. Kept as a function because the premise of the triage
-# instruction — that plain `warning` does NOT carry the signal — needs a second run to pin.
+# --- helpers -----------------------------------------------------------------------------------
+
+# Container state as three outcomes, not two: 0 running, 1 definitely stopped, 2 could not tell.
+# `inspect` itself can fail transiently (daemon hiccup, name not yet resolvable straight after
+# `run -d`), and collapsing that into "not running" would report "Envoy did not start" — the most
+# misleading message available — for a container that is perfectly healthy.
+envoy_state() {
+  local out rc
+  out="$("$RUNTIME" inspect -f '{{.State.Running}}' "$NAME" 2>&1)"; rc=$?
+  [ $rc -ne 0 ] && return 2
+  case "$out" in
+    true)  return 0 ;;
+    false) return 1 ;;
+    *)     return 2 ;;
+  esac
+}
+
+# Container logs, with the runtime's exit status preserved. Envoy logs to stderr so 2>&1 is
+# required, which means a runtime error ("No such container: ...") would otherwise be captured as if
+# it were log content — and satisfy any non-empty check written to detect exactly that failure.
+# Callers must consult the status, not just the text.
+read_logs() {
+  "$RUNTIME" logs "$NAME" 2>&1
+}
+
 start_envoy() {
   "$RUNTIME" rm -f "$NAME" >/dev/null 2>&1 || true
   # NOT --rm: on a boot failure the container must survive long enough to read its logs, which is
@@ -59,14 +82,17 @@ start_envoy() {
   "$RUNTIME" run -d --name "$NAME" -p "$PORT:8443" \
     -v "$CONFIG:/etc/envoy/envoy.yaml:ro" -v "$TMP/certs:/etc/envoy/certs:ro" \
     "$IMAGE" -c /etc/envoy/envoy.yaml "$@" >/dev/null
+  local st
   for _ in $(seq 1 30); do
-    # Checked every iteration, not only after the loop. Envoy exits at boot on a rejected flag — an
+    # Checked every iteration, not only after the loop: Envoy exits at boot on a rejected flag — an
     # unknown --component-log-level id, say — within about a second, and that is exactly the case
-    # this diagnostic was added for; reporting it only after a 30s timeout makes the script slowest
-    # in the failure mode it exists to make fast and accurate.
-    if [ "$("$RUNTIME" inspect -f '{{.State.Running}}' "$NAME" 2>/dev/null)" != "true" ]; then
+    # this diagnostic exists for. Only a definite "stopped" fails; "could not tell" keeps waiting.
+    # `|| st=$?` and not `envoy_state; st=$?`: under `set -e` the bare call aborts the script the
+    # moment it returns non-zero, which silently swallowed this very diagnostic.
+    st=0; envoy_state || st=$?
+    if [ $st -eq 1 ]; then
       echo "FAIL: Envoy did not start with: $*"
-      "$RUNTIME" logs "$NAME" 2>&1 | tail -20
+      read_logs | tail -20
       exit 1
     fi
     "$OPENSSL" s_client -connect "localhost:$PORT" -groups "$GROUP" -tls1_3 </dev/null >/dev/null 2>&1 && return 0
@@ -75,9 +101,35 @@ start_envoy() {
   # Up but never served. Returning 0 here would let every later assertion "pass" against a listener
   # that never completed a single handshake.
   echo "FAIL: Envoy is running but never completed a handshake with: $*"
-  "$RUNTIME" logs "$NAME" 2>&1 | tail -20
+  read_logs | tail -20
   exit 1
 }
+
+# A classical-only client must be refused, and refused at key agreement. Asserted on the exact
+# wording rather than a loose "alert": the config comments cite "handshake failure" as the
+# reproduced negative, and a broader grep would let a run stand behind wording never observed.
+assert_classical_refused() {
+  local out
+  out="$("$OPENSSL" s_client -connect "localhost:$PORT" -groups x25519 -tls1_3 </dev/null 2>&1 || true)"
+  grep -qi "handshake failure" <<<"$out" \
+    || { echo "FAIL: $1: classical-only client was not refused with a handshake failure"; echo "$out" | tail -20; exit 1; }
+}
+
+# Poll the container log for a pattern. 0 = found, 1 = not found within the window. Sets LOGS and
+# LOGS_RC for the caller. Sleeps BEFORE each capture so the final second of the window is sampled
+# (capture-first would waste the trailing sleep and never look at t=window).
+poll_logs_for() {
+  local pat="$1" iters="$2"
+  for _ in $(seq 1 "$iters"); do
+    sleep 1
+    # Same `set -e` hazard: a failing command substitution in a bare assignment kills the script.
+    if LOGS="$(read_logs)"; then LOGS_RC=0; else LOGS_RC=$?; fi
+    grep -q "$pat" <<<"$LOGS" && return 0
+  done
+  return 1
+}
+
+# --- assertions --------------------------------------------------------------------------------
 
 start_envoy --log-level warning --component-log-level connection:debug
 
@@ -88,58 +140,33 @@ grep -q "ALPN protocol: h2" <<<"$pq" \
   || { echo "FAIL: ALPN h2 not negotiated (gRPC-web needs it)"; echo "$pq" | tail -20; exit 1; }
 echo "[verify] hybrid client  -> Negotiated TLS1.3 group: $GROUP, ALPN h2"
 
-# Hybrid-only means no fallback: a classical-only client must be refused, not quietly downgraded.
-# Asserted on the exact wording rather than a loose "alert", because the config comments cite
-# "handshake failure" specifically as the reproduced negative — a broader grep would let a passing
-# run stand behind wording that was never observed.
-cls="$("$OPENSSL" s_client -connect "localhost:$PORT" -groups x25519 -tls1_3 </dev/null 2>&1 || true)"
-grep -qi "handshake failure" <<<"$cls" \
-  || { echo "FAIL: classical-only client was NOT refused with a handshake failure"; echo "$cls" | tail -20; exit 1; }
+assert_classical_refused "connection:debug run"
 echo "[verify] classical-only -> refused (handshake failure)"
 
-# The operator-facing triage signal documented in envoy-pq-tls.yaml. Asserted here for the same
-# reason as everything else in this script: otherwise an Envoy bump that renames or drops the string
-# leaves the triage instruction silently wrong while this check stays green.
-#
-# POLLED, not read once: s_client returns as soon as it gets the fatal alert, which is the same
-# moment Envoy logs the line — which then still has to cross Envoy's stderr and the runtime's log
-# pipe before `logs` can see it. A single read races that and would flake on a working config.
-found=""
-for _ in $(seq 1 10); do
-  logs="$("$RUNTIME" logs "$NAME" 2>&1 || true)"
-  if grep -q "NO_SHARED_GROUP" <<<"$logs"; then found=1; break; fi
-  sleep 1
-done
-[ -n "$found" ] \
-  || { echo "FAIL: expected NO_SHARED_GROUP in Envoy's connection log after the refused handshake"; echo "$logs" | tail -20; exit 1; }
+# The operator-facing triage signal documented in envoy-pq-tls.yaml, asserted here so an Envoy bump
+# that renames or drops the string fails this check rather than silently leaving the triage
+# instruction wrong. Polled: s_client returns the instant it gets the fatal alert, which is when
+# Envoy logs the line — and that line still has to cross Envoy's stderr and the runtime's log pipe.
+poll_logs_for "NO_SHARED_GROUP" 10 \
+  || { echo "FAIL: expected NO_SHARED_GROUP in Envoy's connection log after the refused handshake"; echo "$LOGS" | tail -20; exit 1; }
 echo "[verify] operator signal -> NO_SHARED_GROUP present with connection:debug"
 
 # Pin the PREMISE of the triage instruction: at plain `warning` the signal is NOT there, which is why
-# the docs tell an operator to raise anything at all. Without this, a future Envoy that logged the
-# line at warning would leave the instruction (restart, drop live connections, have the client retry)
-# recommending cost for nothing, and every existing assertion would still pass.
+# the docs tell an operator to restart at all. Without this, a future Envoy that logged the line by
+# default would leave that instruction — restart, drop live connections, have the client retry —
+# recommending real cost for nothing, while every assertion above still passed.
 start_envoy --log-level warning
-
-# Prove a refusal actually happened before judging the logs. Without this, "no NO_SHARED_GROUP" is
-# indistinguishable from "nothing was ever refused", and the check guarding real operator cost —
-# restart, dropped connections, client retry — would fail open.
-cls2="$("$OPENSSL" s_client -connect "localhost:$PORT" -groups x25519 -tls1_3 </dev/null 2>&1 || true)"
-grep -qi "handshake failure" <<<"$cls2" \
-  || { echo "FAIL: the plain-warning run never refused a classical-only client, so the absence check below would prove nothing"; echo "$cls2" | tail -20; exit 1; }
-
-# Wait at least as long as the positive poll above. A shorter window would let the very propagation
-# delay this script exists to handle masquerade as "absent by design".
-quiet=""
-for _ in $(seq 1 10); do
-  quiet="$("$RUNTIME" logs "$NAME" 2>&1 || true)"
-  grep -q "NO_SHARED_GROUP" <<<"$quiet" \
-    && { echo "FAIL: NO_SHARED_GROUP appears at plain --log-level warning; the docs' premise that the level must be raised is stale"; exit 1; }
-  sleep 1
-done
-# Non-empty logs separate "quiet by design" from "logs unreadable": Envoy emits at least its
-# downstream-connection-limit warning at this level.
-[ -n "$quiet" ] \
-  || { echo "FAIL: the plain-warning container produced no logs at all — absence is indistinguishable from unreadable"; exit 1; }
+assert_classical_refused "plain-warning run"   # a refusal must actually happen, or absence proves nothing
+if poll_logs_for "NO_SHARED_GROUP" 10; then
+  echo "FAIL: NO_SHARED_GROUP appears at plain --log-level warning; the docs' premise that the level must be raised is stale"
+  grep -n "NO_SHARED_GROUP" <<<"$LOGS" | tail -5
+  exit 1
+fi
+# Separate "quiet by design" from "logs unreadable": the runtime's own error text would satisfy a
+# bare non-empty check, so the read must have SUCCEEDED and produced output. Envoy emits at least
+# its downstream-connection-limit warning at this level.
+{ [ "${LOGS_RC:-1}" -eq 0 ] && [ -n "$LOGS" ]; } \
+  || { echo "FAIL: could not read the plain-warning container's logs (rc=${LOGS_RC:-?}) — absence is indistinguishable from unreadable"; echo "$LOGS" | tail -5; exit 1; }
 echo "[verify] premise        -> absent at plain warning (so raising the level is required)"
 
 echo "[verify] OK: $(basename "$CONFIG") negotiates $GROUP, refuses classical-only clients, and reports NO_SHARED_GROUP only with connection:debug."
