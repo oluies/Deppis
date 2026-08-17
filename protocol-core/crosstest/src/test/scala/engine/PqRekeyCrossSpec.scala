@@ -140,6 +140,57 @@ class PqRekeyCrossSpec extends AnyFunSuite:
     assert(s.epochsFolded >= 1)
     assert(s.stepsSinceFold < PqRekey.StepCeiling, s"the cadence restarted after the fold: $s")
 
+  // =============================================================== lane arbitration (§3.1 a-ii)
+
+  test("MEASURED: the chunk lane wins heads AGAINST pending content (arbitration, not idle spend)"):
+    // The gap `PqRekeyModelSpec` records under "What this model does NOT reach": busy cases run both
+    // lanes together, but nothing proved `ChunkScheduler.decide` ever chose `Chunk` over queued
+    // content. `ctrlHeads` alone cannot say it — chunk heads are plentiful on an idle pair, where
+    // there is nothing to arbitrate against and the scheduler is spending free rounds (§3.1 a-i).
+    // `ctrlHeadsOverContent` counts only heads taken with a NON-EMPTY outbox, which is the a-ii
+    // policy actually being exercised.
+    val p = pair()
+    warm(p, PqRekey.IdleMinSteps, from = 1): Unit
+    // Keep BOTH sides' outboxes occupied for the whole rekey window, so nearly every head the
+    // scheduler opens is a genuine content-vs-chunk decision rather than a free idle round.
+    val gotA = mutable.ArrayBuffer.empty[String]
+    val gotB = mutable.ArrayBuffer.empty[String]
+    var round = 200
+    while round < 900 do
+      if round % 4 == 0 then
+        p.alice.sendMessage(p.pid, s"a-$round"): Unit
+        p.bob.sendMessage(p.pid, s"b-$round"): Unit
+      val (x, y) = run(p, round until round + 1)
+      gotA ++= x; gotB ++= y
+      round += 1
+
+    val sa = status(p.alice, p.pid)
+    val sb = status(p.bob, p.pid)
+    assert(
+      sa.epochsFolded >= 1,
+      s"the rekey must have run under load, else nothing arbitrated: $sa"
+    )
+    assert(sa.ctrlHeads > 0, s"the initiator must have opened chunk-lane heads: $sa")
+    assert(
+      sa.ctrlHeadsOverContent > 0,
+      s"the chunk lane never won a head against pending content — content starves the rekey: $sa"
+    )
+    assert(
+      sb.ctrlHeadsOverContent > 0,
+      s"the responder's chunk lane never won a head against pending content: $sb"
+    )
+    // The mirror property (a-ii cuts both ways): the rekey does not starve CONTENT either. Stated
+    // over the contended window itself, not over a fresh message afterwards — enqueueing every 4th
+    // round outruns what stop-and-wait can drain, so a trailing `warm` would be measuring the
+    // backlog this test deliberately built, not starvation.
+    assert(gotA.size > 50 && gotB.size > 50, s"content starved: ${gotA.size} / ${gotB.size}")
+    assert(gotA.distinct == gotA && gotB.distinct == gotB, "duplicate delivery under contention")
+    // And delivery kept going AFTER the fold committed, not only before it.
+    assert(
+      gotA.lastOption.exists(_ != gotA.head) && gotB.nonEmpty,
+      "content stopped flowing partway through the contended window"
+    )
+
   // =============================================================== the 256-byte frame (G2/FR-012)
 
   test(

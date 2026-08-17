@@ -595,14 +595,33 @@ phase changes the wire frame.
    > `DoubleRatchetModelSpec` §"continuous-PQ epoch rekey", with `PqRekeyModelSpec` as the
    > two-real-engines companion over a lossy network. End-to-end: `PqRekeyCrossSpec`.
    >
-   > **One clause of this phase is met only at the ratchet layer, not end-to-end:** "the post-fold
+   > **Lane arbitration is now pinned.** `RekeyStatus.ctrlHeads` / `ctrlHeadsOverContent` count
+   > chunk-lane ARQ heads at the `ChunkScheduler.decide` call site, and the second — heads taken
+   > while the outbox was non-empty — is the one that states the (a-ii) policy; chunk heads on an
+   > idle pair arbitrate against nothing. Asserted both ways in `PqRekeyCrossSpec` (the rekey is not
+   > starved by content, and content is not starved by the rekey).
+   >
+   > **One clause of this phase is met only at the ratchet layer, and stays there:** "the post-fold
    > root depends on the KEM secret" is proved with three negative controls in `EpochFoldCrossSpec`,
-   > but no *two-engine* assertion states it, because `RekeyStatus` exposes no root discriminator to
-   > assert on. Closing it honestly needs production observability, so it is tracked as a follow-up
-   > rather than counted here. Two related gaps are recorded in the same place: lane arbitration is
-   > unpinned (nothing proves `ChunkScheduler.decide` ever chose `Chunk` over pending content — see
-   > `PqRekeyModelSpec`'s "What this model does NOT reach"), and the timeout/stranding paths sit
-   > outside the model's round horizon and are covered example-wise in `PqRekeyCrossSpec` instead.
+   > but no *two-engine* assertion states it. This was attempted and reverted, and the reason is
+   > recorded so it is not re-attempted blindly:
+   >
+   > - A one-way root fingerprint seam cannot state it. An engine that folded a CONSTANT in place of
+   >   the KEM shared secret would still put both sides on matching roots and still pass the
+   >   confirmation tags (which are keyed on the real `ss`) — the silent no-op fold, which is exactly
+   >   the bug worth catching, is invisible to any equality-only observable.
+   > - Catching it needs either the counterfactual root — an injectable RNG, so one pairing can be
+   >   replayed with a different `ss` — or a seam exporting `ss`. An RNG-injection seam in a
+   >   messenger's crypto engine is a standing footgun and exporting `ss` is exporting key material;
+   >   both are worse trades than leaving the property where it is already proved.
+   > - Even the weaker "both sides hold the same root at the same chain index" is not observable
+   >   per-round: measured over a full rekey, the two sides' sampled `rootIndex` values are disjoint
+   >   (initiator odd, responder even), because a side can take a receive-DH and a send-DH step
+   >   inside one `tick` and advance the root twice. Agreement stays inferred from the pair
+   >   continuing to decrypt across the fold.
+   >
+   > The timeout/stranding paths likewise sit outside the model's round horizon and are covered
+   > example-wise in `PqRekeyCrossSpec` instead.
 
 5. **Phase 5 — Formal-analysis update.** Re-model `ratchet.spthy` / `ratchet-unbounded.spthy` with the
    epoch fold; author the **new** `pq_post_compromise_security` lemma under the breaks-CDH-but-not-KEM
