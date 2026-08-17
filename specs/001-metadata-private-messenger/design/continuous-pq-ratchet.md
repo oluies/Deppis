@@ -1,7 +1,8 @@
 # Design: Continuous post-quantum ratchet ("Option B") — chunked rekey inside the fixed frame
 
-**Status: PHASES 1–3 IMPLEMENTED (PRs #83, #84, #85). PHASE 5 FORMAL ANALYSIS DONE — NOT HUMAN-REVIEWED,
-so NO LABELING CHANGE: `DEV, NO METADATA PRIVACY` stands (§0, §6.3, §7).**
+**Status: ALL FIVE PHASES LANDED — 1–3 implemented (PRs #83, #84, #85), 4 tests + KATs (PR #86),
+5 formal analysis (PR #87). NOT HUMAN-REVIEWED, so NO LABELING CHANGE: `DEV, NO METADATA PRIVACY`
+stands (§0, §6.3, §7). The remaining gate is human security review, not more code.**
 
 > **Phase 5 outcome (see `formal-analysis/README.md` §5–§6 for the real prover output).** The epoch fold
 > is now modelled in `ratchet.spthy` + `ratchet-unbounded.spthy` (all 11 pre-existing lemmas still
@@ -588,6 +589,20 @@ phase changes the wire frame.
    extend `DoubleRatchetModelSpec` with rekey ops (fold atomicity, tamper-fails-closed, no divergence on
    lost/duplicated chunks); an end-to-end two-engine test that drives a full epoch fold over the store
    and shows messages before/after the fold decrypt and the post-fold root depends on the KEM secret.
+
+   > **As built (PR #86, plus the KAT half delivered early in #83 / extended in #85).** KATs:
+   > `EpochKdfCrossSpec` (JVM + Scala.js, incl. the edge and chained-fold vectors). Model spec:
+   > `DoubleRatchetModelSpec` §"continuous-PQ epoch rekey", with `PqRekeyModelSpec` as the
+   > two-real-engines companion over a lossy network. End-to-end: `PqRekeyCrossSpec`.
+   >
+   > **One clause of this phase is met only at the ratchet layer, not end-to-end:** "the post-fold
+   > root depends on the KEM secret" is proved with three negative controls in `EpochFoldCrossSpec`,
+   > but no *two-engine* assertion states it, because `RekeyStatus` exposes no root discriminator to
+   > assert on. Closing it honestly needs production observability, so it is tracked as a follow-up
+   > rather than counted here. Two related gaps are recorded in the same place: lane arbitration is
+   > unpinned (nothing proves `ChunkScheduler.decide` ever chose `Chunk` over pending content — see
+   > `PqRekeyModelSpec`'s "What this model does NOT reach"), and the timeout/stranding paths sit
+   > outside the model's round horizon and are covered example-wise in `PqRekeyCrossSpec` instead.
 
 5. **Phase 5 — Formal-analysis update.** Re-model `ratchet.spthy` / `ratchet-unbounded.spthy` with the
    epoch fold; author the **new** `pq_post_compromise_security` lemma under the breaks-CDH-but-not-KEM

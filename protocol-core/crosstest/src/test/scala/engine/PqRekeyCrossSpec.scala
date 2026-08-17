@@ -25,15 +25,34 @@ class PqRekeyCrossSpec extends AnyFunSuite:
   private val aLabel = "alice".getBytes("UTF-8")
   private val bLabel = "bob".getBytes("UTF-8")
 
-  private final case class Pair(be: FakeBackend, alice: Engine, bob: Engine, pid: String)
+  private final case class Pair(
+      be: FakeBackend,
+      alice: Engine,
+      bob: Engine,
+      pid: String,
+      na: PqTestKit.UnreliableTransport,
+      nb: PqTestKit.UnreliableTransport
+  ):
+    /** Swallow one live frame in `oneIn`, both directions (0 = clean). */
+    def lossy(oneIn: Int): Unit = { na.dropOneIn = oneIn; nb.dropOneIn = oneIn }
+    def lost: Int = na.lost + nb.lost
+    def repeats: Int = na.repeats + nb.repeats
 
   /** A CONFIRMED classical pairing over one backend. Classical on purpose: per design §1.2 it is the
     * pairing kind with the most to gain (the first completed fold is how it becomes PQ-hardened
-    * without re-pairing) and it is `addBuddy`'s default. */
+    * without re-pairing) and it is `addBuddy`'s default.
+    *
+    * Every pair is wired through an [[PqTestKit.UnreliableTransport]] left at `dropOneIn = 0`: a
+    * clean network is a pure pass-through plus counters, so this changes no other test's behaviour
+    * while giving the loss test below a seam that eats LIVE FRAMES rather than store entries. The
+    * RNG is fixed-seeded so a drop schedule is reproducible, and identical on JVM and Scala.js. */
   private def pair(): Pair =
     val be = FakeBackend()
-    val alice = Engine(Some(be.transport()), clientLabel = aLabel)
-    val bob = Engine(Some(be.transport()), clientLabel = bLabel)
+    val rng = new scala.util.Random(0x9e3779b9L)
+    val na = PqTestKit.UnreliableTransport(be.transport(), rng)
+    val nb = PqTestKit.UnreliableTransport(be.transport(), rng)
+    val alice = Engine(Some(na), clientLabel = aLabel)
+    val bob = Engine(Some(nb), clientLabel = bLabel)
     val oob = "oob-shared-secret".getBytes("UTF-8")
     val a = alice.addBuddy(oob, BuddyRole.Initiator, peerNotifyLabel = bLabel).toOption.get
     val b = bob.addBuddy(oob, BuddyRole.Responder, peerNotifyLabel = aLabel).toOption.get
@@ -41,7 +60,7 @@ class PqRekeyCrossSpec extends AnyFunSuite:
     alice.confirmBuddy(a.pairId, matched = true).toOption.get
     bob.confirmBuddy(b.pairId, matched = true).toOption.get
     alice.drainEvents(); bob.drainEvents()
-    Pair(be, alice, bob, a.pairId)
+    Pair(be, alice, bob, a.pairId, na, nb)
 
   /** Tick both engines through `rounds`, collecting each side's delivered plaintexts. */
   private def run(p: Pair, rounds: Range): (Seq[String], Seq[String]) =
@@ -458,30 +477,56 @@ class PqRekeyCrossSpec extends AnyFunSuite:
 
   // =============================================================== loss / duplication / reordering
 
-  test("no divergence when the store drops and duplicates frames during a rekey"):
+  test(
+    "no divergence when the network eats live frames during a rekey; delivery stays exactly-once"
+  ):
     // ARQ retransmit-until-acked plus the reassembler's dedup/order tolerance carry the transfer;
     // the fold must still land exactly once on each side, and the pair must still talk.
+    //
+    // Loss is injected by SWALLOWING A LIVE RETRIEVE (PqTestKit.UnreliableTransport), not by removing
+    // a store key. An earlier revision of this test did the latter and was almost fictional: the
+    // store keeps ~1,200 dead cover entries against ~1 live frame on an idle pair, so `dropped > 0`
+    // counted map removals rather than lost deliveries. See the UnreliableTransport class doc.
     val p = pair()
     warm(p, PqRekey.IdleMinSteps, from = 1): Unit
-    // Drop every 3rd delivery by consuming it behind the engines' backs, and re-present others.
-    var round = 200
-    var dropped = 0
-    while round < 900 do
-      p.alice.tick(round.toLong): Unit
-      p.bob.tick(round.toLong): Unit
-      p.alice.drainEvents(): Unit
-      p.bob.drainEvents(): Unit
-      if round % 3 == 0 && p.be.store.nonEmpty then
-        val k = p.be.store.keysIterator.next()
-        p.be.store.remove(k): Unit // a lost frame: ARQ must recover it
-        dropped += 1
-      round += 1
-    assert(dropped > 0, "the test must actually have dropped frames")
+    p.lossy(3) // swallow one live frame in 3, both directions
+    val (lossyA, lossyB) = run(p, 200 until 900)
+    p.lossy(0)
+
+    assert(p.lost > 0, s"the network must actually have eaten LIVE frames, ate ${p.lost}")
+    // Duplicates are ubiquitous BY CONSTRUCTION — stop-and-wait re-presents the unacked head under
+    // every round's token — so this only records that the duplicate-handling path (the ratchet's
+    // cached-retransmit `None`, then ARQ's `isNewMessage` dedup) is genuinely exercised. It is NOT
+    // the evidence for the "duplicates" half of the claim; the exactly-once assertion below is.
+    assert(p.repeats > 0, s"ARQ must have re-presented frames byte-identically, saw ${p.repeats}")
+
     val sa = status(p.alice, p.pid)
     val sb = status(p.bob, p.pid)
+    // ANTI-VACUITY: without this the two bounds below hold trivially at 0-and-0, and the test would
+    // pass on a build where loss simply prevented the rekey from ever running.
+    assert(
+      sa.epochsFolded >= 1,
+      s"a rekey must COMPLETE despite the loss, else this proves nothing: $sa"
+    )
+    assert(sb.epochsFolded >= 1, s"and on the responder too: $sb")
     assert(sa.ratchetFolds <= sa.epochsFolded + 1, "a fold is applied at most once per epoch")
     assert(sb.ratchetFolds <= sb.epochsFolded + 1)
+
+    // The duplicate property, stated where it is decisive: every re-presented frame was absorbed
+    // WITHOUT a second delivery to the application. A dedup regression shows up here, not in
+    // `repeats`.
+    assert(
+      lossyA.distinct == lossyA,
+      s"b->a delivered a duplicate through the lossy phase: $lossyA"
+    )
+    assert(
+      lossyB.distinct == lossyB,
+      s"a->b delivered a duplicate through the lossy phase: $lossyB"
+    )
+
     // The decisive property: whatever the loss did to the rekey, the two sides did not diverge.
     val (a, b) = warm(p, 3, from = 1000)
     assert(b.contains("a0"), s"a->b survived loss during rekey: $b")
     assert(a.contains("b0"), s"b->a survived loss during rekey: $a")
+    assert(a.distinct == a, s"b->a delivered a duplicate after recovery: $a")
+    assert(b.distinct == b, s"a->b delivered a duplicate after recovery: $b")

@@ -73,6 +73,90 @@ class EpochKdfCrossSpec extends AnyFunSuite:
       !EpochKdf.epochConfirmTagInitiator(ss).sameElements(EpochKdf.epochConfirmTagResponder(ss))
     )
 
+  // ============================================================ edge inputs + a CHAINED fold
+  // The vectors above pin one interior `(rk, ss)` pair. These widen the cross-platform contract to
+  // the two byte patterns where a platform difference is most likely to surface — all-zero and
+  // all-0xff — because 0xff is exactly where Scala.js's signed `Byte` bites (the sign-extension bug
+  // `PqTestKit.hex` exists to mask), and all-zero is what a wiped or unset buffer looks like, so a
+  // fold that silently accepted one would go unnoticed without a pinned digest. All generated on
+  // the JVM alongside the originals.
+
+  private val zero = fill(32, 0x00)
+  private val ones = fill(32, 0xff)
+
+  test("KAT: kdfEpoch at the edges — all-zero and all-0xff inputs (JVM<->JS)"):
+    assert(
+      toHex(EpochKdf.kdfEpoch(zero, zero)) ==
+        "a05252b48a7727360da9472a0784e748cc4534fe987a80232a08f4c97bff375c",
+      "all-zero epoch fold drifted"
+    )
+    assert(
+      toHex(EpochKdf.kdfEpoch(ones, ones)) ==
+        "c79dbcea4a200fc69d8626f68046fca0b4c04a60932f5e24a0c6c807013c481c",
+      "all-0xff epoch fold drifted — the likeliest place for a JS Byte sign-extension bug to land"
+    )
+
+  test("KAT: kdfEpoch's argument ORDER is pinned at the edges (rk,ss) != (ss,rk)"):
+    // Swapping the two 32-byte arguments must not be silently absorbed. Distinct pinned digests say
+    // so as a KAT rather than as a round-trip property, so a refactor that transposed them would
+    // fail HERE with a concrete expected value rather than somewhere downstream.
+    assert(
+      toHex(EpochKdf.kdfEpoch(zero, ones)) ==
+        "654d4ff9dcd918d90bf668201e3a440b15b825ee48995a253bf34bc37079e7fc",
+      "kdfEpoch(zero, ones) drifted"
+    )
+    assert(
+      toHex(EpochKdf.kdfEpoch(ones, zero)) ==
+        "be798a1eccff5aa9192bcb34c6b649b6b1bc734a7d2644fa6204664e38d1aa48",
+      "kdfEpoch(ones, zero) drifted"
+    )
+    assert(
+      !EpochKdf.kdfEpoch(zero, ones).sameElements(EpochKdf.kdfEpoch(ones, zero)),
+      "the two arguments are not interchangeable"
+    )
+
+  test("KAT: confirm tags at the edges — all-zero and all-0xff epoch secrets (JVM<->JS)"):
+    assert(
+      toHex(EpochKdf.epochConfirmTagInitiator(zero)) ==
+        "214a7880b2cb7b0e885bd95a0963a51408903f4832234b94feb107c280d4de71",
+      "all-zero /i tag drifted"
+    )
+    assert(
+      toHex(EpochKdf.epochConfirmTagResponder(zero)) ==
+        "846031c89f2a1c13bcc072eb1f817a2fbed4e403cc64e4af0c2261b11ecc563a",
+      "all-zero /r tag drifted"
+    )
+    assert(
+      toHex(EpochKdf.epochConfirmTagInitiator(ones)) ==
+        "527c249640bb863bc11847d17874248839babc94ccf860b88e0f989f6ad914b5",
+      "all-0xff /i tag drifted"
+    )
+    assert(
+      toHex(EpochKdf.epochConfirmTagResponder(ones)) ==
+        "6f27e60931882cf4a8a0b93337f3a7a15ea66db658a6ebb0ac61b5f737aa74be",
+      "all-0xff /r tag drifted"
+    )
+
+  test("KAT: a CHAINED two-epoch fold — the multi-epoch root is pinned across platforms"):
+    // A pair that folds twice must agree on the SECOND root as well, and nothing above pins it: the
+    // single-fold vectors would still pass if the second fold re-seeded from the ORIGINAL root
+    // instead of the folded one. This walks the same path `DoubleRatchet.advanceRoot` walks across
+    // two epochs (design §4.1, §8.2 "a later epoch composes onto the folded root").
+    val ss2 = fill(32, 0x33)
+    val fold1 = EpochKdf.kdfEpoch(rk, ss)
+    assert(
+      toHex(fold1) == "fce745321bfc4b4e647182f6f47b87a5ff6e73edd99972ee29b94968b9cd9df4",
+      "the first fold must still match the original single-fold vector"
+    )
+    assert(
+      toHex(EpochKdf.kdfEpoch(fold1, ss2)) ==
+        "0763353705a2b5842b2ab2673a8e384878e64b351c5605ea7003c074a7fe0a38",
+      "the second epoch's root drifted — a twice-folded JVM and JS pair would part company"
+    )
+    // And the composition is not idempotent or self-cancelling: epoch 2's root is its own value.
+    assert(!EpochKdf.kdfEpoch(fold1, ss2).sameElements(fold1))
+    assert(!EpochKdf.kdfEpoch(fold1, ss2).sameElements(rk))
+
   test("determinism: same (rk, ss) folds to the same root; tags are deterministic too"):
     assert(EpochKdf.kdfEpoch(rk, ss).sameElements(EpochKdf.kdfEpoch(rk, ss)))
     val rkEpoch = EpochKdf.kdfEpoch(rk, ss)
