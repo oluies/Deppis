@@ -67,3 +67,65 @@ trait ObsdHarness extends Assertions:
     finally
       proc.destroy()
       if !proc.waitFor(5, java.util.concurrent.TimeUnit.SECONDS) then proc.destroyForcibly()
+
+  protected def findPingd(): Option[File] =
+    sys.env
+      .get("PINGD_BIN")
+      .map(new File(_))
+      .filter(f => f.exists && f.canExecute)
+      .orElse {
+        Seq(
+          "oblivious-sidecar/target/debug/pingd",
+          "../oblivious-sidecar/target/debug/pingd",
+          "../../oblivious-sidecar/target/debug/pingd"
+        ).map(new File(_)).find(f => f.exists && f.canExecute)
+      }
+
+  /** The PRODUCTION topology: the PONG store and the PING notify front as two SEPARATE processes —
+    * `obsd` with `OBSD_SERVICES=store`, and `pingd`. Hands `body` a channel to each.
+    *
+    * This is what the split is for. Co-hosting both roles lets one process join "a write landed at
+    * round r" with "label L's bit was set at round r" and re-identify the receiver of every real
+    * frame, which no amount of obliviousness inside either service repairs. Two processes are
+    * NECESSARY but not SUFFICIENT — on one host under one operator the join is still trivial — so
+    * this harness proves the topology works, not that it is private. See `pingd.rs`. */
+  protected def withSplitFronts(notifyKey: Array[Byte], capacity: Int = 64)(
+      body: (ManagedChannel, ManagedChannel) => Unit
+  ): Unit =
+    val storeBin =
+      findObsd().getOrElse(cancel("obsd binary not found; run `cargo build --bin obsd`"))
+    val notifyBin =
+      findPingd().getOrElse(cancel("pingd binary not found; run `cargo build --bin pingd`"))
+    val storePort = freePort()
+    val notifyPort = freePort()
+
+    val storePb = new ProcessBuilder(storeBin.getAbsolutePath)
+    storePb.environment().put("OBSD_ADDR", s"127.0.0.1:$storePort")
+    storePb.environment().put("OBSD_CAPACITY", capacity.toString)
+    storePb.environment().put("OBSD_SERVICES", "store") // notify half OFF — pingd owns it
+    storePb.redirectOutput(ProcessBuilder.Redirect.INHERIT)
+    storePb.redirectError(ProcessBuilder.Redirect.INHERIT)
+
+    val notifyPb = new ProcessBuilder(notifyBin.getAbsolutePath)
+    notifyPb.environment().put("PINGD_ADDR", s"127.0.0.1:$notifyPort")
+    notifyPb.environment().put("PINGD_NOTIFY_KEY", hex(notifyKey))
+    notifyPb.redirectOutput(ProcessBuilder.Redirect.INHERIT)
+    notifyPb.redirectError(ProcessBuilder.Redirect.INHERIT)
+
+    val storeProc = storePb.start()
+    val notifyProc = notifyPb.start()
+    try
+      assert(awaitReady(storePort, 10000), "obsd (store-only) did not become ready")
+      assert(awaitReady(notifyPort, 10000), "pingd did not become ready")
+      val storeCh = ManagedChannelBuilder.forAddress("127.0.0.1", storePort).usePlaintext().build()
+      val notifyCh =
+        ManagedChannelBuilder.forAddress("127.0.0.1", notifyPort).usePlaintext().build()
+      try body(storeCh, notifyCh)
+      finally
+        storeCh.shutdownNow()
+        notifyCh.shutdownNow()
+    finally
+      Seq(storeProc, notifyProc).foreach { p =>
+        p.destroy()
+        if !p.waitFor(5, java.util.concurrent.TimeUnit.SECONDS) then p.destroyForcibly()
+      }

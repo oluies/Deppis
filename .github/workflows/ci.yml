@@ -211,10 +211,26 @@ jobs:
             ~/.ivy2/cache
           key: sbt-${{ runner.os }}-${{ hashFiles('build.sbt', 'project/build.properties', 'project/plugins.sbt', 'project/V.scala') }}
           restore-keys: sbt-${{ runner.os }}-
-      - name: Build obsd (the Rust sidecar binary)
-        run: cargo build --bin obsd --manifest-path oblivious-sidecar/Cargo.toml
-      - name: Run the cross-process integration test (Scala fronts ↔ obsd)
-        run: OBSD_BIN="$(pwd)/oblivious-sidecar/target/debug/obsd" sbt -batch -no-colors "transport/testOnly transport.SidecarIntegrationSpec"
+      # BOTH binaries: the split-topology tests run obsd (store-only) and pingd side by side. Without
+      # pingd those tests `cancel` rather than fail, which reads exactly like passing — so build it
+      # here or the trust-boundary coverage silently disappears from CI.
+      - name: Build obsd + pingd (the Rust sidecar binaries)
+        run: cargo build --bin obsd --bin pingd --manifest-path oblivious-sidecar/Cargo.toml
+      - name: Run the cross-process integration test (Scala fronts ↔ obsd, and the split front)
+        run: |
+          # pipefail: without it the pipe to `tee` swallows sbt's exit code and a failing test would
+          # reach the cancel-check below as a green step.
+          set -o pipefail
+          OBSD_BIN="$(pwd)/oblivious-sidecar/target/debug/obsd" \
+          PINGD_BIN="$(pwd)/oblivious-sidecar/target/debug/pingd" \
+          sbt -batch -no-colors "transport/testOnly transport.SidecarIntegrationSpec" 2>&1 | tee /tmp/split.out
+          # A cancelled test is not a passing test (the job comment above says why this matters).
+          if grep -q "canceled 0" /tmp/split.out; then
+            echo "all integration tests ran"
+          else
+            echo "::error::a SidecarIntegrationSpec test was CANCELED — a sidecar binary was not found"
+            exit 1
+          fi
 
   scalajs:
     name: Scala.js engine — cross-build + link (T019)
