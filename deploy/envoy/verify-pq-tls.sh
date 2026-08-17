@@ -58,7 +58,11 @@ echo "[verify] $IMAGE, config $(basename "$CONFIG"), port $PORT"
 # misleading message available — for a container that is perfectly healthy.
 envoy_state() {
   local out rc
-  out="$("$RUNTIME" inspect -f '{{.State.Running}}' "$NAME" 2>&1)"; rc=$?
+  # 2>/dev/null, NOT 2>&1: `out` is only ever pattern-matched, never printed, so merging stderr
+  # buys nothing and can only corrupt the parse — a deprecation notice or podman warning would make
+  # this "WARN...\ntrue", fall through to *, and report "could not tell" for a healthy container.
+  # The exit status alone already separates "inspect failed" from "inspect answered".
+  out="$("$RUNTIME" inspect -f '{{.State.Running}}' "$NAME" 2>/dev/null)"; rc=$?
   [ $rc -ne 0 ] && return 2
   case "$out" in
     true)  return 0 ;;
@@ -98,9 +102,15 @@ start_envoy() {
     "$OPENSSL" s_client -connect "localhost:$PORT" -groups "$GROUP" -tls1_3 </dev/null >/dev/null 2>&1 && return 0
     sleep 1
   done
-  # Up but never served. Returning 0 here would let every later assertion "pass" against a listener
-  # that never completed a single handshake.
-  echo "FAIL: Envoy is running but never completed a handshake with: $*"
+  # Timed out. Returning 0 here would let every later assertion "pass" against a listener that never
+  # completed a single handshake — but the verdict must match what was actually established, so
+  # re-check the state rather than asserting running-ness the rc=2 path never verified.
+  st=0; envoy_state || st=$?
+  case $st in
+    0) echo "FAIL: Envoy is running but never completed a handshake with: $*" ;;
+    1) echo "FAIL: Envoy did not start with: $*" ;;
+    *) echo "FAIL: could not determine the container's state (inspect kept failing) with: $*" ;;
+  esac
   read_logs | tail -20
   exit 1
 }
@@ -147,8 +157,16 @@ echo "[verify] classical-only -> refused (handshake failure)"
 # that renames or drops the string fails this check rather than silently leaving the triage
 # instruction wrong. Polled: s_client returns the instant it gets the fatal alert, which is when
 # Envoy logs the line — and that line still has to cross Envoy's stderr and the runtime's log pipe.
-poll_logs_for "NO_SHARED_GROUP" 10 \
-  || { echo "FAIL: expected NO_SHARED_GROUP in Envoy's connection log after the refused handshake"; echo "$LOGS" | tail -20; exit 1; }
+poll_logs_for "NO_SHARED_GROUP" 10 || {
+  # Same distinction the plain-warning run makes below: an unreadable log is not evidence that the
+  # operator signal is missing, and reporting it as such sends the reader after an Envoy change that
+  # never happened.
+  [ "${LOGS_RC:-1}" -eq 0 ] \
+    || { echo "FAIL: could not read the connection:debug container's logs (rc=${LOGS_RC:-?})"; echo "$LOGS" | tail -5; exit 1; }
+  echo "FAIL: expected NO_SHARED_GROUP in Envoy's connection log after the refused handshake"
+  echo "$LOGS" | tail -20
+  exit 1
+}
 echo "[verify] operator signal -> NO_SHARED_GROUP present with connection:debug"
 
 # Pin the PREMISE of the triage instruction: at plain `warning` the signal is NOT there, which is why
