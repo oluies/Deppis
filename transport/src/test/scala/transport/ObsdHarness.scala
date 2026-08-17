@@ -81,6 +81,37 @@ trait ObsdHarness extends Assertions:
         ).map(new File(_)).find(f => f.exists && f.canExecute)
       }
 
+  /** Spawn a sidecar binary with `env` and return its exit code, or `None` if it was still running
+    * after `waitMs` (i.e. it started successfully instead of refusing to).
+    *
+    * This exists because the FATAL WIRING had no automated test on either side — only the pure parse
+    * did. Reintroducing `hex_key_var(..).unwrap_or([0x01u8; 32])` in either `main` would leave every
+    * Rust and Scala test green, which is the same gap the `serve_notify` extraction was done to
+    * close. A spawn-and-check-the-exit-code case is the only place that wiring is observable. */
+  protected def exitCodeOf(bin: File, env: Map[String, String], waitMs: Long = 5000): Option[Int] =
+    val pb = new ProcessBuilder(bin.getAbsolutePath)
+    env.foreach { case (k, v) => pb.environment().put(k, v) }
+    pb.redirectOutput(ProcessBuilder.Redirect.INHERIT)
+    pb.redirectError(ProcessBuilder.Redirect.INHERIT)
+    val proc = pb.start()
+    try
+      if proc.waitFor(waitMs, java.util.concurrent.TimeUnit.MILLISECONDS) then
+        Some(proc.exitValue())
+      else None
+    finally
+      proc.destroy()
+      if !proc.waitFor(5, java.util.concurrent.TimeUnit.SECONDS) then proc.destroyForcibly()
+
+  /** True iff nothing accepts a TCP connection on `port` — the companion assertion to an exit code:
+    * a refusing binary must also not have left a listener behind. */
+  protected def nothingListening(port: Int): Boolean =
+    try
+      val s = new Socket()
+      s.connect(new InetSocketAddress("127.0.0.1", port), 300)
+      s.close()
+      false
+    catch case _: Throwable => true
+
   /** The PRODUCTION topology: the PONG store and the PING notify front as two SEPARATE processes —
     * `obsd` with `OBSD_SERVICES=store`, and `pingd`. Hands `body` a channel to each.
     *

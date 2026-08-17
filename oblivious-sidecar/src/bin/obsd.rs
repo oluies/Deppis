@@ -16,7 +16,7 @@
 //! why two processes are necessary but NOT sufficient (they must also end up in distinct attested
 //! trust domains, which is the rest of Phase C and is not delivered yet).
 
-use oblivious_sidecar::env::{hex_key_var, serve_notify, KeyVar};
+use oblivious_sidecar::env::{hex_key_osvar, serve_notify_osvar, KeyVar};
 use oblivious_sidecar::grpc::pb::oblivious_store_server::ObliviousStoreServer;
 use oblivious_sidecar::grpc::StoreService;
 use oblivious_sidecar::grpc_notify::pb::notification_service_server::NotificationServiceServer;
@@ -33,22 +33,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(4096usize);
-    // Fail closed on a malformed key for the same reason an unknown OBSD_SERVICES fails closed —
-    // see `env::hex_key_var`. Silently substituting the published dev key is the worse outcome.
-    let notify_key = match hex_key_var(std::env::var("OBSD_NOTIFY_KEY").ok().as_deref()) {
-        KeyVar::Parsed(k) => *k,
-        KeyVar::Unset => {
-            eprintln!("obsd: OBSD_NOTIFY_KEY unset — using the DEV key (not secret, dev only)");
-            [0x01u8; 32]
-        }
-        KeyVar::Malformed => {
-            eprintln!("obsd: OBSD_NOTIFY_KEY is set but not 64 hex chars — refusing to start");
-            std::process::exit(2);
-        }
-    };
-    // Parsed in the library so the fail-closed branch is unit-testable (`env::serve_notify`); it was
-    // previously inlined here and therefore had no test on either side.
-    let serve_notify_flag = match serve_notify(std::env::var("OBSD_SERVICES").ok().as_deref()) {
+    // Resolve the ROLE first. The notify key is only read inside the notify branch below, so the
+    // split deployment (`OBSD_SERVICES=store`) — the shape this binary exists to support — neither
+    // warns about a dev key it will never construct nor dies on a malformed key it will never touch.
+    // A dev-key warning that fires in the CORRECT deployment is a warning operators learn to ignore.
+    //
+    // Parsed in the library so the fail-closed branch is unit-testable (`env::serve_notify_osvar`);
+    // it was previously inlined here and therefore had no test on either side. `var_os`, not `var`:
+    // `var(..).ok()` maps a set-but-non-UTF-8 value to `None`, which would take the `Ok(true)`
+    // default and re-co-host the notify front instead of failing closed.
+    let serve_notify_flag = match serve_notify_osvar(std::env::var_os("OBSD_SERVICES").as_deref()) {
         Ok(v) => v,
         Err(msg) => {
             eprintln!("obsd: {msg}");
@@ -61,6 +55,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .add_service(ObliviousStoreServer::new(StoreService::new(store)));
 
     if serve_notify_flag {
+        // Fail closed on a malformed key for the same reason an unknown OBSD_SERVICES fails closed —
+        // see `env::hex_key_var`. Silently substituting the published dev key is the worse outcome.
+        let notify_key = match hex_key_osvar(std::env::var_os("OBSD_NOTIFY_KEY").as_deref()) {
+            KeyVar::Parsed(k) => k,
+            KeyVar::Unset => {
+                eprintln!("obsd: OBSD_NOTIFY_KEY unset — using the DEV key (not secret, dev only)");
+                [0x01u8; 32]
+            }
+            KeyVar::Malformed => {
+                eprintln!(
+                    "obsd: OBSD_NOTIFY_KEY is set but is not 64 hex chars — refusing to start"
+                );
+                std::process::exit(2);
+            }
+        };
         eprintln!(
             "obsd: serving ObliviousStore (capacity {capacity}) + NotificationService on {addr} — DEV, NO METADATA PRIVACY"
         );

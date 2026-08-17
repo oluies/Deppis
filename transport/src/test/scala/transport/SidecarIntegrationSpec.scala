@@ -132,3 +132,69 @@ class SidecarIntegrationSpec extends AnyFunSuite with ObsdHarness:
         s"expected UNIMPLEMENTED from the store process, got $digestCode"
       )
     }
+
+  // ============================================ the FATAL WIRING (exit 2, not a silent fallback)
+
+  test("fail closed: a malformed notify key REFUSES to start rather than using the dev key"):
+    // Only the pure parse (`env::hex_key_var`) was tested; the wiring that makes Malformed FATAL was
+    // not, on either side. Reintroducing `.unwrap_or([0x01u8; 32])` in either `main` would leave
+    // every Rust and Scala test green while the notify front silently ran on the key published in
+    // this repo — ACKing every signal, delivering no bits, and forgeable by anyone. This is the only
+    // test that would notice.
+    val pingd =
+      findPingd().getOrElse(cancel("pingd binary not found; run `cargo build --bin pingd`"))
+    val obsd = findObsd().getOrElse(cancel("obsd binary not found; run `cargo build --bin obsd`"))
+    val port = freePort()
+
+    for bad <- Seq("deadbeef", "ab" * 31 + "+f", "ab" * 31 + "zz", "") do
+      assert(
+        exitCodeOf(pingd, Map("PINGD_ADDR" -> s"127.0.0.1:$port", "PINGD_NOTIFY_KEY" -> bad))
+          .contains(2),
+        s"pingd must exit(2) on PINGD_NOTIFY_KEY=`$bad`, not fall back to the dev key"
+      )
+      assert(nothingListening(port), s"pingd left a listener behind after refusing `$bad`")
+
+    // obsd reads the notify key only when it actually serves notify, so this must be the `both` role.
+    assert(
+      exitCodeOf(
+        obsd,
+        Map(
+          "OBSD_ADDR" -> s"127.0.0.1:$port",
+          "OBSD_SERVICES" -> "both",
+          "OBSD_NOTIFY_KEY" -> ("ab" * 31 + "+f")
+        )
+      ).contains(2),
+      "obsd must exit(2) on a malformed OBSD_NOTIFY_KEY"
+    )
+
+  test("fail closed: an unknown OBSD_SERVICES REFUSES to start rather than defaulting to `both`"):
+    // The typo that matters. Defaulting `stor` to `both` re-co-hosts the notify front and silently
+    // reinstates the write-vs-bit correlation the split exists to remove.
+    val obsd = findObsd().getOrElse(cancel("obsd binary not found; run `cargo build --bin obsd`"))
+    val port = freePort()
+    for bad <- Seq("stor", "STORE", "store ", "notify", "") do
+      assert(
+        exitCodeOf(obsd, Map("OBSD_ADDR" -> s"127.0.0.1:$port", "OBSD_SERVICES" -> bad))
+          .contains(2),
+        s"obsd must exit(2) on OBSD_SERVICES=`$bad`, not default to `both`"
+      )
+      assert(nothingListening(port), s"obsd left a listener behind after refusing `$bad`")
+
+  test("the split role does NOT warn about, or die on, a notify key it never uses"):
+    // A dev-key warning that fires in the CORRECT deployment is a warning operators learn to ignore.
+    // With OBSD_SERVICES=store the notify key is never read, so even a malformed one must start
+    // cleanly — the key is not part of that role's configuration at all.
+    val obsd = findObsd().getOrElse(cancel("obsd binary not found; run `cargo build --bin obsd`"))
+    val port = freePort()
+    assert(
+      exitCodeOf(
+        obsd,
+        Map(
+          "OBSD_ADDR" -> s"127.0.0.1:$port",
+          "OBSD_SERVICES" -> "store",
+          "OBSD_NOTIFY_KEY" -> "not-a-key"
+        ),
+        waitMs = 2000
+      ).isEmpty,
+      "store-only obsd must ignore OBSD_NOTIFY_KEY entirely, not exit(2) on it"
+    )
