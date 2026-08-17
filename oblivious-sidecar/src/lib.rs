@@ -9,6 +9,7 @@
 //! of data, but the metadata-privacy *claim* still requires running inside the SGX enclave; this
 //! crate is the dev/testable component the Scala server calls, labeled accordingly.
 
+pub mod env;
 pub mod grpc;
 pub mod grpc_notify;
 pub mod notify;

@@ -96,8 +96,17 @@ trait ObsdHarness extends Assertions:
       findObsd().getOrElse(cancel("obsd binary not found; run `cargo build --bin obsd`"))
     val notifyBin =
       findPingd().getOrElse(cancel("pingd binary not found; run `cargo build --bin pingd`"))
-    val storePort = freePort()
-    val notifyPort = freePort()
+    // Both sockets are held open until BOTH ports are chosen. `freePort()` binds, reads, and closes
+    // before returning, so two sequential calls can hand back the SAME port — and that failure is
+    // silent in the worst way: obsd binds it first, pingd's `serve` dies with AddrInUse, yet
+    // `awaitReady(notifyPort)` still connects (to obsd), so the first split test fails confusingly
+    // and the second one PASSES for the wrong reason (obsd has no notify service either).
+    val (storePort, notifyPort) =
+      val a = new ServerSocket(0)
+      val b = new ServerSocket(0)
+      try (a.getLocalPort, b.getLocalPort)
+      finally { a.close(); b.close() }
+    assert(storePort != notifyPort, "port allocation collided")
 
     val storePb = new ProcessBuilder(storeBin.getAbsolutePath)
     storePb.environment().put("OBSD_ADDR", s"127.0.0.1:$storePort")
