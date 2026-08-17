@@ -77,19 +77,58 @@ class SidecarIntegrationSpec extends AnyFunSuite with ObsdHarness:
     // pingd also ran, a deployment could believe it had separated the roles while the store process
     // still saw every signal — the co-hosting leak, reinstated silently. `OBSD_SERVICES=store` must
     // actually remove the service, not merely stop advertising it.
+    //
+    // Asserted on the RAW STUB against the exact status code, not through
+    // `EnclaveNotificationClient`. That front collapses every NonFatal to `Left`, so an `isLeft`
+    // check is satisfied just as well by obsd having died right after `awaitReady`'s TCP connect, by
+    // a channel-shutdown race, or by a deadline — none of which say anything about which services
+    // are registered. UNIMPLEMENTED is the one code that means "this process does not serve that
+    // service".
     val key = Array.tabulate(Crypto.KeyBytes)(i => (i * 13).toByte)
     withSplitFronts(key) { (storeCh, _) =>
-      val onStore = new EnclaveNotificationClient(
-        npb.NotificationServiceGrpc.blockingStub(storeCh),
-        attested = false
-      )
+      val store =
+        new EnclaveObliviousStore(spb.ObliviousStoreGrpc.blockingStub(storeCh), attested = false)
+      // LIVENESS CONTROL first: prove the store process is up and answering on THIS channel, so a
+      // dead process fails the test here instead of passing it below.
+      val token = Array.tabulate(32)(i => (i * 5).toByte)
+      val wire = Frame.pad("liveness".getBytes).toOption.get
+      assert(store.write(token, wire).isRight, "the store process must be alive and serving PONG")
+      assert(store.read(token).toOption.flatten.exists(_.sameElements(wire)))
+
+      val rawNotify = npb.NotificationServiceGrpc.blockingStub(storeCh)
       val sealer = DevNotificationServer(key)
-      assert(
-        onStore.signal(1L, sealer.issueToken(1L, 5, "bob".getBytes)).isLeft,
-        "the store process answered a notify signal — the roles are still co-hosted"
+
+      def codeOf(call: => Any): io.grpc.Status.Code =
+        try
+          call
+          fail("the store process ANSWERED a notify RPC — the roles are still co-hosted")
+        catch case e: io.grpc.StatusRuntimeException => e.getStatus.getCode
+
+      val signalCode = codeOf(
+        rawNotify.signal(
+          npb.SignalRequest(
+            roundId = 1L,
+            sealedToken = com.google.protobuf.ByteString.copyFrom(
+              sealer.issueToken(1L, 5, "bob".getBytes)
+            )
+          )
+        )
       )
       assert(
-        onStore.fetchDigest(1L, "bob".getBytes).isLeft,
-        "the store process answered a digest fetch — the roles are still co-hosted"
+        signalCode == io.grpc.Status.Code.UNIMPLEMENTED,
+        s"expected UNIMPLEMENTED from the store process, got $signalCode"
+      )
+
+      val digestCode = codeOf(
+        rawNotify.fetchDigest(
+          npb.FetchDigestRequest(
+            roundId = 1L,
+            clientLabel = com.google.protobuf.ByteString.copyFrom("bob".getBytes)
+          )
+        )
+      )
+      assert(
+        digestCode == io.grpc.Status.Code.UNIMPLEMENTED,
+        s"expected UNIMPLEMENTED from the store process, got $digestCode"
       )
     }

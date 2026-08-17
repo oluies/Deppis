@@ -225,12 +225,19 @@ jobs:
           PINGD_BIN="$(pwd)/oblivious-sidecar/target/debug/pingd" \
           sbt -batch -no-colors "transport/testOnly transport.SidecarIntegrationSpec" 2>&1 | tee /tmp/split.out
           # A cancelled test is not a passing test (the job comment above says why this matters).
-          if grep -q "canceled 0" /tmp/split.out; then
-            echo "all integration tests ran"
-          else
+          if ! grep -q "canceled 0" /tmp/split.out; then
             echo "::error::a SidecarIntegrationSpec test was CANCELED — a sidecar binary was not found"
             exit 1
           fi
+          # ...and a VANISHED test is not a passing test either. `canceled 0` is printed just as
+          # happily by a suite with zero tests, so deleting the trust-boundary cases would read as
+          # green. Require the suite to have actually executed its full complement.
+          ran="$(sed -n 's/.*Total number of tests run: \([0-9]*\).*/\1/p' /tmp/split.out | tail -1)"
+          if [ -z "$ran" ] || [ "$ran" -lt 4 ]; then
+            echo "::error::SidecarIntegrationSpec ran ${ran:-no} tests, expected >= 4 (split-topology coverage missing)"
+            exit 1
+          fi
+          echo "all $ran integration tests ran"
 
   scalajs:
     name: Scala.js engine — cross-build + link (T019)
