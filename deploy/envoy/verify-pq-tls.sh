@@ -51,7 +51,8 @@ mkdir -p "$TMP/certs"
 echo "[verify] $IMAGE, config $(basename "$CONFIG"), port $PORT"
 "$RUNTIME" run --rm -d --name "$NAME" -p "$PORT:8443" \
   -v "$CONFIG:/etc/envoy/envoy.yaml:ro" -v "$TMP/certs:/etc/envoy/certs:ro" \
-  "$IMAGE" -c /etc/envoy/envoy.yaml --log-level warning >/dev/null
+  "$IMAGE" -c /etc/envoy/envoy.yaml --log-level warning \
+  --component-log-level connection:debug >/dev/null
 
 for _ in $(seq 1 30); do
   "$OPENSSL" s_client -connect "localhost:$PORT" -groups "$GROUP" -tls1_3 </dev/null >/dev/null 2>&1 && break
@@ -66,9 +67,22 @@ grep -q "ALPN protocol: h2" <<<"$pq" \
 echo "[verify] hybrid client  -> Negotiated TLS1.3 group: $GROUP, ALPN h2"
 
 # Hybrid-only means no fallback: a classical-only client must be refused, not quietly downgraded.
+# Asserted on the exact wording rather than a loose "alert", because the config comments cite
+# "handshake failure" specifically as the reproduced negative — a broader grep would let a passing
+# run stand behind wording that was never observed.
 cls="$("$OPENSSL" s_client -connect "localhost:$PORT" -groups x25519 -tls1_3 </dev/null 2>&1 || true)"
-grep -qi "handshake failure\|alert" <<<"$cls" \
-  || { echo "FAIL: classical-only client was NOT refused — the no-fallback posture is broken"; echo "$cls" | tail -20; exit 1; }
+grep -qi "handshake failure" <<<"$cls" \
+  || { echo "FAIL: classical-only client was NOT refused with a handshake failure"; echo "$cls" | tail -20; exit 1; }
 echo "[verify] classical-only -> refused (handshake failure)"
 
-echo "[verify] OK: $(basename "$CONFIG") negotiates $GROUP and refuses classical-only clients."
+# The operator-facing triage signal documented in envoy-pq-tls.yaml. Asserted here for the same
+# reason as everything else in this script: otherwise an Envoy bump that renames or drops the string
+# leaves the triage instruction silently wrong while this check stays green. `connection:debug` is
+# the narrowest component carrying it — see the header comment in the config about NOT raising the
+# global level on a metadata-private listener.
+logs="$("$RUNTIME" logs "$NAME" 2>&1 || true)"
+grep -q "NO_SHARED_GROUP" <<<"$logs" \
+  || { echo "FAIL: expected NO_SHARED_GROUP in Envoy's connection log after the refused handshake"; echo "$logs" | tail -20; exit 1; }
+echo "[verify] operator signal -> NO_SHARED_GROUP present in Envoy's connection log"
+
+echo "[verify] OK: $(basename "$CONFIG") negotiates $GROUP, refuses classical-only clients, and reports NO_SHARED_GROUP to the operator."

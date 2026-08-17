@@ -19,17 +19,35 @@
 # This is not a soft degradation — it is a failed TLS handshake, which browsers surface as a generic
 # connection-security error. (Safari's wording is "can't establish a secure connection", but that was
 # observed against a PLAINTEXT listener, not a real group mismatch — see the Safari row below. The
-# reproduced group-mismatch negative is openssl's "handshake failure" in verify-pq-tls.sh.)
+# reproduced group-mismatch negative is openssl's "handshake failure", asserted in verify-pq-tls.sh.)
 #
 # Nothing the USER sees names the key-agreement group, so a report of this reads like an outage or a
-# certificate problem. The OPERATOR does have a direct signal, and it is the cheapest confirmation of
-# the diagnosis — Envoy logs the reason per connection at debug level:
+# certificate problem. The OPERATOR can get the reason directly — Envoy logs it per connection:
 #
 #     TLS_error:|268435722:SSL routines:OPENSSL_internal:NO_SHARED_GROUP:TLS_error_end
 #
-# (verified by pointing a classical-only client at this config; it does not appear at the default
-# warning level, so raise the log level when triaging.) Check that, then compare this listener's
-# ecdh_curves against the client.
+# Two things about getting it, both of which matter:
+#
+#   * There is NO admin listener in this config, so there is no runtime `POST /logging`. The level
+#     can only be raised by RESTARTING Envoy — which drops every live connection and captures
+#     nothing about the handshake that prompted the report, so the affected client must retry after
+#     the restart.
+#
+#   * Do NOT raise the global level to debug. This is the user-facing TLS terminator of a
+#     metadata-private messenger, and Envoy debug logging is not scoped to TLS: it writes
+#     per-connection peer addresses and stream/header detail to disk — the linkable metadata this
+#     listener exists to protect, and a stronger cross-connection handle than the session tickets
+#     disabled below. Use the narrowest component that carries the signal:
+#
+#         --log-level warning --component-log-level connection:debug
+#
+#     Measured against this config: 4 log lines, versus 396 for global debug, with the same
+#     NO_SHARED_GROUP line. Even so, that line contains the client's address — keep the window
+#     short and discard the logs afterwards.
+#
+# Then compare this listener's ecdh_curves against the client. verify-pq-tls.sh asserts the
+# NO_SHARED_GROUP string, so an Envoy bump that changes or drops it fails the check instead of
+# silently invalidating this instruction.
 #
 # THAT COST IS ACCEPTED, DELIBERATELY. Deppis is a new service with no installed base, so there is no
 # legacy client population to strand — the posture is free here in a way it would not be for an
