@@ -60,19 +60,23 @@ start_envoy() {
     -v "$CONFIG:/etc/envoy/envoy.yaml:ro" -v "$TMP/certs:/etc/envoy/certs:ro" \
     "$IMAGE" -c /etc/envoy/envoy.yaml "$@" >/dev/null
   for _ in $(seq 1 30); do
+    # Checked every iteration, not only after the loop. Envoy exits at boot on a rejected flag — an
+    # unknown --component-log-level id, say — within about a second, and that is exactly the case
+    # this diagnostic was added for; reporting it only after a 30s timeout makes the script slowest
+    # in the failure mode it exists to make fast and accurate.
+    if [ "$("$RUNTIME" inspect -f '{{.State.Running}}' "$NAME" 2>/dev/null)" != "true" ]; then
+      echo "FAIL: Envoy did not start with: $*"
+      "$RUNTIME" logs "$NAME" 2>&1 | tail -20
+      exit 1
+    fi
     "$OPENSSL" s_client -connect "localhost:$PORT" -groups "$GROUP" -tls1_3 </dev/null >/dev/null 2>&1 && return 0
     sleep 1
   done
-  # Distinguish "Envoy never started" from "Envoy started but would not negotiate". Without this the
-  # readiness loop just times out and the next assertion blames ecdh_curves or the image pin — and
-  # the likeliest cause is actually a rejected flag (Envoy exits at boot on an unknown component id,
-  # so --component-log-level is exactly the argument whose breakage would be misattributed).
-  if [ "$("$RUNTIME" inspect -f '{{.State.Running}}' "$NAME" 2>/dev/null)" != "true" ]; then
-    echo "FAIL: Envoy did not start with: $*"
-    "$RUNTIME" logs "$NAME" 2>&1 | tail -20
-    exit 1
-  fi
-  return 0
+  # Up but never served. Returning 0 here would let every later assertion "pass" against a listener
+  # that never completed a single handshake.
+  echo "FAIL: Envoy is running but never completed a handshake with: $*"
+  "$RUNTIME" logs "$NAME" 2>&1 | tail -20
+  exit 1
 }
 
 start_envoy --log-level warning --component-log-level connection:debug
@@ -115,11 +119,27 @@ echo "[verify] operator signal -> NO_SHARED_GROUP present with connection:debug"
 # line at warning would leave the instruction (restart, drop live connections, have the client retry)
 # recommending cost for nothing, and every existing assertion would still pass.
 start_envoy --log-level warning
-"$OPENSSL" s_client -connect "localhost:$PORT" -groups x25519 -tls1_3 </dev/null >/dev/null 2>&1 || true
-sleep 3
-quiet="$("$RUNTIME" logs "$NAME" 2>&1 || true)"
-grep -q "NO_SHARED_GROUP" <<<"$quiet" \
-  && { echo "FAIL: NO_SHARED_GROUP appears at plain --log-level warning; the docs' premise that the level must be raised is stale"; exit 1; }
+
+# Prove a refusal actually happened before judging the logs. Without this, "no NO_SHARED_GROUP" is
+# indistinguishable from "nothing was ever refused", and the check guarding real operator cost —
+# restart, dropped connections, client retry — would fail open.
+cls2="$("$OPENSSL" s_client -connect "localhost:$PORT" -groups x25519 -tls1_3 </dev/null 2>&1 || true)"
+grep -qi "handshake failure" <<<"$cls2" \
+  || { echo "FAIL: the plain-warning run never refused a classical-only client, so the absence check below would prove nothing"; echo "$cls2" | tail -20; exit 1; }
+
+# Wait at least as long as the positive poll above. A shorter window would let the very propagation
+# delay this script exists to handle masquerade as "absent by design".
+quiet=""
+for _ in $(seq 1 10); do
+  quiet="$("$RUNTIME" logs "$NAME" 2>&1 || true)"
+  grep -q "NO_SHARED_GROUP" <<<"$quiet" \
+    && { echo "FAIL: NO_SHARED_GROUP appears at plain --log-level warning; the docs' premise that the level must be raised is stale"; exit 1; }
+  sleep 1
+done
+# Non-empty logs separate "quiet by design" from "logs unreadable": Envoy emits at least its
+# downstream-connection-limit warning at this level.
+[ -n "$quiet" ] \
+  || { echo "FAIL: the plain-warning container produced no logs at all — absence is indistinguishable from unreadable"; exit 1; }
 echo "[verify] premise        -> absent at plain warning (so raising the level is required)"
 
 echo "[verify] OK: $(basename "$CONFIG") negotiates $GROUP, refuses classical-only clients, and reports NO_SHARED_GROUP only with connection:debug."
