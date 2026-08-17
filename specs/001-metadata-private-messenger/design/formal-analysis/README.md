@@ -415,6 +415,21 @@ contents. Length equality is an input to that, not an output. A rekey-chunk fram
 indistinguishable from a content frame follows from the same argument **only because** both are 256 B
 and both seal an opaque inner block — and the first of those two facts lives in the code, not the model.
 
+**The out-of-model assumption is now mechanically pinned — and checking it found a leak.**
+`FrameUniformityCrossSpec` (in `crosstest`, so it runs on **both** the JVM and the Scala.js build that
+ships to browsers and iOS — the JVM-only `RoundTransportSpec` / `AnonymitySpec` left the client engine
+unchecked) asserts the per-round budget, the 256-byte size, full-length non-recurrent tokens, and the
+absence of any constant byte offset. This does **not** upgrade Q3 from "argued" to "verified": a test is
+not a proof, and it says nothing about timing or volume over time. It stops the assumption drifting from
+the code silently — and it immediately caught something the count/size assertions could not:
+
+> A **retransmitted** real frame is byte-identical across rounds (stop-and-wait re-presents the cached
+> wire so the ratchet does not advance per retransmit), while cover frames are freshly random. Measured
+> over 40 rounds: chatting = 80 writes / **22 distinct**; idle = 80 writes / **80 distinct**. Counting
+> repeated blobs separates active from idle. The observational-equivalence result is unaffected — it is
+> per-frame and assumes indistinguishable frames — but this is exactly an instance of the assumption it
+> rests on failing in the code. Recorded as a §9 Q3 residual; see `ARCHITECTURE.md` §6.
+
 ### 6.2 The reduction (argued, grounded in the engine)
 
 The burst is unobservable **iff** rekey frames obey the same per-round budget as content frames. The

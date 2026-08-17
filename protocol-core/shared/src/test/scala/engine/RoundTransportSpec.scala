@@ -317,7 +317,12 @@ class RoundTransportSpec extends AnyFunSuite:
     t.acceptSubmit = true; e.tick(4)
     assert(t.store.size == 2)
 
-  test("active and idle STORE-WRITE traces are indistinguishable (T041 send path)"):
+  test("active and idle STORE-WRITE traces match in SHAPE — count, frame size, token size (T041)"):
+    // Renamed from "...are indistinguishable", which claimed more than it checks. This compares
+    // counts and lengths only. The frame BYTES are NOT indistinguishable between the two worlds: a
+    // retransmitted head is re-presented byte-identically under a fresh token, while cover frames
+    // are fresh every round, so duplicate-blob counting separates active from idle. Measured and
+    // recorded in `FrameUniformityCrossSpec` ("RECORDED GAP") and in design §9 Q3.
     val rounds = 20
     val active = FakeTransport(); val idle = FakeTransport()
     val (ea, pid) = confirmedEngine(active, BuddyRole.Initiator)
