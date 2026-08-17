@@ -63,12 +63,15 @@ echoed `round_id` + `grpc-status: 0` come back through Envoy. It cleans up on ex
     --log-level warning --component-log-level connection:debug
     ```
 
-    Measured on this config: **4 log lines vs 396** for global debug, same signal. Even then the
-    line carries the client's address — keep the window short and discard the logs.
+    Component-scoped output is a small fraction of global debug with the same signal — **4 log
+    lines vs 396**, measured on v1.38.3 specifically, so treat the figures as indicative rather
+    than current. Even then the line carries the client's address: keep the window short and
+    discard the logs.
 
-  Then compare this listener's `ecdh_curves` against the client. `verify-pq-tls.sh` asserts the
-  `NO_SHARED_GROUP` string, so an Envoy bump that changes it fails the check rather than silently
-  invalidating this guidance.
+  Then compare this listener's `ecdh_curves` against the client. `verify-pq-tls.sh` asserts **both
+  halves** — that `NO_SHARED_GROUP` appears with `connection:debug`, and that it does *not* appear
+  at plain `warning` — so an Envoy bump that renames the string, or starts logging it by default,
+  fails the check rather than silently leaving this guidance wrong or recommending cost for nothing.
 
   **That cost is accepted.** Deppis is a new service with no installed base, so there is no legacy
   client population to strand. If such a client ever has to be supported, the answer is an **adapter

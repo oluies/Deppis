@@ -49,15 +49,33 @@ mkdir -p "$TMP/certs"
   -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost" >/dev/null 2>&1
 
 echo "[verify] $IMAGE, config $(basename "$CONFIG"), port $PORT"
-"$RUNTIME" run --rm -d --name "$NAME" -p "$PORT:8443" \
-  -v "$CONFIG:/etc/envoy/envoy.yaml:ro" -v "$TMP/certs:/etc/envoy/certs:ro" \
-  "$IMAGE" -c /etc/envoy/envoy.yaml --log-level warning \
-  --component-log-level connection:debug >/dev/null
 
-for _ in $(seq 1 30); do
-  "$OPENSSL" s_client -connect "localhost:$PORT" -groups "$GROUP" -tls1_3 </dev/null >/dev/null 2>&1 && break
-  sleep 1
-done
+# Start Envoy with the given extra flags. Kept as a function because the premise of the triage
+# instruction — that plain `warning` does NOT carry the signal — needs a second run to pin.
+start_envoy() {
+  "$RUNTIME" rm -f "$NAME" >/dev/null 2>&1 || true
+  # NOT --rm: on a boot failure the container must survive long enough to read its logs, which is
+  # the whole point of the diagnostic below. The EXIT trap removes it either way.
+  "$RUNTIME" run -d --name "$NAME" -p "$PORT:8443" \
+    -v "$CONFIG:/etc/envoy/envoy.yaml:ro" -v "$TMP/certs:/etc/envoy/certs:ro" \
+    "$IMAGE" -c /etc/envoy/envoy.yaml "$@" >/dev/null
+  for _ in $(seq 1 30); do
+    "$OPENSSL" s_client -connect "localhost:$PORT" -groups "$GROUP" -tls1_3 </dev/null >/dev/null 2>&1 && return 0
+    sleep 1
+  done
+  # Distinguish "Envoy never started" from "Envoy started but would not negotiate". Without this the
+  # readiness loop just times out and the next assertion blames ecdh_curves or the image pin — and
+  # the likeliest cause is actually a rejected flag (Envoy exits at boot on an unknown component id,
+  # so --component-log-level is exactly the argument whose breakage would be misattributed).
+  if [ "$("$RUNTIME" inspect -f '{{.State.Running}}' "$NAME" 2>/dev/null)" != "true" ]; then
+    echo "FAIL: Envoy did not start with: $*"
+    "$RUNTIME" logs "$NAME" 2>&1 | tail -20
+    exit 1
+  fi
+  return 0
+}
+
+start_envoy --log-level warning --component-log-level connection:debug
 
 pq="$("$OPENSSL" s_client -connect "localhost:$PORT" -groups "$GROUP" -tls1_3 -alpn h2 </dev/null 2>&1 || true)"
 grep -q "Negotiated TLS1.3 group: $GROUP" <<<"$pq" \
@@ -77,12 +95,31 @@ echo "[verify] classical-only -> refused (handshake failure)"
 
 # The operator-facing triage signal documented in envoy-pq-tls.yaml. Asserted here for the same
 # reason as everything else in this script: otherwise an Envoy bump that renames or drops the string
-# leaves the triage instruction silently wrong while this check stays green. `connection:debug` is
-# the narrowest component carrying it — see the header comment in the config about NOT raising the
-# global level on a metadata-private listener.
-logs="$("$RUNTIME" logs "$NAME" 2>&1 || true)"
-grep -q "NO_SHARED_GROUP" <<<"$logs" \
+# leaves the triage instruction silently wrong while this check stays green.
+#
+# POLLED, not read once: s_client returns as soon as it gets the fatal alert, which is the same
+# moment Envoy logs the line — which then still has to cross Envoy's stderr and the runtime's log
+# pipe before `logs` can see it. A single read races that and would flake on a working config.
+found=""
+for _ in $(seq 1 10); do
+  logs="$("$RUNTIME" logs "$NAME" 2>&1 || true)"
+  if grep -q "NO_SHARED_GROUP" <<<"$logs"; then found=1; break; fi
+  sleep 1
+done
+[ -n "$found" ] \
   || { echo "FAIL: expected NO_SHARED_GROUP in Envoy's connection log after the refused handshake"; echo "$logs" | tail -20; exit 1; }
-echo "[verify] operator signal -> NO_SHARED_GROUP present in Envoy's connection log"
+echo "[verify] operator signal -> NO_SHARED_GROUP present with connection:debug"
 
-echo "[verify] OK: $(basename "$CONFIG") negotiates $GROUP, refuses classical-only clients, and reports NO_SHARED_GROUP to the operator."
+# Pin the PREMISE of the triage instruction: at plain `warning` the signal is NOT there, which is why
+# the docs tell an operator to raise anything at all. Without this, a future Envoy that logged the
+# line at warning would leave the instruction (restart, drop live connections, have the client retry)
+# recommending cost for nothing, and every existing assertion would still pass.
+start_envoy --log-level warning
+"$OPENSSL" s_client -connect "localhost:$PORT" -groups x25519 -tls1_3 </dev/null >/dev/null 2>&1 || true
+sleep 3
+quiet="$("$RUNTIME" logs "$NAME" 2>&1 || true)"
+grep -q "NO_SHARED_GROUP" <<<"$quiet" \
+  && { echo "FAIL: NO_SHARED_GROUP appears at plain --log-level warning; the docs' premise that the level must be raised is stale"; exit 1; }
+echo "[verify] premise        -> absent at plain warning (so raising the level is required)"
+
+echo "[verify] OK: $(basename "$CONFIG") negotiates $GROUP, refuses classical-only clients, and reports NO_SHARED_GROUP only with connection:debug."
