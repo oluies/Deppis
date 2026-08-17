@@ -41,13 +41,15 @@
 #
 #         --log-level warning --component-log-level connection:debug
 #
-#     Measured against this config: 4 log lines, versus 396 for global debug, with the same
-#     NO_SHARED_GROUP line. Even so, that line contains the client's address — keep the window
-#     short and discard the logs afterwards.
+#     Component-scoped output is a small fraction of global debug and carries the same signal —
+#     4 log lines versus 396 measured on v1.38.3 specifically, so treat the figures as indicative
+#     rather than current. Even so, that line contains the client's address: keep the window short
+#     and discard the logs afterwards.
 #
-# Then compare this listener's ecdh_curves against the client. verify-pq-tls.sh asserts the
-# NO_SHARED_GROUP string, so an Envoy bump that changes or drops it fails the check instead of
-# silently invalidating this instruction.
+# Then compare this listener's ecdh_curves against the client. verify-pq-tls.sh asserts BOTH halves
+# of the above — that NO_SHARED_GROUP appears with connection:debug, and that it does NOT appear at
+# plain warning — so an Envoy bump that renames the string, or starts logging it by default, fails
+# the check instead of silently leaving this instruction wrong or recommending cost for nothing.
 #
 # THAT COST IS ACCEPTED, DELIBERATELY. Deppis is a new service with no installed base, so there is no
 # legacy client population to strand — the posture is free here in a way it would not be for an
