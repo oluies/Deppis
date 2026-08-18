@@ -81,36 +81,74 @@ trait ObsdHarness extends Assertions:
         ).map(new File(_)).find(f => f.exists && f.canExecute)
       }
 
-  /** Spawn a sidecar binary with `env` and return its exit code, or `None` if it was still running
-    * after `waitMs` (i.e. it started successfully instead of refusing to).
+  /** Spawn a sidecar binary with `env`, capture its stderr, and report how it behaved: the exit code
+    * if it terminated within `waitMs`, or `None` if it was still running (i.e. it started rather than
+    * refusing to). Returns `(exitCode, stderr)`.
     *
     * This exists because the FATAL WIRING had no automated test on either side — only the pure parse
     * did. Reintroducing `hex_key_var(..).unwrap_or([0x01u8; 32])` in either `main` would leave every
     * Rust and Scala test green, which is the same gap the `serve_notify` extraction was done to
-    * close. A spawn-and-check-the-exit-code case is the only place that wiring is observable. */
-  protected def exitCodeOf(bin: File, env: Map[String, String], waitMs: Long = 5000): Option[Int] =
+    * close. A spawn-and-check-the-exit-code case is the only place that wiring is observable.
+    *
+    * stderr is CAPTURED to a temp file rather than inherited. An earlier revision inherited both
+    * streams, which made it impossible to assert on the child's output at all — so the test named
+    * "does NOT warn about ... a key it never uses" asserted only the "does not die" half, and
+    * hoisting the dev-key `eprintln!` back above the role check would have reinstated the spurious
+    * warning with every test still green. */
+  protected def runSidecar(
+      bin: File,
+      env: Map[String, String],
+      waitMs: Long = 5000
+  ): (Option[Int], String) =
+    val errFile = java.io.File.createTempFile("sidecar-stderr", ".log")
+    errFile.deleteOnExit()
     val pb = new ProcessBuilder(bin.getAbsolutePath)
     env.foreach { case (k, v) => pb.environment().put(k, v) }
     pb.redirectOutput(ProcessBuilder.Redirect.INHERIT)
-    pb.redirectError(ProcessBuilder.Redirect.INHERIT)
+    pb.redirectError(ProcessBuilder.Redirect.to(errFile))
     val proc = pb.start()
     try
-      if proc.waitFor(waitMs, java.util.concurrent.TimeUnit.MILLISECONDS) then
-        Some(proc.exitValue())
-      else None
+      val code =
+        if proc.waitFor(waitMs, java.util.concurrent.TimeUnit.MILLISECONDS) then
+          Some(proc.exitValue())
+        else None
+      (code, new String(java.nio.file.Files.readAllBytes(errFile.toPath), "UTF-8"))
     finally
       proc.destroy()
       if !proc.waitFor(5, java.util.concurrent.TimeUnit.SECONDS) then proc.destroyForcibly()
+      errFile.delete(): Unit
 
-  /** True iff nothing accepts a TCP connection on `port` — the companion assertion to an exit code:
-    * a refusing binary must also not have left a listener behind. */
-  protected def nothingListening(port: Int): Boolean =
+  /** [[runSidecar]] when only the exit code matters. */
+  protected def exitCodeOf(bin: File, env: Map[String, String], waitMs: Long = 5000): Option[Int] =
+    runSidecar(bin, env, waitMs)._1
+
+  /** Spawn `bin`, wait for it to ACCEPT CONNECTIONS on `port`, and run `body` with its stderr so far.
+    * Fails if it exits or never binds — "did not exit within N seconds" is not evidence that a server
+    * came up, since it is equally satisfied by a process that hung before binding.
+    *
+    * NOTE there is deliberately no "nothing is listening after it refused to start" assertion
+    * anywhere in this harness. A terminated process cannot hold a listening socket, so such a check
+    * is tautological given the exit code, and its only reachable failure is an unrelated process
+    * grabbing the ephemeral port (`freePort` closes before returning) — a pure flake that would then
+    * report the false accusation "the binary left a listener behind". */
+  protected def withRunningSidecar(bin: File, env: Map[String, String], port: Int)(
+      body: String => Unit
+  ): Unit =
+    val errFile = java.io.File.createTempFile("sidecar-stderr", ".log")
+    errFile.deleteOnExit()
+    val pb = new ProcessBuilder(bin.getAbsolutePath)
+    env.foreach { case (k, v) => pb.environment().put(k, v) }
+    pb.redirectOutput(ProcessBuilder.Redirect.INHERIT)
+    pb.redirectError(ProcessBuilder.Redirect.to(errFile))
+    val proc = pb.start()
     try
-      val s = new Socket()
-      s.connect(new InetSocketAddress("127.0.0.1", port), 300)
-      s.close()
-      false
-    catch case _: Throwable => true
+      assert(awaitReady(port, 8000), s"${bin.getName} never accepted a connection on $port")
+      assert(proc.isAlive, s"${bin.getName} exited instead of serving")
+      body(new String(java.nio.file.Files.readAllBytes(errFile.toPath), "UTF-8"))
+    finally
+      proc.destroy()
+      if !proc.waitFor(5, java.util.concurrent.TimeUnit.SECONDS) then proc.destroyForcibly()
+      errFile.delete(): Unit
 
   /** The PRODUCTION topology: the PONG store and the PING notify front as two SEPARATE processes —
     * `obsd` with `OBSD_SERVICES=store`, and `pingd`. Hands `body` a channel to each.
