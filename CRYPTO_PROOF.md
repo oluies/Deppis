@@ -16,6 +16,10 @@ detail in its [README](specs/001-metadata-private-messenger/design/formal-analys
   result, not decoration**: `ratchet-pq-epoch-nofold.spthy` (negative control — **must falsify**) and
   `ratchet-pq-epoch-hijack.spthy` (scope control — finds the active post-compromise hijack)
 - Executable implementation model — `engine.DoubleRatchetModelSpec` (ScalaCheck, in CI)
+- **The unlinkability proof's out-of-model assumption** — `engine.FrameUniformityCrossSpec` (JVM +
+  Scala.js, in CI): the frame-size/per-round-budget invariant Tamarin cannot express. Not a proof; it
+  keeps the assumption from drifting away from the code, and it is where the retransmit-byte-identity
+  leak below was found
 - Design specs — [`design/dh-ratchet.md`](specs/001-metadata-private-messenger/design/dh-ratchet.md),
   [`design/continuous-pq-ratchet.md`](specs/001-metadata-private-messenger/design/continuous-pq-ratchet.md)
 
@@ -31,6 +35,8 @@ detail in its [README](specs/001-metadata-private-messenger/design/formal-analys
 | **Header unlinkability** (store can't link a chain's frames) | Tamarin observational equivalence (`--diff`) + negative control | ✅ **verified (2315 steps)** — **per-frame only** (see limits) |
 | **PQ post-compromise security** after an epoch fold, vs a **CRQC** | Tamarin, new model + **no-fold negative control** | ✅ **verified (8 steps), non-vacuous** (control **falsifies**) — **bounded by an authentic-rekey-channel assumption** |
 | **Rekey traffic pattern** (~19-frame burst distinguishable?) | — | ⚠️ **NOT DISCHARGED** — argued from engine invariants; Tamarin structurally cannot |
+| **Frame uniformity** — the size/budget assumption `unlinkability.spthy` rests on | `FrameUniformityCrossSpec` (JVM **and** Scala.js): per-round write/read/signal budget, 256-B size, non-recurrent tokens | ⚠️ **mechanically checked, not proven** (a test is not a proof) |
+| **Active-vs-idle indistinguishability of frame BYTES** | measured, same spec | ❌ **DOES NOT HOLD TODAY** — ARQ retransmits are byte-identical while cover frames are fresh, so counting repeated blobs separates chatting from idle (see limits) |
 | Implementation invariants (correctness, atomicity, single-use, out-of-order) | ScalaCheck stateful model, every reachable interleaving | ✅ green in CI |
 | Primitive soundness (X25519, HMAC, ChaCha20-Poly1305, ML-KEM) | **delegated** to vetted libraries (JCA / `@noble` / liboqs) | inherited |
 
@@ -233,16 +239,39 @@ subtly wrong." All three would have shipped in an authored-but-unrun artifact.
   artifact here can answer it — and note this also means `unlinkability.spthy` does *not* prove the
   256-byte size uniformity its frame-level argument rests on (that is a code invariant, `Frame.Size`,
   plus tests — an *input* to the proof, not an output). The burst reduces to the engine's FR-012
-  one-write/one-notify/one-retrieve-per-round invariants, under which the store's per-round view is
-  identical whether a pair is idle, chatting, or rekeying. **That reduction is argued, not verified**;
+  one-write/one-notify/one-retrieve-per-round invariants. **That reduction is argued, not verified**;
   discharging it needs a quantitative traffic model, not another `.spthy`. See
   [`formal-analysis/README.md`](specs/001-metadata-private-messenger/design/formal-analysis/README.md) §6.
+- **The out-of-model uniformity assumption is now mechanically checked — and the check FOUND A LEAK.**
+  `FrameUniformityCrossSpec` asserts the FR-012 per-round budget, the 256-byte size, full-length
+  non-recurrent tokens and the absence of any constant byte offset, on **both** the JVM and the
+  Scala.js build that ships to browsers and iOS (the pre-existing checks were JVM-only, so the engine
+  actually facing an untrusted store was unasserted). Writing it surfaced a concrete distinguisher that
+  every count/size assertion had missed:
+
+  > Stop-and-wait ARQ re-presents an unacked head by resubmitting the **cached wire bytes** —
+  > re-encrypting would advance the ratchet per retransmit — under a fresh, non-recurrent token. The
+  > tokens leak nothing, but the 256 bytes are **byte-identical**, while cover frames are freshly random
+  > every round. Measured over 40 rounds: a chatting pair writes 80 frames of which only **22 are
+  > distinct**; an idle pair writes 80, **all 80 distinct**. So a passive store separates active from
+  > idle by **counting repeated blobs**.
+
+  This does not touch the observational-equivalence result, which is per-frame and *assumes*
+  indistinguishable frames — but it is an instance of that assumption failing in the code, so the
+  earlier claim that "the store's per-round view is identical whether a pair is idle, chatting, or
+  rekeying" is true only of the per-round **shape** (counts, sizes, token lengths), not of the frame
+  bytes. It is **recorded, not fixed**: re-encrypting per retransmit would advance the ratchet, which is
+  precisely why the cache exists, so a fix likely needs a retransmit-specific re-wrap under a key that
+  does not move the ratchet — a design decision, not a patch. Pinned by the "RECORDED GAP" test, and
+  carried in `ARCHITECTURE.md` §6 beside the sentence it contradicts.
 - **None of this removes the dev label.** Per Constitution I's construction amendment, hand-assembled
   crypto ships behind `DEV, NO METADATA PRIVACY` until a **human security review** — for which these
   proofs are *inputs, not substitutes* — signs off. **Phase 5 delivers the formal analysis only**;
   `design/continuous-pq-ratchet.md` §6.3 gates any labeling change on formal analysis **and** human
   review. No label or label literal is touched by that work (`Privacy.scala` is untouched), and in
-  particular **no metadata-privacy claim is supported** — the traffic-pattern question above is open.
+  particular **no metadata-privacy claim is supported** — the traffic-pattern question above is open, and
+  the retransmit-byte-identity distinguisher above is a *measured* active-vs-idle leak, not merely an
+  unproven assumption.
 
 ---
 
@@ -268,4 +297,13 @@ diff <(sed -n '/^begin/,$p' ratchet-pq-epoch.spthy) <(sed -n '/^begin/,$p' ratch
 
 # Executable implementation model (JDK 22+; macOS: export JAVA_HOME="$(/usr/libexec/java_home)")
 sbt "protocolCore/testOnly engine.DoubleRatchetModelSpec"
+
+# The unlinkability proof's out-of-model assumption, on BOTH platforms. Run both: a JVM-only pass
+# says nothing about the engine that ships to browsers and iOS, which is the one facing the store.
+sbt "protocolCore/testOnly engine.FrameUniformityCrossSpec"     # JVM
+sbt "protocolCoreJS/testOnly engine.FrameUniformityCrossSpec"   # Scala.js (needs `npm ci` first)
 ```
+
+> **`sbt test` is incremental in sbt 2 and can legitimately run ZERO tests** (`Passed: Total 0 …
+> No tests to run for Test / testQuick`) while exiting 0. Use `testFull` when you need certainty
+> that a suite actually executed — a green tick is not evidence on its own.
