@@ -62,8 +62,12 @@ flowchart TB
 
 The two server roles come from the Signal-inspired **PING/PONG** split: **PONG** is the oblivious
 store (where frames live, addressed by an unlinkable retrieval token); **PING** is the notification
-service (tells a client "you have mail this round" without revealing the sender). `obsd` implements
-both over gRPC.
+service (tells a client "you have mail this round" without revealing the sender).
+
+`obsd` implements both over gRPC and serves both by default, which is the **dev** shape. A
+deployment runs them as two processes — `obsd` with `OBSD_SERVICES=store` plus **`pingd`** — because
+the split is a trust boundary: one process holding both roles can correlate a write with the bit it
+set and identify the receiver. See §6 for what that does and does not buy.
 
 ---
 
@@ -216,10 +220,23 @@ flowchart LR
 An observer of the store/notify traffic sees one write + one read of identical shape per client per
 round, and cannot tell an active conversation from an idle client.
 
-> **Honest caveat (current state).** The PING aggregation front that turns "a real frame was stored"
-> into "signal the receiver's bit" is not yet a standalone process — the demo/tests play that role
-> (see `transport/DeppisDemo`). The production PING/PONG front must decouple signal volume from
-> real-message presence so the *notify* channel is uniform too.
+> **Honest caveat (current state).** Two distinct things were bundled under this caveat; they are now
+> at different stages.
+>
+> 1. **Signal volume is decoupled from real-message presence — done and asserted.** The engine emits
+>    exactly one signal per round, the peer's real `(label, bit)` when it sent a real frame and a
+>    decoy to a void label otherwise, so notify volume is uniform. Pinned per-round (not just in
+>    total) by `FrameUniformityCrossSpec` on both the JVM and Scala.js builds.
+> 2. **The PING front now CAN run as its own process — necessary, not sufficient.** `pingd` serves
+>    `NotificationService` alone and `obsd OBSD_SERVICES=store` serves the store alone; the split is
+>    exercised end to end by `SidecarIntegrationSpec`. This matters because co-hosting lets one
+>    process join "a write landed at round r" with "label L's bit was set at round r" and
+>    re-identify the receiver of every real frame — a leak in the *join*, which obliviousness inside
+>    either service cannot repair. **But two processes on one host under one operator are still
+>    trivially joinable.** The separation only becomes a boundary once the halves sit in distinct
+>    attested trust domains (SGX enclave, DCAP appraisal, attested key release) — the rest of Phase C,
+>    not delivered. The dev demo still runs both roles in one `obsd`, and the client still holds the
+>    notify sealing key, which the real front holds enclave-side.
 
 ---
 

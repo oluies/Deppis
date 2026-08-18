@@ -77,6 +77,24 @@ arm64 host the amd64 image runs under emulation (slower); on a native x86 CI run
    inclusion check INTO the attestation appraisal path (so the verifier consults a pinned root rather
    than the full live log) is part of the still-open T056/T058 live-attestation integration.
 
+4. **The measured shape is the CO-HOSTED one, not the split PING/PONG topology.** `ARCHITECTURE.md` §6
+   describes the deployment shape as `obsd OBSD_SERVICES=store` alongside a separate `pingd`. What this
+   directory measures is neither of those halves in isolation: `obsd.manifest.template` declares no
+   `loader.env` and does not set `loader.insecure__use_host_env`, so host environment never reaches the
+   enclave, `OBSD_SERVICES` is unset inside the measured workload, and it falls through to `both`. There
+   is also no `pingd` manifest or measurement — the `Dockerfile` builds `--bin obsd` only.
+
+   The right end state is to pin the role into the manifest (`loader.env.OBSD_SERVICES = "store"`) so it
+   becomes part of `MRENCLAVE` rather than an ambient default a host could flip, and to add a second
+   manifest + build stage for `pingd`. Both change `MRENCLAVE`, which is pinned in `measurement.txt` and
+   in `ReproducibleMeasurementSpec`, so it belongs with the rest of the Phase C enclave work as one
+   reviewable re-measure — **not** as a comment edit here. (Note for anyone tempted: the manifest is
+   itself measured, so even adding a comment to `obsd.manifest.template` changes `MRENCLAVE` and stops
+   `reproduce.sh` reproducing the pinned value. That is why this note lives in the README.)
+
+   **Do not read a passing measurement as evidence that the split topology is attested.** It attests the
+   co-hosted dev shape.
+
 Until a measurement is produced on real SGX with a PCK-endorsed key AND published to the public log, no
 build advertises privacy: the label stays `DEV, NO METADATA PRIVACY` (Constitution IV). This directory
 + the tested log mechanism are the honest, reviewable scaffolding a real attested deployment slots into.

@@ -228,8 +228,13 @@ never substitutes.
 **Open problem.** What remains is real hardware/ops, not architecture: an SGX-capable host, Intel
 DCAP collateral, the RATS/Veraison verifier appraising evidence against CoRIM reference values in an
 append-only transparency log (tasks T056–T057), reproducible enclave build with logged measurement
-(Constitution X), and the OpenBao attested key-release path. The PING aggregation front must also
-become a standalone process that decouples *signal volume* from *real-message presence* so the
-notify channel is uniform too (the honest caveat in `ARCHITECTURE.md` §6) — today the demo/tests
-play that role. Until all of this is real and the trust assumptions are written
-(`threat-model.md`, task T059), no build advertises privacy.
+(Constitution X), and the OpenBao attested key-release path.
+
+The PING-front half of this caveat has moved. *Signal volume* is decoupled from *real-message
+presence* — one signal per round, real or decoy, pinned per-round by `FrameUniformityCrossSpec` on
+both platforms — and the front can now run as its own process (`pingd`, alongside `obsd
+OBSD_SERVICES=store`), exercised end to end by `SidecarIntegrationSpec`. What remains is the part
+that makes the split an actual boundary: two processes on one host under one operator are still
+trivially joined, so the halves must land in **distinct attested trust domains**, and the client must
+stop holding the notify sealing key (the real front holds it enclave-side). Until all of this is real
+and the trust assumptions are written (`threat-model.md`, task T059), no build advertises privacy.
