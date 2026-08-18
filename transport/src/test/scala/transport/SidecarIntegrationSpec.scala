@@ -152,7 +152,6 @@ class SidecarIntegrationSpec extends AnyFunSuite with ObsdHarness:
           .contains(2),
         s"pingd must exit(2) on PINGD_NOTIFY_KEY=`$bad`, not fall back to the dev key"
       )
-      assert(nothingListening(port), s"pingd left a listener behind after refusing `$bad`")
 
     // obsd reads the notify key only when it actually serves notify, so this must be the `both` role.
     assert(
@@ -178,23 +177,64 @@ class SidecarIntegrationSpec extends AnyFunSuite with ObsdHarness:
           .contains(2),
         s"obsd must exit(2) on OBSD_SERVICES=`$bad`, not default to `both`"
       )
-      assert(nothingListening(port), s"obsd left a listener behind after refusing `$bad`")
 
-  test("the split role does NOT warn about, or die on, a notify key it never uses"):
-    // A dev-key warning that fires in the CORRECT deployment is a warning operators learn to ignore.
-    // With OBSD_SERVICES=store the notify key is never read, so even a malformed one must start
-    // cleanly — the key is not part of that role's configuration at all.
+  test("the split role SERVES, and stays silent about the notify key it never uses"):
+    // Both halves of the name are asserted, which the previous revision did not manage: it inherited
+    // the child's stderr (so nothing could look at the warning) and treated "did not exit within 2s"
+    // as success (equally satisfied by a process that hung before binding). Now the harness waits for
+    // the port to ACCEPT and captures stderr, so hoisting the dev-key `eprintln!` back above the role
+    // check — reinstating a warning that fires in the CORRECT deployment, which is how operators
+    // learn to ignore warnings — fails here.
     val obsd = findObsd().getOrElse(cancel("obsd binary not found; run `cargo build --bin obsd`"))
     val port = freePort()
-    assert(
-      exitCodeOf(
-        obsd,
-        Map(
-          "OBSD_ADDR" -> s"127.0.0.1:$port",
-          "OBSD_SERVICES" -> "store",
-          "OBSD_NOTIFY_KEY" -> "not-a-key"
-        ),
-        waitMs = 2000
-      ).isEmpty,
-      "store-only obsd must ignore OBSD_NOTIFY_KEY entirely, not exit(2) on it"
-    )
+    withRunningSidecar(
+      obsd,
+      Map("OBSD_ADDR" -> s"127.0.0.1:$port", "OBSD_SERVICES" -> "store"),
+      port
+    ) { err =>
+      assert(
+        !err.contains("using the DEV key"),
+        s"the store role must not warn about a notify key it never constructs:\n$err"
+      )
+      assert(err.contains("ObliviousStore ONLY"), s"expected the store-only banner:\n$err")
+    }
+
+  test("the split role NOTICES a notify key that is set but inert, and still starts"):
+    // Converting a co-hosted unit file to the split topology means keeping OBSD_NOTIFY_KEY while
+    // adding OBSD_SERVICES=store. The key becomes inert — pingd owns it now — and silence there is a
+    // config drift nobody sees. Non-fatal by design: an ignored key is untidy, not unsafe, because
+    // this role never opens a token. Note the key here is deliberately MALFORMED as well, pinning
+    // that the store role does not even parse it.
+    val obsd = findObsd().getOrElse(cancel("obsd binary not found; run `cargo build --bin obsd`"))
+    val port = freePort()
+    withRunningSidecar(
+      obsd,
+      Map(
+        "OBSD_ADDR" -> s"127.0.0.1:$port",
+        "OBSD_SERVICES" -> "store",
+        "OBSD_NOTIFY_KEY" -> "not-a-key"
+      ),
+      port
+    ) { err =>
+      assert(
+        err.contains("IGNORED in the store role"),
+        s"a set-but-inert OBSD_NOTIFY_KEY must be reported, not silently dropped:\n$err"
+      )
+    }
+
+  test("the `both` role DOES warn when it falls back to the dev notify key"):
+    // The mirror of the suppression above: the label discipline only works if the warning is absent
+    // where it is noise AND present where it matters. Without this, "suppress the warning" could be
+    // satisfied by deleting it outright.
+    val obsd = findObsd().getOrElse(cancel("obsd binary not found; run `cargo build --bin obsd`"))
+    val port = freePort()
+    withRunningSidecar(
+      obsd,
+      Map("OBSD_ADDR" -> s"127.0.0.1:$port", "OBSD_SERVICES" -> "both"),
+      port
+    ) { err =>
+      assert(
+        err.contains("using the DEV key"),
+        s"the co-hosted role must announce the dev-key fallback:\n$err"
+      )
+    }

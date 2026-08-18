@@ -87,6 +87,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "obsd: serving ObliviousStore ONLY (capacity {capacity}) on {addr} — DEV, NO METADATA PRIVACY"
         );
         eprintln!("obsd: run the notify front separately (pingd)");
+        // Converting a co-hosted unit file to the split topology means keeping OBSD_NOTIFY_KEY around
+        // while adding OBSD_SERVICES=store — a natural migration, and one where the key silently
+        // becomes inert because only pingd opens notify tokens now. Say so: a silent config drift is
+        // worse than a noisy one. Non-fatal, because an ignored key is a tidiness problem, not a
+        // security one (this role never opens a token).
+        if std::env::var_os("OBSD_NOTIFY_KEY").is_some() {
+            eprintln!(
+                "obsd: OBSD_NOTIFY_KEY is set but IGNORED in the store role — pingd owns the notify key"
+            );
+        }
         builder.serve(addr).await?;
     }
     Ok(())
