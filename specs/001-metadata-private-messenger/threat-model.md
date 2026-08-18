@@ -88,10 +88,28 @@ is the spec's headline observer (spec Input, §Assumptions).
 | | Phase C (attested) | Dev build today |
 |---|---|---|
 | **Sender ↔ receiver linkage** | CANNOT learn who talks to whom: every client emits **exactly one store write + one store read per round**, real or cover, byte-indistinguishable 256-byte frames (FR-012, FR-015a, ARCHITECTURE §6) | NO METADATA PRIVACY claimed; uniform shape is implemented but the backend it talks to leaks access patterns (§3.2) |
-| **Active vs. idle** | CANNOT distinguish (SC-003): traffic shape does not depend on whether a real message exists — *conditional on a non-rejecting store; see Known gaps below* | Same caveat — not a privacy guarantee |
+| **Active vs. idle** | CANNOT distinguish (SC-003): traffic shape does not depend on whether a real message exists — *conditional on a non-rejecting store, and **currently CONTRADICTED at the frame-byte layer** — see the gap below* | Same caveat — not a privacy guarantee |
 | **Frame contents** | CANNOT read: ChaCha20-Poly1305 over TLS 1.3; carrier frames are random-looking and same-size | CANNOT read content (TLS + AEAD hold), but this is content secrecy, not metadata privacy |
 | **Tampering / replay** | CANNOT forge delivery: AEAD authentication rejects modified frames; **non-recurrent retrieval tokens** (FR-014) mean a replayed read retrieves nothing | Same — single-use semantics enforced by protocol-core regardless of backend |
 | **Coarse participation** | **CAN** learn that a host uses the service and its coarse round cadence — explicitly out of scope (spec §Leaked) | CAN, same |
+
+> **OPEN GAP — active-vs-idle IS distinguishable today, by frame repetition.** The "byte-indistinguishable"
+> claim above is true of any single frame (a real and a cover frame are both 256-byte high-entropy
+> blobs) but NOT of a frame repeated across rounds. Stop-and-wait ARQ re-presents an unacked head by
+> resubmitting the **cached wire bytes** — re-encrypting would advance the ratchet per retransmit — under
+> a fresh, non-recurrent token. The tokens leak nothing; the bytes are identical, while cover frames are
+> freshly random every round.
+>
+> Measured over 40 rounds (`engine.FrameUniformityCrossSpec`): a chatting pair writes 80 frames of which
+> only **22 are distinct**; an idle pair writes 80, **all 80 distinct**. Counting repeated blobs
+> therefore separates active from idle — for the network observer here and, more sharply, for the store
+> operator in §3.2, who sees every write.
+>
+> This is **recorded, not fixed**, and it must be closed before SC-003 can be claimed under Phase C. A
+> fix is not a patch: re-encrypting per retransmit would advance the ratchet, which is why the cache
+> exists, so it likely needs a retransmit-specific re-wrap under a key that does not move the ratchet.
+> See `CRYPTO_PROOF.md` §"Scope and honest limits", `ARCHITECTURE.md` §6, and
+> `design/continuous-pq-ratchet.md` §9 Q3.
 
 The active variant gains no linkage it could not get passively: dropping/delaying frames can deny
 service or stall a round, but uniform cover traffic means a withheld frame is indistinguishable
@@ -242,6 +260,12 @@ flowchart TB
   a server that records them.
 - No metadata-privacy property may be advertised until the real Phase C backend and its
   attestation are in place and these trust assumptions are written down (Constitution IV/III).
+- **One protocol-level property listed above does not currently hold as stated.** Uniform frame
+  shape (FR-012/FR-015a) holds per round — one write, one read, one signal, all 256 bytes — but
+  frames REPEAT byte-identically under ARQ retransmit while cover frames never do, so active-vs-idle
+  is distinguishable by counting repeated blobs (measured; see §3.1). It is backend-independent, so
+  unlike the access-pattern caveats it will **not** be fixed by the Phase C swap: it must be closed
+  in `protocol-core` before SC-003 is claimed.
 - **Out of scope** regardless of phase: that a person uses the service at all and their coarse
   volume; timing/size to the precision of the public round + frame parameters; side channels,
   rollback, power, and transient-execution attacks on the enclave unless explicitly mitigated;
