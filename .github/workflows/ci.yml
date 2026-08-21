@@ -48,7 +48,7 @@ jobs:
       # every other toolchain here (Constitution XI) rather than relying on whatever the runner image
       # happens to preinstall — and REQUIRE_PQ_INTEROP below turns "Go missing" from a silent skip
       # into a failure, because a permanently-cancelled test reads exactly like a passing one.
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           go-version: "1.26.6"
       # No Node here: the JS engine tests run in the `scalajs` job, so this job stays JVM-only.
