@@ -12,6 +12,12 @@ import org.scalatest.funsuite.AnyFunSuite
   * server interop (proto wire format, found-tag, AEAD round-binding) end to end. */
 class SidecarIntegrationSpec extends AnyFunSuite with ObsdHarness:
 
+  /** The label Constitution IV actually turns on — no dev build claims privacy. Capturing stderr made
+    * the banners assertable for the first time, and every role banner carries this string
+    * (`obsd.rs` both/store, `pingd.rs`); without pinning it, dropping it from any of them leaves the
+    * whole suite and the CI guard green while a dev binary stops announcing what it is. */
+  private val LabelRule = "DEV, NO METADATA PRIVACY"
+
   test("store: write then read over real gRPC to obsd (found-tag, single-use)"):
     withObsd(Array.fill(Crypto.KeyBytes)(0x11.toByte)) { channel =>
       val store =
@@ -197,6 +203,7 @@ class SidecarIntegrationSpec extends AnyFunSuite with ObsdHarness:
         s"the store role must not warn about a notify key it never constructs:\n$err"
       )
       assert(err.contains("ObliviousStore ONLY"), s"expected the store-only banner:\n$err")
+      assert(err.contains(LabelRule), s"$LabelRule must be on the store banner:\n$err")
     }
 
   test("the split role NOTICES a notify key that is set but inert, and still starts"):
@@ -220,6 +227,7 @@ class SidecarIntegrationSpec extends AnyFunSuite with ObsdHarness:
         err.contains("IGNORED in the store role"),
         s"a set-but-inert OBSD_NOTIFY_KEY must be reported, not silently dropped:\n$err"
       )
+      assert(err.contains(LabelRule), s"$LabelRule must be on the store banner:\n$err")
     }
 
   test("the `both` role DOES warn when it falls back to the dev notify key"):
@@ -237,4 +245,23 @@ class SidecarIntegrationSpec extends AnyFunSuite with ObsdHarness:
         err.contains("using the DEV key"),
         s"the co-hosted role must announce the dev-key fallback:\n$err"
       )
+      assert(err.contains(LabelRule), s"$LabelRule must be on the co-hosted banner:\n$err")
+    }
+
+  test("pingd DOES warn when it falls back to the dev notify key"):
+    // The same mirror, on the binary that actually matters. `pingd` carries the identical
+    // `KeyVar::Unset ⇒ warn + [0x01u8; 32]` path and is the process that serves notify in the SPLIT
+    // topology this branch exists to promote — obsd's `both` role is the dev demo shape. Asserting
+    // the announcement only on the demo shape left the real one uncovered: deleting pingd's warning
+    // would leave every Rust test, every Scala test and the CI guard green while a notify front came
+    // up silently on the key published in this source, forgeable by anyone who reads the repo.
+    val pingd =
+      findPingd().getOrElse(cancel("pingd binary not found; run `cargo build --bin pingd`"))
+    val port = freePort()
+    withRunningSidecar(pingd, Map("PINGD_ADDR" -> s"127.0.0.1:$port"), port) { err =>
+      assert(
+        err.contains("using the DEV key"),
+        s"pingd must announce the dev-key fallback:\n$err"
+      )
+      assert(err.contains(LabelRule), s"$LabelRule must be on the pingd banner:\n$err")
     }

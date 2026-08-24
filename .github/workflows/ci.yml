@@ -231,7 +231,11 @@ jobs:
           # case silently leaves CI. Requiring `ignored 0` and `pending 0` alongside `canceled 0`
           # closes that, and requiring the summary LINE to exist means a wording change fails loudly
           # instead of skipping every check below it.
-          summary="$(grep -E 'Tests: succeeded [0-9]+, failed [0-9]+, canceled [0-9]+, ignored [0-9]+, pending [0-9]+' /tmp/split.out | tail -1)"
+          # `|| true`: this step runs under `bash -e` with pipefail set above, so without it a grep
+          # that matches nothing aborts the step right here — making the emptiness check below, and
+          # its annotation, unreachable dead code. The guard would still fail closed, but the one
+          # case it was written to EXPLAIN (a ScalaTest wording change) would exit with no clue why.
+          summary="$(grep -E 'Tests: succeeded [0-9]+, failed [0-9]+, canceled [0-9]+, ignored [0-9]+, pending [0-9]+' /tmp/split.out | tail -1 || true)"
           if [ -z "$summary" ]; then
             echo "::error::no ScalaTest summary line in the output — cannot verify the suite ran"
             exit 1
@@ -256,6 +260,7 @@ jobs:
             "the split role SERVES, and stays silent about the notify key it never uses"
             "the split role NOTICES a notify key that is set but inert"
             "the \`both\` role DOES warn when it falls back to the dev notify key"
+            "pingd DOES warn when it falls back to the dev notify key"
           )
           missing=0
           for name in "${required[@]}"; do
