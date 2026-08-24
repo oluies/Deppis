@@ -12,3 +12,7 @@ addSbtPlugin("com.thesamet" % "sbt-protoc" % "1.1.0-RC2")
 
 // Scala.js (T019): cross-compile protocol-core to JS for the Flutter engine bundle (pinned).
 addSbtPlugin("org.scala-js" % "sbt-scalajs" % "1.22.0")
+
+// Scala Native (bench): the sidecar-scala benchmark target is cross-built JVM + Native so the SAME
+// service code is measured on both runtimes. sbt 2 build exists (`sbt-scala-native_sbt2_3`).
+addSbtPlugin("org.scala-native" % "sbt-scala-native" % "0.5.12")
