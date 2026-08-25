@@ -709,6 +709,25 @@ stateDiagram-v2
      cover write under a-i) distinguishable under the cover-traffic model? The per-frame
      `unlinkability.spthy` result does not answer this; a timing/volume argument (or model extension) is
      owed (§5, §6.1).
+
+     > **Q3 is no longer only hypothetical — one concrete distinguisher is now MEASURED, and it is
+     > not the rekey burst.** Stop-and-wait ARQ re-presents an unacked head by resubmitting the
+     > CACHED wire bytes (re-encrypting would advance the ratchet per retransmit), under a fresh
+     > non-recurrent token. The tokens leak nothing, but the frames are byte-identical, while cover
+     > frames are freshly random every round. Measured over 40 rounds by
+     > `FrameUniformityCrossSpec`: a chatting pair writes 80 frames of which only **22 are
+     > distinct**; an idle pair writes 80, **all distinct**. Counting repeated 256-byte blobs
+     > therefore separates active from idle — the inference FR-012 exists to prevent, and one that
+     > every existing count/size assertion missed (including `RoundTransportSpec`'s test formerly
+     > named "active and idle STORE-WRITE traces are indistinguishable", which compares only counts,
+     > sizes and token lengths; it has been renamed to say what it checks).
+     >
+     > No shipped claim is affected — `DEV, NO METADATA PRIVACY` stands and Phase C is not reached —
+     > but this must be resolved before any metadata-privacy claim, and `ARCHITECTURE.md` §6 now
+     > carries the caveat. The fix is not obvious: re-encrypting per retransmit would advance the
+     > ratchet (the reason the cache exists), so it likely needs a retransmit-specific re-wrap under
+     > a key that does not move the ratchet, which is a design change, not a patch. Recorded, not
+     > solved.
   4. **Modeling a breaks-CDH-but-not-ML-KEM adversary in Tamarin.** This is the crux of any real PQ
      claim and is a new model, not an edit — feasibility and effort are unknown until attempted (§6.2).
   5. **Epoch-fold liveness under stranding.** Round-derived addressing can strand a frame under
