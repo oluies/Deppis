@@ -462,7 +462,9 @@ lazy val sidecarScala = (project in file("sidecar-scala"))
     scalacOptions ++= Seq("-deprecation", "-feature"), // codegen output trips -Wunused
     Compile / PB.protoSources := sidecarProtoSources.value,
     Compile / PB.targets := sidecarPbTargets.value,
-    Compile / unmanagedSourceDirectories := sidecarScalaSharedSources.value,
+    // shared/ plus jvm/ — the platform half of the bounds-check experiment (see UnsafeScan).
+    Compile / unmanagedSourceDirectories := sidecarScalaSharedSources.value :+
+      (file("sidecar-scala") / "jvm" / "src" / "main" / "scala"),
     Test / unmanagedSourceDirectories := Seq(
       file("sidecar-scala") / "shared" / "src" / "test" / "scala"
     ),
@@ -516,8 +518,10 @@ lazy val sidecarScalaNative = (project in file("sidecar-scala-native"))
     //     will be disabled to improve performance". A cats-effect server on one core against a JVM
     //     on all of them is not a runtime comparison, it is a core-count comparison.
     //
-    // `releaseFast` rather than `releaseFull`: full LTO multiplies link time for a benchmark whose
-    // hot loop is a byte scan the optimiser handles well either way.
+    // `releaseFast` rather than `releaseFull`, measured rather than assumed: releaseFull buys ~13%
+    // on the scan (3,873 -> 3,417 us/round at capacity 4096) and nothing at all once bounds checks
+    // are gone, while taking ~47s to link and OOM-ing the linker outright at sbt's default 1 GB
+    // heap. It needed -Xmx10g to complete. Not a trade worth making for a benchmark target.
     nativeConfig ~= { c =>
       c.withMode(scala.scalanative.build.Mode.releaseFast)
         .withMultithreading(true)
@@ -527,7 +531,10 @@ lazy val sidecarScalaNative = (project in file("sidecar-scala-native"))
     },
     Compile / PB.protoSources := sidecarProtoSources.value,
     Compile / PB.targets := sidecarPbTargets.value,
-    Compile / unmanagedSourceDirectories := sidecarScalaSharedSources.value,
+    // shared/ plus this project's own src/main/scala — the Native half of the bounds-check
+    // experiment, which needs `scala.scalanative.*` and therefore cannot live in shared/.
+    Compile / unmanagedSourceDirectories := sidecarScalaSharedSources.value :+
+      (file("sidecar-scala-native") / "src" / "main" / "scala"),
     Test / unmanagedSourceDirectories := Seq(
       file("sidecar-scala") / "shared" / "src" / "test" / "scala"
     ),

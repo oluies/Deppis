@@ -32,8 +32,7 @@ generator and the machine dominate, while Native is steady to ±0.5% because it 
 
 ### Where the Native gap actually comes from
 
-Not cats-effect, not the runtime, and not the transport. Measured by varying capacity, which is
-what sets the size of the oblivious scan:
+First, which layer. Measured by varying capacity, which is what sets the size of the oblivious scan:
 
 | capacity | JVM | Native | Native / JVM |
 |---:|---:|---:|---:|
@@ -43,13 +42,55 @@ what sets the size of the oblivious scan:
 A 16× cut in capacity buys the JVM only **1.7×** — it is bounded by HTTP and framework overhead
 there — but buys Scala Native **10.5×**, near-linear. Dropping from 5 virtual users to 1 costs
 Native only 16% (465 → 390 rps), so it is not waiting on locks or fibers either; it saturates with
-roughly one request in flight.
+roughly one request in flight. **Native's framework overhead is competitive** (within 1.4× of the
+JVM once the scan is small); the gap is the scan.
 
-In other words: **Scala Native's framework overhead is competitive** (within 1.4× of the JVM once
-the scan is small), and essentially the entire gap is its generated code for the tight branchless
-byte loop — on the order of 8× slower than what HotSpot's JIT produces for the same source. That is
-the thing to investigate if this comparison is ever worth pursuing, and a transport-free core
-microbenchmark is the way to pin it down (see "Not done yet").
+Second, what about the scan. `sidecar.Main bench` and `storebench` run the loop with no transport
+at all (see "The core microbenchmark" below). At capacity 4096, µs per write+read round:
+
+| implementation | µs/round | vs Rust | vs JVM |
+|---|---:|---:|---:|
+| Rust, `--release` | **150.9** | 1.0× | 0.61× |
+| Scala JVM | **248.8** | 1.65× | 1.0× |
+| Scala Native, `releaseFast` | **3,872.5** | 25.7× | 15.6× |
+| Scala Native, raw pointers (no bounds checks) | **2,845.9** | 18.9× | 11.4× |
+| Scala Native, `releaseFull` | 3,416.8 | 22.6× | 13.7× |
+| Scala Native, `releaseFull` + raw pointers | 2,776.4 | 18.4× | 11.2× |
+
+All four implementations print **checksum 314794**, which is how we know they are doing identical
+work rather than one of them being quietly optimised away or subtly different.
+
+**The bounds-check hypothesis is not supported as an explanation.** Scala Native does bounds-check
+arrays — verified directly: an out-of-range read on an index opaque to the optimiser still throws
+`ArrayIndexOutOfBoundsException` under `releaseFast`. But removing those checks entirely, by
+scanning the *same* store object's *same* arrays through raw `Ptr[Byte]`, buys only **1.36×**.
+`releaseFull` buys a further ~13%. Together they close about 1.4× of a 25× gap; Scala Native is
+still **18× slower than Rust and 11× slower than the JVM with every bounds check gone.**
+
+So bounds checks are a real but minor cost, and the remaining ~18× is Scala Native's code
+generation for this loop itself. The most likely candidate — untested, so treat it as a hypothesis
+and not a result — is auto-vectorisation: the inner loops are byte-wise conditional selects over
+32- and 256-byte runs, exactly the shape LLVM vectorises for Rust and HotSpot handles well, and the
+mask arithmetic here round-trips through `Int` with `.toByte` truncation on every element, which may
+be what blocks it. Confirming that needs a look at the emitted assembly, which this benchmark does
+not do.
+
+The practical read: **Scala Native is a poor fit for this particular workload** — a long, tight,
+branchless byte scan — while being perfectly competitive on the server plumbing around it. That is
+a narrower and more useful conclusion than "Scala Native is slow".
+
+### The core microbenchmark
+
+`sbt "sidecarScala/writeClasspath"` then `java -cp $(cat …/sidecar-scala.classpath) sidecar.Main bench`,
+`./sidecar-scala-native bench`, and `cargo run --release --bin storebench`. All take optional
+capacities as arguments (default `256 1024 4096`).
+
+Hand-rolled rather than criterion or JMH, deliberately: neither exists across all three targets, so
+per-language harnesses would fold three different measurement methodologies into the comparison.
+All three use the identical shape — a fixed token pool built outside the timed region, a warmup
+phase, a timed phase over a fixed op count, and a checksum consumed at the end (without which the
+optimiser is entitled to delete the scan and report a spectacular 0 ns/op). Per-round cost is tens
+to thousands of microseconds, so loop overhead is irrelevant.
 
 ### The runtime really is multithreaded
 
@@ -138,9 +179,10 @@ Individually: `sbt "bench/runMain bench.Run bench.ObsdGrpcSimulation"`.
 
 ## Not done yet
 
-- **A core-level microbenchmark** (criterion vs a Scala harness) measuring the oblivious scan with
-  no transport at all. That is the one comparison that would be fully controlled across all three
-  runtimes, and it would isolate how much of the Rust lead is the store versus the server.
+- **Attributing the remaining ~18× Native gap.** The microbenchmark rules out bounds checks,
+  locks, fibers, the runtime and the transport, but does not identify what IS responsible.
+  Inspecting the emitted assembly for the inner loops — specifically whether Rust and HotSpot
+  vectorise them and Scala Native does not — is the next step.
 - **The notify half.** `NotificationService` needs libsodium-backed sealed tokens; porting that to
   Scala Native is a separate lift, so `sidecar-scala` implements the store only. Gatling can still
   drive `obsd`'s notify path.

@@ -45,9 +45,13 @@ final class ObliviousStore(val capacity: Int):
 
   require(capacity > 0, "capacity must be positive")
 
-  private val occupied = new Array[Byte](capacity)
-  private val tokens = new Array[Byte](capacity * TokenLen)
-  private val frames = new Array[Byte](capacity * FrameLen)
+  // `private[sidecar]` so the Scala Native bounds-check experiment (`UnsafeScan`) can scan THESE
+  // arrays through raw pointers rather than reimplementing the store. Same object, same layout,
+  // same state — the only difference between the two scans is the bounds check itself, which is
+  // the whole point of the comparison.
+  private[sidecar] val occupied = new Array[Byte](capacity)
+  private[sidecar] val tokens = new Array[Byte](capacity * TokenLen)
+  private[sidecar] val frames = new Array[Byte](capacity * FrameLen)
 
   /** Place `(token, frame)` in the first free slot, scanning all of them. Returns false iff the
     * store was full — capacity is public, so that is the only data-independent signal. */

@@ -45,6 +45,17 @@ object Main extends IOApp:
       case None => die(s"SIDECAR_CAPACITY must be a positive integer, got `$s`")
 
   def run(args: List[String]): IO[ExitCode] =
+    // One binary, two jobs. A second `IOApp` would mean a second main class, which makes
+    // `nativeLink` ambiguous and would need a separate Native project to resolve — not worth it for
+    // a benchmark entry point.
+    if args.headOption.contains("bench") then
+      val capacities = args.drop(1) match
+        case Nil => Seq(256, 1024, 4096)
+        case some => some.map(_.toInt)
+      IO(ScanBench.main(capacities, ops = 2000, warmup = 500)).as(ExitCode.Success)
+    else serve
+
+  private def serve: IO[ExitCode] =
     given LoggerFactory[IO] = NoOpFactory[IO]
     for
       // bound as one value, not destructured in the pattern: a tuple pattern in a for-comprehension
