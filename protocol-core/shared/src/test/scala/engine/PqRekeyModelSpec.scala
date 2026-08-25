@@ -33,20 +33,30 @@ import scala.collection.mutable
   * they ARE reachable (a malicious PEER) in `PqRekeyCrossSpec`.
   *
   * ==What this model does NOT reach (measured, not guessed)==
-  * LANE ARBITRATION is not pinned. Busy cases DO run the two lanes together — content flows for the
-  * whole adversarial phase while a rekey streams — but no assertion here proves that
-  * `ChunkScheduler.decide` ever chose `Chunk` over pending content. An earlier revision claimed it
-  * did, via a counter of rounds where a rekey was in progress while content was unacked. That
-  * counter was trivially satisfied: the warm-up ends idle with `stepsSinceFold >= IdleMinSteps`, so
-  * an attempt is ALREADY open when the adversarial phase starts (measured: `inProgress = true` at
-  * `advStart`, 3/3 runs) and the first send makes the condition true on round 0 — for every busy
-  * case, whatever the scheduler does. It also measured the wrong thing: `decide` is consulted once
-  * per HEAD with `chunkPending = rt.ctrl.nonEmpty` (`Engine.scala:1423-1428`), while `inProgress`
-  * stays true across long stretches with an empty `ctrl` (awaiting the peer's pub or tag). Pinning
-  * arbitration honestly needs the engine to report it (a chunk-lane head counter on `RekeyStatus`),
-  * which is production code and does not belong in a test-only PR — it is recorded as a follow-up
-  * instead of claimed here. `busyCases > 0` below guards only what it says: that the generator
-  * still produces busy cases at all.
+  * LANE ARBITRATION is still not pinned HERE, but it is no longer unpinned anywhere: the follow-up
+  * this doc used to record has landed as `RekeyStatus.ctrlHeads` / `ctrlHeadsOverContent`, asserted
+  * in `PqRekeyCrossSpec`'s "the chunk lane wins heads AGAINST pending content". The history is worth
+  * keeping, because two earlier attempts to claim it from this model were both wrong. A counter of
+  * rounds where a rekey was in progress while content was unacked is trivially satisfied: the
+  * warm-up ends idle with `stepsSinceFold >= IdleMinSteps`, so an attempt is ALREADY open when the
+  * adversarial phase starts (measured: `inProgress = true` at `advStart`, 3/3 runs) and the first
+  * send makes the condition true on round 0 — for every busy case, whatever the scheduler does. It
+  * also measures the wrong thing: `decide` is consulted once per HEAD with
+  * `chunkPending = rt.ctrl.nonEmpty`, while `inProgress` stays true across long stretches with an
+  * empty `ctrl` (awaiting the peer's pub or tag). Only a counter incremented AT the decision, and
+  * only its content-was-also-pending half, states the property. `busyCases > 0` below still guards
+  * only what it says: that the generator produces busy cases at all.
+  *
+  * CROSS-SIDE ROOT AGREEMENT is not directly assertable, and the reason is worth recording so the
+  * dead end is not re-walked. `DoubleRatchet.rootIndex` is public, so a root fingerprint seam looks
+  * like it would let a test state "both sides hold the same root at the same chain index" instead of
+  * inferring agreement from continued delivery. It does not: sampled once per round, the two sides'
+  * indices are DISJOINT (measured over a full rekey — initiator 1,3,5,…; responder 0,2,4,…; zero
+  * shared indices, folds observed at 51 and 52). That is a sampling artifact, not an asymmetry — a
+  * side can take a receive-DH and a send-DH step inside ONE `tick`, advancing the root twice, so
+  * per-round sampling only ever catches one parity. Observing the overlap would need sampling inside
+  * the ratchet's step, which is far more intrusive than the assertion is worth. Agreement therefore
+  * stays inferred from the pair continuing to decrypt across the fold, which every fold test does.
   *
   * The TIMEOUT paths are outside its horizon: `PqRekey.TimeoutRounds` is 2000, while a run is
   * capped at 96 warm + 660 adversarial + 600 drain + 200 probe = 1,556 rounds (typically ~820). No

@@ -166,6 +166,14 @@ final case class RekeyStatus(
     strandedAttemptAgeRounds: Long,
     foldArmed: Boolean,
     stepsSinceFold: Int,
+    /** ARQ heads this side opened on the rekey CHUNK lane, and the subset opened while content was
+      * also queued. The second is the only observable that pins LANE ARBITRATION: chunk heads are
+      * plentiful on an idle pair, where nothing is being arbitrated, so only a chunk head taken with
+      * a non-empty outbox shows `ChunkScheduler.decide` preferring the rekey lane over pending
+      * content (design §3.1 (a-ii)). Scheduling counts derived from queue occupancy — never key
+      * material, and nothing the peer does not already learn from the frames it receives. */
+    ctrlHeads: Int,
+    ctrlHeadsOverContent: Int,
     lastAbort: String
 )
 
@@ -269,6 +277,21 @@ final class Engine(
     var headIsCtrl: Boolean = false // does the in-flight head come from `ctrl` or the outbox?
     var sched: ChunkScheduler.State = ChunkScheduler.State.Initial
     var rekey: Option[RekeyAttempt] = None
+
+    /** Heads opened on the CHUNK lane, and the subset of those opened while content was ALSO queued.
+      * Counted at the single `ChunkScheduler.decide` call site, once per head — the same granularity
+      * the policy is consulted at.
+      *
+      * The second counter exists because the first cannot state the property on its own: chunk heads
+      * are trivially plentiful on an idle pair, where the scheduler spends idle rounds on chunks at
+      * zero marginal cost and there is nothing to arbitrate against. Only a chunk head opened with a
+      * non-empty outbox shows `decide` PREFERRING the rekey lane over pending content — the
+      * `busyStride` half of the §3.1 (a-ii) policy, and the half a starvation bug would break.
+      *
+      * Both are counts of scheduling decisions. They are derived from queue occupancy, never from
+      * key material, and they say nothing a peer does not already know from the frames it received. */
+    var ctrlHeads: Int = 0
+    var ctrlHeadsOverContent: Int = 0
 
     /** Content messages (sent + received) since the last committed fold — the cadence counter the
       * `PqRekey.StepCeiling` / `IdleMinSteps` trigger reads. Public metadata, never secret-derived. */
@@ -801,6 +824,8 @@ final class Engine(
           if rt.rekey.exists(_.stranded) then rt.strandedAttemptAgeRounds else 0L,
         foldArmed = rt.ratchet.epochFoldArmed,
         stepsSinceFold = rt.stepsSinceFold,
+        ctrlHeads = rt.ctrlHeads,
+        ctrlHeadsOverContent = rt.ctrlHeadsOverContent,
         lastAbort = rt.lastAbort
       )
     }
@@ -1421,14 +1446,19 @@ final class Engine(
                   // content is never starved (a-ii / the doc's head-of-line caveat). It is consulted
                   // once per HEAD rather than once per round because stop-and-wait pins one message
                   // across many rounds, so a per-round vote would not describe the lane share.
+                  val contentPending = outbox.get(pid).exists(_.nonEmpty)
                   val (decision, next) = ChunkScheduler.decide(
                     rt.sched,
                     chunkPending = rt.ctrl.nonEmpty,
-                    contentPending = outbox.get(pid).exists(_.nonEmpty),
+                    contentPending = contentPending,
                     policy = ChunkScheduler.Policy.Default
                   )
                   rt.sched = next
                   rt.headIsCtrl = decision == ChunkScheduler.Decision.Chunk
+                  if rt.headIsCtrl then
+                    rt.ctrlHeads += 1
+                    // The decisive one: the chunk lane won a head that content was waiting for.
+                    if contentPending then rt.ctrlHeadsOverContent += 1
                   rt.headSeq = rt.nextSendSeq
                   rt.nextSendSeq += 1
                   rt.headWire = null
