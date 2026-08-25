@@ -12,21 +12,52 @@ Run everything with `./bench/run-all.sh`. Gatling's HTML reports land in `bench/
 
 ## Results
 
-macOS arm64 (Apple silicon), JDK 26, 5 virtual users, 30 s, capacity 4096, batch size 1.
-Each virtual user writes a 256-byte frame and reads it straight back, so both RPCs are exercised
-and the store never saturates.
+macOS arm64 (Apple silicon, 18 cores), JDK 26, 5 virtual users, 30 s, capacity 4096, batch 1,
+**median of 3 reps**. Each virtual user writes a 256-byte frame and reads it straight back.
 
-| target | stack | throughput (rps) | mean | p99 | failures |
-|---|---|---:|---:|---:|---:|
-| `obsd` | Rust, tonic, gRPC/HTTP2, `--release` | **15,346** | 0 ms | 1 ms | 0 |
-| `sidecar-scala` (JVM) | Scala 3, http4s-grpc + Ember, gRPC/HTTP1.1 | **10,840** | 0 ms | 1 ms | 0 |
-| `sidecar-scala` (Native) | same source, Scala Native 0.5.12 `releaseFast` | **2,410** | 2 ms | 3 ms | 0 |
+| target | stack | median rps | vs control | spread across reps |
+|---|---|---:|---:|---|
+| `obsd` | Rust, tonic, gRPC/HTTP2, `--release` | **8,643** | control | 7,102–10,191 (±20%) |
+| `sidecar-scala` (JVM) | http4s-grpc + Ember, gRPC/HTTP1.1 | **5,495** | 0.64× | 4,543–5,619 |
+| `sidecar-scala` (Native) | same source, SN 0.5.12 `releaseFast` | **484** | 0.06× | 481–485 (±0.5%) |
 
-Read the caveats below before quoting any of this. The honest one-line summary is: **the JVM build
-reaches about 70% of the Rust sidecar's throughput, and the Scala Native build about 16% — but the
-Rust column is not measured over the same transport, so treat it as indicative, not a like-for-like
-verdict.** The JVM-vs-Native gap of ~4.5× IS like-for-like: identical source, identical transport,
-identical driver.
+**Do not quote the absolute numbers.** On a workstation they are not reproducible to more than one
+significant figure: an unrelated desktop app at 30% CPU moved the `obsd` figure by 42% between two
+batches with no code change at all. That is why the Rust run is a **control** measured in the same
+batch as the Scala ones, why every figure is a median of repetitions, and why `run-all.sh` records
+the load average at both ends of the run. The ratio to the control is the number that survives.
+
+The spread column is itself informative: `obsd` is noisy because it is fast enough that the load
+generator and the machine dominate, while Native is steady to ±0.5% because it *is* the bottleneck.
+
+### Where the Native gap actually comes from
+
+Not cats-effect, not the runtime, and not the transport. Measured by varying capacity, which is
+what sets the size of the oblivious scan:
+
+| capacity | JVM | Native | Native / JVM |
+|---:|---:|---:|---:|
+| 256 (scan cheap) | 6,732 | 4,903 | **0.73×** |
+| 4096 (scan dominant) | 3,899 | 465 | **0.12×** |
+
+A 16× cut in capacity buys the JVM only **1.7×** — it is bounded by HTTP and framework overhead
+there — but buys Scala Native **10.5×**, near-linear. Dropping from 5 virtual users to 1 costs
+Native only 16% (465 → 390 rps), so it is not waiting on locks or fibers either; it saturates with
+roughly one request in flight.
+
+In other words: **Scala Native's framework overhead is competitive** (within 1.4× of the JVM once
+the scan is small), and essentially the entire gap is its generated code for the tight branchless
+byte loop — on the order of 8× slower than what HotSpot's JIT produces for the same source. That is
+the thing to investigate if this comparison is ever worth pursuing, and a transport-free core
+microbenchmark is the way to pin it down (see "Not done yet").
+
+### The runtime really is multithreaded
+
+Checked rather than assumed, because the answer changes how the numbers should be read:
+cats-effect **3.7.1** is the newest published for `native0.5_3` and is what resolves; the 3.7.x line
+is the one that added Scala Native 0.5 support with the work-stealing pool cross-built for LLVM and
+kqueue/epoll polling. Under load the Native binary shows **29 threads and ~395% CPU** on an 18-core
+box. So the Native figure is not a single-core artifact.
 
 ## Three things that would have made these numbers a lie
 
@@ -101,6 +132,7 @@ The Rust sidecar remains the only implementation the metadata-privacy argument r
 | `BENCH_DURATION_S` | 30 | run length per target |
 | `BENCH_CAPACITY` | 4096 | store slots; the dominant cost driver |
 | `BENCH_BATCH` | 1 | entries per RPC |
+| `BENCH_REPS` | 3 | repetitions per target; the median is reported |
 
 Individually: `sbt "bench/runMain bench.Run bench.ObsdGrpcSimulation"`.
 

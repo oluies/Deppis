@@ -1,6 +1,7 @@
 package sidecar
 
-import cats.effect.{ExitCode, IO, IOApp, Ref}
+import cats.effect.{ExitCode, IO, IOApp}
+import cats.effect.std.Mutex
 import com.comcast.ip4s.{Host, Ipv4Address, Port}
 import metadatamessenger.store.v1.store as pb
 import org.http4s.ember.server.EmberServerBuilder
@@ -51,9 +52,9 @@ object Main extends IOApp:
       addr <- IO(sys.env.getOrElse("SIDECAR_ADDR", DefaultAddr)).flatMap(parseAddr)
       (host, port) = addr
       capacity <- sys.env.get("SIDECAR_CAPACITY").fold(IO.pure(DefaultCapacity))(parseCapacity)
-      lock <- Ref[IO].of(())
+      mutex <- Mutex[IO]
       store = new ObliviousStore(capacity)
-      routes = pb.ObliviousStore.toRoutes(new StoreService[IO](lock, store))
+      routes = pb.ObliviousStore.toRoutes(new StoreService[IO](mutex, store))
       _ <- IO.consoleForIO.errorln(
         s"sidecar-scala: serving ObliviousStore (capacity $capacity) on $host:$port" +
           " — BENCHMARK BUILD, DEV, NO METADATA PRIVACY"

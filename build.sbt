@@ -590,7 +590,16 @@ lazy val bench = (project in file("bench"))
   )
 
 lazy val root = (project in file("."))
-  .aggregate(protocolCore, protocolCoreJS, crypto, anonymity, server, transport, sidecarScala, bench)
+  .aggregate(
+    protocolCore,
+    protocolCoreJS,
+    crypto,
+    anonymity,
+    server,
+    transport,
+    sidecarScala,
+    bench
+  )
   .settings(name := "metadata-messenger", publish / skip := true)
 
 // CI's JVM job runs `testJvm` (the Scala.js job covers protocolCoreJS under Node, so it is excluded

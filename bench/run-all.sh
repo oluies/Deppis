@@ -15,11 +15,19 @@ USERS="${BENCH_USERS:-5}"
 DURATION="${BENCH_DURATION_S:-30}"
 CAPACITY="${BENCH_CAPACITY:-4096}"
 BATCH="${BENCH_BATCH:-1}"
+# Repetitions per target, median reported. A single run is not a measurement on a workstation:
+# an unrelated app at 30% CPU moved `obsd` — which no code change touched — by 42% between two
+# batches. The Rust run also acts as a CONTROL: every batch measures it in the same conditions as
+# the Scala ones, so the ratio to it survives machine noise that the absolute rps does not.
+REPS="${BENCH_REPS:-3}"
 export BENCH_USERS BENCH_DURATION_S BENCH_CAPACITY BENCH_BATCH
 BENCH_USERS="$USERS" BENCH_DURATION_S="$DURATION" BENCH_BATCH="$BATCH"
 
 RESULTS="bench/target/results"
 mkdir -p "$RESULTS"
+: > "$RESULTS/summary.txt"
+# Recorded because it is the single most useful thing for judging whether a run is comparable.
+echo "load average at start: $(uptime)" | tee "$RESULTS/environment.txt"
 
 say() { printf '\n=== %s ===\n' "$*"; }
 
@@ -63,13 +71,36 @@ wait_for_port() {
   done
 }
 
+# Gatling prints throughput as e.g. "15,346.45"; strip the thousands separators for arithmetic.
+extract_rps() {
+  grep -E "mean throughput" "$1" | tail -1 | grep -oE "[0-9][0-9,]*\.[0-9]+" | tr -d ',' | tail -1
+}
+
+median() {
+  printf '%s\n' "$@" | sort -n | awk '{v[NR]=$1} END {print (NR%2) ? v[(NR+1)/2] : (v[NR/2]+v[NR/2+1])/2}'
+}
+
 run_sim() {
   local label="$1" sim="$2" port_var="$3" port="$4"
-  say "$label"
+  say "$label ($REPS reps, median reported)"
   wait_for_port "$port"
-  env "$port_var=$port" BENCH_USERS="$USERS" BENCH_DURATION_S="$DURATION" BENCH_BATCH="$BATCH" \
-    sbt -batch -no-colors "bench/runMain bench.Run $sim" 2>&1 | tee "$RESULTS/$label.log" \
-    | grep -E "request count|mean response time|99th percentile|mean throughput|KO " || true
+  local samples=() rep rps
+  for rep in $(seq 1 "$REPS"); do
+    env "$port_var=$port" BENCH_USERS="$USERS" BENCH_DURATION_S="$DURATION" BENCH_BATCH="$BATCH" \
+      sbt -batch -no-colors "bench/runMain bench.Run $sim" > "$RESULTS/$label.rep$rep.log" 2>&1 || true
+    rps="$(extract_rps "$RESULTS/$label.rep$rep.log")"
+    if [ -z "$rps" ]; then
+      echo "  rep $rep: NO RESULT — see $RESULTS/$label.rep$rep.log" >&2
+      # An empty run is exactly what the gatling-grpc licence cap produces; never average it away.
+      return 1
+    fi
+    echo "  rep $rep: $rps rps"
+    samples+=("$rps")
+  done
+  local med
+  med="$(median "${samples[@]}")"
+  echo "  MEDIAN: $med rps"
+  echo "$label $med" >> "$RESULTS/summary.txt"
 }
 
 # --- 1. the Rust sidecar, the real production path -----------------------------------------------
@@ -95,4 +126,10 @@ SERVER_PID=$!
 run_sim "scala-native-grpc-h1" bench.ScalaSidecarSimulation BENCH_HTTP_PORT 50062
 stop_server
 
+say "summary (median of $REPS reps, $USERS users x ${DURATION}s, capacity $CAPACITY)"
+awk '{ printf "  %-24s %12.1f rps", $1, $2
+       if ($1 ~ /^rust-/) { base = $2; printf "   (control)\n" }
+       else if (base > 0) { printf "   %.2fx the Rust control\n", $2 / base }
+       else { printf "\n" } }' "$RESULTS/summary.txt"
+echo "load average at end:   $(uptime)" | tee -a "$RESULTS/environment.txt"
 say "done — per-run logs in $RESULTS, full Gatling reports in bench/target/gatling"

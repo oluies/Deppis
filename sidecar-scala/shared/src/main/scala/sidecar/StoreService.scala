@@ -1,6 +1,7 @@
 package sidecar
 
-import cats.effect.{Ref, Sync}
+import cats.effect.Sync
+import cats.effect.std.Mutex
 import cats.syntax.all.*
 import com.google.protobuf.ByteString
 import metadatamessenger.store.v1.store as pb
@@ -20,11 +21,18 @@ import org.http4s.Headers
   * content. That is acceptable only under the `DEV, NO METADATA PRIVACY` label, and this build
   * additionally makes no privacy claim at all (see [[ObliviousStore]]).
   *
-  * The store lives behind a `Ref` used as a mutex — `Ref.flatModify` serializes access the way the
-  * Rust front's `Mutex<ObliviousStore>` does, so neither side gets to look faster by allowing
-  * concurrent mutation the other forbids.
+  * The store lives behind a real [[cats.effect.std.Mutex]], mirroring the `Mutex<ObliviousStore>`
+  * the Rust front holds — so neither side gets to look faster by allowing concurrent mutation the
+  * other forbids.
+  *
+  * This was a `Ref` used as a lock (`lock.flatModify(_ => ((), delay(f)))`), which is NOT one:
+  * `flatModify` updates the ref atomically and then runs the returned effect with no exclusion at
+  * all, so two concurrent calls both proceed into the body. [[ObliviousStore]] mutates shared
+  * arrays and is not thread-safe, so that was a live data race — and a benchmark advantage the
+  * Rust side was not given. It went unnoticed because the Scala Native link was defaulting to a
+  * SINGLE-THREADED binary; enabling multithreading is what made it reachable.
   */
-final class StoreService[F[_]: Sync](lock: Ref[F, Unit], store: ObliviousStore)
+final class StoreService[F[_]: Sync](mutex: Mutex[F], store: ObliviousStore)
     extends pb.ObliviousStore[F]:
 
   import ObliviousStore.{FrameLen, TokenLen}
@@ -39,9 +47,9 @@ final class StoreService[F[_]: Sync](lock: Ref[F, Unit], store: ObliviousStore)
       .raiseError(new IllegalArgumentException(s"batch_size $declared does not match $actual"))
       .whenA(declared != actual)
 
-  /** Runs `f` with exclusive access to the (mutable, not thread-safe) store. */
+  /** Runs `f` with genuinely exclusive access to the (mutable, not thread-safe) store. */
   private def exclusive[A](f: => A): F[A] =
-    lock.flatModify(_ => ((), Sync[F].delay(f)))
+    mutex.lock.surround(Sync[F].delay(f))
 
   def writeBatch(request: pb.WriteBatchRequest, ctx: Headers): F[pb.WriteBatchResponse] =
     for
