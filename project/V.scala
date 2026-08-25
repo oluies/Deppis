@@ -13,7 +13,7 @@ object V {
   // never reimplement the ratchet, so keeping it current is a security concern, not just hygiene.
   val libsignal = "0.86.5"
   // Pekko typed actors — the round-orchestration skeleton for the networked TLS server (T020).
-  val pekko = "1.6.0"
+  val pekko = "1.7.0"
   // Bouncy Castle — generates the dev self-signed TLS cert (T020); netty's built-in generator uses
   // sun.security internals removed in modern JDKs. Vetted lib (Constitution I).
   val bouncycastle = "1.85"
