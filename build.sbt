@@ -282,6 +282,16 @@ lazy val transport = (project in file("transport"))
   .settings(
     name := "transport",
     scalacOptions ++= Seq("-deprecation", "-feature"),
+    // ONE copy of the shared contracts. `store.proto` and `notify.proto` used to exist twice — here
+    // and under oblivious-sidecar/proto — and the two store.proto files had already drifted apart in
+    // their comments while staying wire-identical. Since `bench` gets its stubs from this project,
+    // that made the benchmark's "same workload, one contract" premise quietly untrue: the Rust and
+    // Scala servers compile the sidecar's copy, the load driver compiled this one. The duplicates
+    // are deleted; attestation.proto and messaging.proto are transport-only and stay put.
+    Compile / PB.protoSources := Seq(
+      (Compile / sourceDirectory).value / "protobuf",
+      file("oblivious-sidecar") / "proto"
+    ),
     // Suites here must not run concurrently. `PqTls.enforce` reads and writes the process-wide
     // `jdk.tls.namedGroups` (it has to — netty's SslContextBuilder exposes no per-context named
     // groups), and PqTlsSpec deliberately sets that property to a conflicting value to prove
@@ -554,8 +564,9 @@ lazy val sidecarScalaNative = (project in file("sidecar-scala-native"))
   )
 
 // The Gatling load driver. Depends on `transport` for the ScalaPB stubs that carry grpc-java
-// MethodDescriptors (the gRPC simulation needs them) — the same generated contract the Scala
-// server implements, so both simulations speak one .proto.
+// MethodDescriptors (the gRPC simulation needs them). `transport` now compiles
+// oblivious-sidecar/proto directly, so this really is the same single .proto file the Rust sidecar
+// and `sidecar-scala` are built from — it previously inherited a second, separately-maintained copy.
 //
 // No `gatling-sbt` plugin: it has no sbt 2 build. Gatling is launched through its own
 // `io.gatling.app.Gatling` entry point by `bench/Run`, which is all the plugin does anyway.
@@ -612,6 +623,12 @@ lazy val root = (project in file("."))
 // CI's JVM job runs `testJvm` (the Scala.js job covers protocolCoreJS under Node, so it is excluded
 // here to avoid a duplicate Node run). KEEP THIS LIST IN SYNC with the `root` aggregate above when a
 // JVM module is added — co-located here, next to the aggregate, so it is hard to miss.
+// The Scala Native half of `ObliviousStoreSuite`. It is NOT in the root aggregate or in `testJvm`
+// — a Native link needs clang, which the JVM job's runner is not required to have — so it gets its
+// own alias and its own CI job. `testFull`, not `test`: sbt 2's `test` delegates to testQuick
+// semantics and can run ZERO tests while exiting 0.
+addCommandAlias("testNative", ";sidecarScalaNative/testFull")
+
 addCommandAlias(
   "testJvm",
   ";protocolCore/test ;crypto/test ;anonymity/test ;server/test ;transport/test ;sidecarScala/test"

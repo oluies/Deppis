@@ -76,8 +76,20 @@ class ObsdGrpcSimulation extends Simulation:
             .send { session =>
               Workload.readRequest(1L, session("tokens").as[Seq[Array[Byte]]])
             }
+            // A miss is the same SIZE as a hit on the wire (257 bytes either way, by design), so
+            // without reading the found tag this measures "the store scanned something" rather
+            // than "the store returned the frame we wrote".
+            .check(
+              response((r: metadatamessenger.store.v1.store.ReadBatchResponse) =>
+                io.gatling.commons.validation.Success(Workload.foundTag(r))
+              ).is(1)
+            )
         )
         .exec(session => session.set("iteration", session("iteration").as[Int] + 1))
     }
 
-  setUp(scn.inject(atOnceUsers(users))).protocols(protocol)
+  // Gatling exits 0 even when every request failed, so without this the runner's only gate would
+  // be "a throughput line was printed" — which a 100%-KO run also prints.
+  setUp(scn.inject(atOnceUsers(users)))
+    .protocols(protocol)
+    .assertions(global.failedRequests.count.is(0))

@@ -56,6 +56,13 @@ class ScalaSidecarSimulation extends Simulation:
   // `round_id`, so a successful body is always longer than the 5-byte frame header.
   private val answered = bodyBytes.transform(_.length > 5).is(true)
 
+  // And for reads, that it actually HIT. `answered` cannot tell: a carrier miss carries a 257-byte
+  // `sealed_result` exactly as a hit does, so both bodies are the same length. The found tag is the
+  // last byte of the last result, which — for a single-entry batch — is the last byte of the
+  // message, and the gRPC frame adds only a 5-byte header at the front.
+  private val readHit =
+    bodyBytes.transform(b => if b.isEmpty then -1 else b(b.length - 1) & 0xff).is(1)
+
   private val scn = scenario("sidecar-scala store round (gRPC/HTTP1.1, Scala)")
     .exec(_.set("iteration", 0))
     .during(duration) {
@@ -78,9 +85,13 @@ class ScalaSidecarSimulation extends Simulation:
                 Workload.readRequest(1L, session("tokens").as[Seq[Array[Byte]]]).toByteArray
               )
             })
-            .check(status.is(200), answered)
+            .check(status.is(200), answered, readHit)
         )
         .exec(session => session.set("iteration", session("iteration").as[Int] + 1))
     }
 
-  setUp(scn.inject(atOnceUsers(users))).protocols(protocol)
+  // Gatling exits 0 even when every request failed, so without this the runner's only gate would
+  // be "a throughput line was printed" — which a 100%-KO run also prints.
+  setUp(scn.inject(atOnceUsers(users)))
+    .protocols(protocol)
+    .assertions(global.failedRequests.count.is(0))

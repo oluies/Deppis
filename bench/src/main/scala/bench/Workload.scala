@@ -58,6 +58,21 @@ object Workload:
       entries = tokens.map(t => pb.ReadEntry(retrievalToken = ByteString.copyFrom(t)))
     )
 
+  /** The found tag of the LAST result in a read response, or -1 if there are none.
+    *
+    * Checked by both simulations because a miss and a hit are the same SIZE on the wire — the
+    * `sealed_result` blob is 257 bytes either way, by design — so nothing about the response
+    * length distinguishes "read the frame back" from "scanned the whole store and found nothing".
+    * Without this the harness would happily report a throughput number for a run that never hit:
+    * a capacity misconfiguration, a batch large enough to overflow the store (the dev front drops
+    * silently when full), or a regression in the store itself all produce exactly that.
+    */
+  def foundTag(r: pb.ReadBatchResponse): Int =
+    r.results.lastOption match
+      case Some(res) if res.sealedResult.size > 0 =>
+        res.sealedResult.byteAt(res.sealedResult.size - 1) & 0xff
+      case _ => -1
+
   /** Wraps a serialized protobuf message in the gRPC length-prefixed framing: one compression byte
     * (0 = uncompressed) then a big-endian uint32 length. Used by the HTTP/1.1 simulation, which has
     * to do by hand what the gRPC client does for the h2 one. */

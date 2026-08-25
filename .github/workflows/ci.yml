@@ -280,6 +280,42 @@ jobs:
           fi
           echo "all $ran integration tests ran, including every required trust-boundary case"
 
+  scalanative:
+    name: Scala Native — store parity + link (bench)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "24"
+      - uses: sbt/setup-sbt@v1
+      # Scala Native needs a C/C++ toolchain to link. `commix` (the GC pinned in build.sbt) ships
+      # with Scala Native, so no Boehm libgc is required; protoc is needed because the module
+      # compiles oblivious-sidecar/proto through ScalaPB + the http4s-grpc generator.
+      - name: Install clang + protoc
+        run: sudo apt-get update && sudo apt-get install -y clang libunwind-dev protobuf-compiler
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cache/coursier
+            ~/.sbt
+            ~/.ivy2/cache
+          key: sbt-${{ runner.os }}-${{ hashFiles('build.sbt', 'project/build.properties', 'project/plugins.sbt', 'project/V.scala') }}
+          restore-keys: sbt-${{ runner.os }}-
+      # ObliviousStoreSuite's whole point is that the Scala port matches the Rust store on BOTH
+      # platforms. Without this job that claim was unenforced: `testJvm` covers only the JVM, and
+      # the Native half is exactly where a divergence is plausible — different optimiser, different
+      # Byte/Int codegen, a multithreaded runtime. `testFull`, not `test`: sbt 2's `test` delegates
+      # to testQuick semantics and can run ZERO tests while exiting 0.
+      - name: Run the store parity suite against the Scala Native link
+        run: |
+          set -o pipefail
+          sbt -batch -no-colors 'testNative' 2>&1 | tee /tmp/native.out
+          # Fail closed if the suite silently ran nothing (the sbt 2 trap above).
+          grep -qE 'Passed: Total [1-9][0-9]*' /tmp/native.out \
+            || { echo "::error::the Scala Native suite reported no passing tests"; exit 1; }
+
   scalajs:
     name: Scala.js engine — cross-build + link (T019)
     runs-on: ubuntu-latest

@@ -30,6 +30,15 @@ the load average at both ends of the run. The ratio to the control is the number
 The spread column is itself informative: `obsd` is noisy because it is fast enough that the load
 generator and the machine dominate, while Native is steady to ±0.5% because it *is* the bottleneck.
 
+Two caveats on that column specifically. These figures come from a batch run BEFORE the harness
+discarded a warm-up rep, so the JVM row's 4,543 → 5,495 → 5,619 is monotonically increasing and is
+at least as well explained by JIT warm-up as by machine noise — the server is started once per
+target and reused across reps. `run-all.sh` now runs and discards one warm-up rep per target, so
+later batches do not carry that bias, but the numbers above still do. Separately, `during(duration)`
+can cut a virtual user between its `WriteBatch` and the paired `ReadBatch`, so each rep can leave up
+to `users × batch` slots occupied in a store that is not reset between reps; at capacity 4096 with
+5 users that is negligible, but it would not be at small capacities.
+
 ### Where the Native gap actually comes from
 
 First, which layer. Measured by varying capacity, which is what sets the size of the oblivious scan:
@@ -45,8 +54,14 @@ Native only 16% (465 → 390 rps), so it is not waiting on locks or fibers eithe
 roughly one request in flight. **Native's framework overhead is competitive** (within 1.4× of the
 JVM once the scan is small); the gap is the scan.
 
+**These capacity figures are a different batch from the headline table above, and are single runs
+rather than medians** — 3,899 and 465 rps here versus 5,495 and 484 there for what is otherwise the
+same configuration. Given the ±20-40% batch-to-batch movement this document insists on, only the
+*within-row* ratios are meaningful; do not read the absolute numbers across the two tables.
+
 Second, what about the scan. `sidecar.Main bench` and `storebench` run the loop with no transport
-at all (see "The core microbenchmark" below). At capacity 4096, µs per write+read round:
+at all (see "The core microbenchmark" below). At capacity 4096, µs per write+read round — these are
+single runs, but the effect sizes are 10-25×, far above the run-to-run variance:
 
 | implementation | µs/round | vs Rust | vs JVM |
 |---|---:|---:|---:|
@@ -118,10 +133,22 @@ that failure can't be mistaken for a result, and `run-all.sh` refuses to pretend
 run and saying so if you raise the user count. Lifting the cap needs Gatling Enterprise or the
 Apache-2.0 `com.github.phisgr:gatling-grpc`.
 
-**Checking only the status code.** http4s-grpc answers a *failed* call with HTTP 200 and an empty
-body, putting the error in a `grpc-status` trailer that Gatling's HTTP client does not surface. A
-simulation asserting `status.is(200)` would give a flawless report for a server rejecting every
-request. `ScalaSidecarSimulation` also requires a non-empty response body.
+**Checking only the status code — or only the response size.** http4s-grpc answers a *failed* call
+with HTTP 200 and an empty body, putting the error in a `grpc-status` trailer that Gatling's HTTP
+client does not surface, so `status.is(200)` alone would give a flawless report for a server
+rejecting everything. Worse, a read MISS is the same size as a hit — `sealed_result` is 257 bytes
+either way, by design — so a length check does not catch a run that never hit at all, which is what
+an overflowing store or a capacity misconfiguration produces. Both simulations now assert the found
+tag is 1, and both declare `assertions(global.failedRequests.count.is(0))`, because Gatling exits 0
+even on a 100%-KO run.
+
+**A runner that read throughput from the wrong column.** Gatling's console table is
+`label | Total | OK | KO`, and the extraction took "the last number on the line". With zero failures
+the KO cell is a `-` marker, so that happened to land on OK — but the moment anything failed, the KO
+cell held a number and the harness silently recorded KO throughput as the result. It now pulls a
+named column, echoes OK/KO counts per rep, keeps sbt's exit status instead of `|| true`, re-checks
+the port before every rep, fails a rep on any KO, and continues to the remaining targets instead of
+letting `set -e` abort the whole batch (which also cost the summary and the environment footer).
 
 ## Why the Rust and Scala runs don't share a transport
 

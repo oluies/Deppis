@@ -2,7 +2,7 @@ package sidecar
 
 import cats.effect.{ExitCode, IO, IOApp}
 import cats.effect.std.Mutex
-import com.comcast.ip4s.{Host, Ipv4Address, Port}
+import com.comcast.ip4s.{Host, Port}
 import metadatamessenger.store.v1.store as pb
 import org.http4s.ember.server.EmberServerBuilder
 import org.typelevel.log4cats.LoggerFactory
@@ -34,7 +34,10 @@ object Main extends IOApp:
   private def parseAddr(s: String): IO[(Host, Port)] =
     s.split(':') match
       case Array(h, p) =>
-        (Ipv4Address.fromString(h), Port.fromString(p)) match
+        // `Host`, not `Ipv4Address`: the doc, the default-value comment and the error message all
+        // say host:port, so rejecting `localhost:50061` — or an IPv6 literal — with "is not a valid
+        // host:port" described syntactically valid input as malformed.
+        (Host.fromString(h), Port.fromString(p)) match
           case (Some(host), Some(port)) => IO.pure((host, port))
           case _ => die(s"SIDECAR_ADDR is not a valid host:port: `$s`")
       case _ => die(s"SIDECAR_ADDR must be host:port, got `$s`")

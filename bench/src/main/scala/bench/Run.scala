@@ -17,4 +17,7 @@ object Run:
       )
       sys.exit(2)
     }
-    Gatling.main(Array("-s", simulation, "-rf", "bench/target/gatling"))
+    // `target/gatling`, NOT `bench/target/gatling`: build.sbt already sets this project's
+    // `run / baseDirectory` to <root>/bench, so the relative path was resolving to
+    // bench/bench/target/gatling while the README and the runner pointed at an empty directory.
+    Gatling.main(Array("-s", simulation, "-rf", "target/gatling"))
