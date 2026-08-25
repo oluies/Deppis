@@ -211,10 +211,74 @@ jobs:
             ~/.ivy2/cache
           key: sbt-${{ runner.os }}-${{ hashFiles('build.sbt', 'project/build.properties', 'project/plugins.sbt', 'project/V.scala') }}
           restore-keys: sbt-${{ runner.os }}-
-      - name: Build obsd (the Rust sidecar binary)
-        run: cargo build --bin obsd --manifest-path oblivious-sidecar/Cargo.toml
-      - name: Run the cross-process integration test (Scala fronts ↔ obsd)
-        run: OBSD_BIN="$(pwd)/oblivious-sidecar/target/debug/obsd" sbt -batch -no-colors "transport/testOnly transport.SidecarIntegrationSpec"
+      # BOTH binaries: the split-topology tests run obsd (store-only) and pingd side by side. Without
+      # pingd those tests `cancel` rather than fail, which reads exactly like passing — so build it
+      # here or the trust-boundary coverage silently disappears from CI.
+      - name: Build obsd + pingd (the Rust sidecar binaries)
+        run: cargo build --bin obsd --bin pingd --manifest-path oblivious-sidecar/Cargo.toml
+      - name: Run the cross-process integration test (Scala fronts ↔ obsd, and the split front)
+        run: |
+          # pipefail: without it the pipe to `tee` swallows sbt's exit code and a failing test would
+          # reach the cancel-check below as a green step.
+          set -o pipefail
+          OBSD_BIN="$(pwd)/oblivious-sidecar/target/debug/obsd" \
+          PINGD_BIN="$(pwd)/oblivious-sidecar/target/debug/pingd" \
+          sbt -batch -no-colors "transport/testOnly transport.SidecarIntegrationSpec" 2>&1 | tee /tmp/split.out
+          # ASSERT ON THE SUMMARY COUNTERS, not on one substring. A cancelled test is not a passing
+          # test — but neither is an IGNORED one, and an earlier revision of this guard could not see
+          # the difference: changing `test(...)` to `ignore(...)` still prints the test NAME (so a
+          # name grep matches) and still prints `canceled 0` (so that grep matches too), while the
+          # case silently leaves CI. Requiring `ignored 0` and `pending 0` alongside `canceled 0`
+          # closes that, and requiring the summary LINE to exist means a wording change fails loudly
+          # instead of skipping every check below it.
+          # `|| true`: this step runs under `bash -e` with pipefail set above, so without it a grep
+          # that matches nothing aborts the step right here — making the emptiness check below, and
+          # its annotation, unreachable dead code. The guard would still fail closed, but the one
+          # case it was written to EXPLAIN (a ScalaTest wording change) would exit with no clue why.
+          summary="$(grep -E 'Tests: succeeded [0-9]+, failed [0-9]+, canceled [0-9]+, ignored [0-9]+, pending [0-9]+' /tmp/split.out | tail -1 || true)"
+          if [ -z "$summary" ]; then
+            echo "::error::no ScalaTest summary line in the output — cannot verify the suite ran"
+            exit 1
+          fi
+          echo "summary -> $summary"
+          for zero in "canceled 0" "ignored 0" "pending 0"; do
+            case "$summary" in
+              *"$zero"*) ;;
+              *) echo "::error::SidecarIntegrationSpec summary is not '$zero': $summary"; exit 1 ;;
+            esac
+          done
+
+          # NAME the cases as well. The counters above prove the suite ran cleanly; only the names
+          # prove THESE cases are the ones that ran. A bare count floor decays into a no-op as the
+          # suite grows — once any new test lifts the total, the trust-boundary cases can be deleted
+          # and the count still passes.
+          required=(
+            "a full round works with the store and the notify front in TWO processes"
+            "the STORE process serves no notify service at all"
+            "a malformed notify key REFUSES to start rather than using the dev key"
+            "an unknown OBSD_SERVICES REFUSES to start rather than defaulting"
+            "the split role SERVES, and stays silent about the notify key it never uses"
+            "the split role NOTICES a notify key that is set but inert"
+            "the \`both\` role DOES warn when it falls back to the dev notify key"
+            "pingd DOES warn when it falls back to the dev notify key"
+          )
+          missing=0
+          for name in "${required[@]}"; do
+            if ! grep -qF "$name" /tmp/split.out; then
+              echo "::error::required integration test did not run: $name"
+              missing=1
+            fi
+          done
+          [ "$missing" -eq 0 ] || exit 1
+
+          # Belt and braces: the executed count must at least cover the named set, and the line must
+          # exist (it is echoed, so a missing one is visible rather than silently skipped).
+          ran="$(sed -n 's/.*Total number of tests run: \([0-9]*\).*/\1/p' /tmp/split.out | tail -1)"
+          if [ -z "$ran" ] || [ "$ran" -lt "${#required[@]}" ]; then
+            echo "::error::SidecarIntegrationSpec ran '${ran:-no}' tests, expected at least ${#required[@]}"
+            exit 1
+          fi
+          echo "all $ran integration tests ran, including every required trust-boundary case"
 
   scalajs:
     name: Scala.js engine — cross-build + link (T019)
