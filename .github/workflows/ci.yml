@@ -38,7 +38,7 @@ jobs:
           sudo cmake --install liboqs/build
           sudo ldconfig
           echo "OQS_PATH=/usr/local/lib/liboqs.so" >> "$GITHUB_ENV"
-      - uses: actions/setup-java@v5
+      - uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "24" # Foreign Function & Memory API is final since 22
@@ -129,7 +129,7 @@ jobs:
       CS_VERSION: 2.1.25-M26
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-java@v5
+      - uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "24"
@@ -194,7 +194,7 @@ jobs:
       - uses: actions/checkout@v7
       - name: Install libsodium + protoc
         run: sudo apt-get update && sudo apt-get install -y libsodium-dev protobuf-compiler
-      - uses: actions/setup-java@v5
+      - uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "24"
@@ -285,7 +285,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-java@v5
+      - uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "24"
@@ -321,7 +321,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-java@v5
+      - uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "24"
