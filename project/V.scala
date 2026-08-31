@@ -22,7 +22,7 @@ object V {
   // Gatling: the load driver. 3.13.5 publishes UNSUFFIXED artifacts that are Scala 2.13-compiled;
   // Scala 3 consumes them directly. `gatling-grpc` is FIRST-PARTY as of this line (built on
   // grpc-netty), so no third-party plugin is involved.
-  val gatling = "3.13.5"
+  val gatling = "3.15.1"
   // http4s-grpc: a pure-Scala gRPC implementation on http4s — no grpc-java — which is why it, and
   // not fs2-grpc, is what cross-publishes for Scala Native. 0.3.0 targets http4s 0.23.34 and
   // scalapb-runtime 0.11.20 (= V.scalapb above), so the whole stack lines up on one pin.
