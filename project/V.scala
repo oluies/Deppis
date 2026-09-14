@@ -27,7 +27,7 @@ object V {
   // not fs2-grpc, is what cross-publishes for Scala Native. 0.3.0 targets http4s 0.23.34 and
   // scalapb-runtime 0.11.20 (= V.scalapb above), so the whole stack lines up on one pin.
   val http4sGrpc = "0.3.0"
-  val http4s = "0.23.36"
+  val http4s = "0.23.37"
   val catsEffect = "3.7.1"
   val fs2 = "3.13.0"
   val log4cats = "2.8.0" // the newest that publishes for BOTH jvm and native0.5 (2.7.1 is jvm-only)
