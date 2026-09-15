@@ -75,6 +75,11 @@ compresses well. Measured on Scala 3.3.8:
 | `--minify` | 580 KB | **164 KB** | **130 KB** |
 | without | 1.62 MB | 250 KB | 179 KB |
 
+> These are historical figures, kept as measured and deliberately not re-run: the build has since
+> moved to a newer Scala (see `build.sbt`). Spot-checking the un-minified link on 3.9.0 gave
+> 1.35 MB raw / 211 KB gzip / 153 KB brotli, so the numbers above are now conservative rather than
+> wrong. The `--minify` row would need a fresh esbuild run to restate.
+
 Minify is a free ~65% raw / ~34% gzip win. Serve compressed (any CDN/nginx does
 this); don't optimize against the raw number.
 
