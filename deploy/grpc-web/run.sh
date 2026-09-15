@@ -21,7 +21,11 @@ cleanup
 
 echo "[run] staging the JVM ObliviousStore server (sbt transport/stageServer) ..."
 export JAVA_HOME="${JAVA_HOME:-$(/usr/libexec/java_home -v 26 2>/dev/null || true)}"
-( cd ../.. && sbt -batch transport/stageServer )
+# Throwaway action cache, same reason as the CI staging step (.github/workflows/ci.yml): sbt 2
+# caches task results machine-wide, stageServer returns Unit, and its real output is the staged
+# lib/ on disk. On a warm cache sbt replays the Unit, stages nothing and still exits 0 — the
+# `find` below would then pick up a STALE lib/ from an earlier run, or none at all.
+( cd ../.. && sbt -batch "set Global / localCacheDirectory := file(\"$(mktemp -d)\"); transport/stageServer" )
 LIB="$(find ../../target -type d -path '*transport/grpc-web-server/lib' | head -1)"
 [ -n "$LIB" ] || { echo "[run] staged lib not found" >&2; exit 1; }
 rm -rf server-lib && mkdir server-lib && cp "$LIB"/*.jar server-lib/

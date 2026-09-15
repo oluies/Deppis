@@ -87,7 +87,20 @@ jobs:
       - name: Staged CLI + AOT cache — stdout stays pure JSON
         run: |
           set -o pipefail
-          sbt -batch -no-colors 'protocolCore/stageCli' 2>&1 | tee /tmp/stage.out
+          # Defeat sbt 2's action cache for THIS invocation. stageCli's real output is a filesystem
+          # side effect (target/**/protocol-core/cli), but the task returns Unit, and sbt 2 caches
+          # task results in a MACHINE-WIDE action cache that `clean` does not clear. On a cache hit
+          # sbt replays the cached Unit, never runs the body, prints `[success] elapsed time: 0 s`
+          # and stages NOTHING — so the assertions below fail on a run that restored a warm cache
+          # while the identical commit passes on a cold one. That is exactly what happened on #141:
+          # two runs, same SHA, same restored cache keys, opposite results. Reproduced locally by
+          # deleting the staged dir and re-running the task: it is not recreated.
+          # A throwaway localCacheDirectory forces real execution. Only stageCli recomputes — the
+          # compiled classes already sit in target/ — so this costs ~3s, measured.
+          stage_cache="$(mktemp -d)"
+          sbt -batch -no-colors \
+            "set Global / localCacheDirectory := file(\"$stage_cache\"); protocolCore/stageCli" \
+            2>&1 | tee /tmp/stage.out
           # Match the staged dir by its EXACT parent (`<module>/cli`), not by a loose `*protocol-core*`
           # substring: `cli` is also the package name, so every compiled output tree carries a `cli/`
           # (classes/cli, test-classes/cli, and the same again per Scala version and for the JS build).
