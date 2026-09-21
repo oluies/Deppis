@@ -241,7 +241,7 @@ lazy val crypto = (project in file("crypto"))
       // MAINTAINED libsignal (Rust core + Java bindings); we wrap it, never reimplement the ratchet.
       "org.signal" % "libsignal-client" % V.libsignal,
       // independent vetted Blake2b impl, used only to cross-validate libsodium in KATs
-      "org.bouncycastle" % "bcprov-jdk18on" % V.bouncycastle % Test
+      "org.bouncycastle" % "bcprov-jdk18on" % V.bcprov % Test
     )
   )
 
@@ -349,10 +349,10 @@ lazy val transport = (project in file("transport"))
       // provider that supplies the RFC 10024 hybrid key agreement (bctls; see PqTls). The JDK's own
       // JSSE offers NO hybrid group even on JDK 26 — measured, see PqTls's doc comment — so the
       // provider swap is what makes post-quantum TLS possible at all. bcutil is bctls's dependency.
-      "org.bouncycastle" % "bcprov-jdk18on" % V.bouncycastle,
-      "org.bouncycastle" % "bcpkix-jdk18on" % V.bouncycastle,
-      "org.bouncycastle" % "bctls-jdk18on" % V.bouncycastle,
-      "org.bouncycastle" % "bcutil-jdk18on" % V.bouncycastle
+      "org.bouncycastle" % "bcprov-jdk18on" % V.bcprov,
+      "org.bouncycastle" % "bcpkix-jdk18on" % V.bcpkix,
+      "org.bouncycastle" % "bctls-jdk18on" % V.bctls,
+      "org.bouncycastle" % "bcutil-jdk18on" % V.bcutil
     ) ++ testDeps
   )
 
