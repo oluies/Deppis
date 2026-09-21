@@ -32,5 +32,5 @@ object V {
   val fs2 = "3.13.0"
   val log4cats = "2.8.0" // the newest that publishes for BOTH jvm and native0.5 (2.7.1 is jvm-only)
   val munit = "1.2.4" // match what munit-cats-effect pulls, or Native evicts on test-interface
-  val munitCatsEffect = "2.2.0"
+  val munitCatsEffect = "2.2.1"
 }
