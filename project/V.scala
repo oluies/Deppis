@@ -15,8 +15,25 @@ object V {
   // Pekko typed actors — the round-orchestration skeleton for the networked TLS server (T020).
   val pekko = "1.7.0"
   // Bouncy Castle — generates the dev self-signed TLS cert (T020); netty's built-in generator uses
-  // sun.security internals removed in modern JDKs. Vetted lib (Constitution I).
-  val bouncycastle = "1.85"
+  // sun.security internals removed in modern JDKs. Vetted lib (Constitution I). bctls also supplies
+  // the RFC 10024 hybrid TLS group (transport/.../PqTls.scala).
+  //
+  // ONE KEY PER ARTIFACT, deliberately. BouncyCastle versions these four independently — bcprov
+  // ships patch releases the others do not (1.85.2), and bctls did the same (1.86.1). A single shared
+  // key could only ever take a version ALL FOUR publish, so every artifact-only patch produced an
+  // unbuildable Steward PR: bcprov 1.85.2 before, bctls 1.86.1 as #147. Separate keys let each move
+  // to what actually exists.
+  //
+  // The SOURCE OF TRUTH for which combination is supported is BouncyCastle's own BOM,
+  // org.bouncycastle:bc-jdk18on-bom. Keep these four equal to what that BOM pins for its version.
+  // Currently bc-jdk18on-bom 1.86.1: bcprov/bcpkix/bcutil 1.86, bctls 1.86.1 — a mixed set, and BC's
+  // own supported configuration. (bctls 1.86.1 fixes the 1.86 multi-release-jar NoSuchMethodError:
+  // its versions/9 SSLEngineUtil.create now returns javax.net.ssl.SSLEngine, matching the caller —
+  // verified with javap. Upstream: bcgit/bc-java#2448.)
+  val bcprov = "1.86"
+  val bcpkix = "1.86"
+  val bctls = "1.86.1"
+  val bcutil = "1.86"
 
   // ---- benchmark stack (bench/ + sidecar-scala) ----
   // Gatling: the load driver. 3.13.5 publishes UNSUFFIXED artifacts that are Scala 2.13-compiled;
