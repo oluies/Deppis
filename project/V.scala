@@ -25,11 +25,17 @@ object V {
   // to what actually exists.
   //
   // The SOURCE OF TRUTH for which combination is supported is BouncyCastle's own BOM,
-  // org.bouncycastle:bc-jdk18on-bom. Keep these four equal to what that BOM pins for its version.
-  // Currently bc-jdk18on-bom 1.86.1: bcprov/bcpkix/bcutil 1.86, bctls 1.86.1 — a mixed set, and BC's
-  // own supported configuration. (bctls 1.86.1 fixes the 1.86 multi-release-jar NoSuchMethodError:
+  // org.bouncycastle:bc-jdk18on-bom. `bcBom` names the BOM version these four claim to match, and
+  // CI ENFORCES it (scripts/check-bc-bom.py, in the Hygiene job): any key that disagrees with that
+  // BOM's pins fails the build. Currently bc-jdk18on-bom 1.86.1: bcprov/bcpkix/bcutil 1.86, bctls
+  // 1.86.1 — a mixed set, and BC's own supported configuration.
+  //
+  // Steward does not track bcBom (it is not a dependency), so a Steward PR bumping any BC key will go
+  // RED on that check. Deliberately: every BC bump then needs a human to find the BOM that sanctions
+  // the new set and set bcBom plus all four keys to match, in the same PR. (bctls 1.86.1 fixes the 1.86 multi-release-jar NoSuchMethodError:
   // its versions/9 SSLEngineUtil.create now returns javax.net.ssl.SSLEngine, matching the caller —
   // verified with javap. Upstream: bcgit/bc-java#2448.)
+  val bcBom = "1.86.1"
   val bcprov = "1.86"
   val bcpkix = "1.86"
   val bctls = "1.86.1"
