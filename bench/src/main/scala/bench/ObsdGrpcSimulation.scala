@@ -41,19 +41,26 @@ class ObsdGrpcSimulation extends Simulation:
   )
   private val batch = sys.env.getOrElse("BENCH_BATCH", "1").toInt
 
-  // The protocol builder is constructed directly rather than through the `grpc` DSL alias. `grpc`
-  // is overloaded — one overload takes the implicit GatlingConfiguration and yields this PROTOCOL
-  // builder, the other takes a request name and yields a request builder — and with Gatling's
-  // `value2Expression` conversion in scope, Scala 3 resolves even the explicit
-  // `grpc(configuration)` form to the request-name overload. Naming the type sidesteps that.
-  private val protocol = io.gatling.grpc.protocol
-    .GrpcProtocolBuilder(io.gatling.core.Predef.configuration)
-    .forAddress(host, port)
-    // No parens on these two: they are parameterless Scala defs, and Gatling's `value2Expression`
-    // conversion means `usePlaintext()` is read as applying `Function1.apply` to the RESULT —
-    // which fails with a baffling "missing argument for parameter v1" instead of an arity error.
-    .usePlaintext
-    .shareChannel
+  // The protocol builder is constructed directly rather than through the `grpc` DSL alias. In the
+  // Predef, `grpc` is BOTH a value of this type and a method taking a request name, and with
+  // Gatling's `value2Expression` conversion in scope Scala 3 has resolved the explicit form to the
+  // request-name overload before now. Naming the type sidesteps the ambiguity entirely.
+  //
+  // gatling-grpc 3.15.x moved the channel settings off the protocol builder: it no longer takes the
+  // GatlingConfiguration and instead holds a list of GrpcServerConfigurationBuilder, which is where
+  // forAddress/usePlaintext/shareChannel now live. `DefaultLegacy` is the unnamed server slot that
+  // `forAddress` used to configure implicitly.
+  private val protocol = io.gatling.grpc.protocol.GrpcProtocolBuilder.Empty
+    .serverConfigurations(
+      io.gatling.grpc.protocol.GrpcServerConfigurationBuilder.DefaultLegacy
+        .forAddress(host, port)
+        // No parens on these two: they are parameterless Scala defs, and Gatling's
+        // `value2Expression` conversion means `usePlaintext()` is read as applying `Function1.apply`
+        // to the RESULT — which fails with a baffling "missing argument for parameter v1" instead of
+        // an arity error.
+        .usePlaintext
+        .shareChannel
+    )
 
   private def tokensFor(session: Session): Seq[Array[Byte]] =
     val it = session("iteration").asOption[Int].getOrElse(0)
