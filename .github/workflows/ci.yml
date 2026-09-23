@@ -403,6 +403,12 @@ jobs:
           test -f oblivious-sidecar/Cargo.lock || { echo "::error::Cargo.lock must be committed"; exit 1; }
           test -f package-lock.json || { echo "::error::package-lock.json must be committed (pinned JS deps)"; exit 1; }
           echo "pinned-deps OK"
+      # project/V.scala keeps one version key per BouncyCastle artifact (BC versions them
+      # independently). Separate keys can drift into a set no BouncyCastle BOM sanctions while the TLS
+      # tests still pass, so this pins them mechanically to bc-jdk18on-bom at V.bcBom. It goes red on
+      # every Steward BC bump by design — see the comment in project/V.scala.
+      - name: BouncyCastle versions match a BouncyCastle BOM (Constitution XI)
+        run: python3 scripts/check-bc-bom.py
       # Same GitHub-releases flakiness as the lint job: this download failed twice in one evening
       # (`503`, then `curl: (56) Connection died`), failing the secret scan for network reasons. A
       # security gate that goes red on a CDN hiccup trains people to ignore it, so cache the binary
