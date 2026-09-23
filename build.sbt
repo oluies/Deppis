@@ -576,11 +576,13 @@ lazy val bench = (project in file("bench"))
     name := "bench",
     scalacOptions ++= Seq("-deprecation", "-feature"),
     publish / skip := true,
-    // Gatling 3.13.5 is Scala 2.13-compiled and pulls `scala-collection-compat_2.13`, while
-    // ScalaPB's Scala 3 artifacts (via `transport`) pull `_3`. sbt refuses a classpath carrying
-    // both suffixes of one module. They provide the same `scala.collection.compat` shims, so we
-    // drop the 2.13 copy and let the _3 one serve both — verified by actually running a simulation,
-    // not just by compiling.
+    // A GUARD, not a live fix, since Gatling 3.15.1: gatling-shared-util_2.13 0.0.14 no longer
+    // declares `scala-collection-compat_2.13` at all (0.0.12, which 3.13.5 pulled, did), so the
+    // classpath now carries only the `_3` copy and this rule matches nothing — checked against the
+    // resolved bench classpath, not just the POMs. It stays because the clash it prevents is real
+    // and silent when it returns: sbt refuses a classpath carrying both suffixes of one module,
+    // and ScalaPB's Scala 3 artifacts (via `transport`) pull `_3`. Drop it only after confirming a
+    // Gatling release has not reintroduced the 2.13 copy.
     excludeDependencies += ExclusionRule("org.scala-lang.modules", "scala-collection-compat_2.13"),
     run / fork := true,
     // Gatling reaches into java.lang internals to intern strings in its stats writer; on a modern
@@ -593,7 +595,7 @@ lazy val bench = (project in file("bench"))
     // Gatling writes reports relative to the working directory; keep them out of the repo root.
     run / baseDirectory := (ThisBuild / baseDirectory).value / "bench",
     libraryDependencies ++= Seq(
-      // 3.13.5 artifacts are UNSUFFIXED but Scala 2.13-compiled; Scala 3 consumes them directly.
+      // These artifacts are UNSUFFIXED but Scala 2.13-compiled; Scala 3 consumes them directly.
       "io.gatling" % "gatling-app" % V.gatling,
       "io.gatling" % "gatling-core" % V.gatling,
       "io.gatling" % "gatling-http" % V.gatling,
@@ -629,7 +631,12 @@ lazy val root = (project in file("."))
 // semantics and can run ZERO tests while exiting 0.
 addCommandAlias("testNative", ";sidecarScalaNative/testFull")
 
+// `bench` is COMPILE-ONLY here and last in the chain. It has no tests — running the simulation
+// needs a live obsd and is capped by gatling-grpc's trial licence — but it must be BUILT by
+// something, and for a long time nothing built it: PRs #131/#132 bumped Gatling to 3.15.1, broke
+// `GrpcProtocolBuilder`, and reported every check green. The compile lives in this list rather
+// than in ci.yml so the KEEP-IN-SYNC contract above governs module coverage in one place.
 addCommandAlias(
   "testJvm",
-  ";protocolCore/test ;crypto/test ;anonymity/test ;server/test ;transport/test ;sidecarScala/test"
+  ";protocolCore/test ;crypto/test ;anonymity/test ;server/test ;transport/test ;sidecarScala/test ;bench/Test/compile"
 )

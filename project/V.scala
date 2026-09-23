@@ -42,7 +42,7 @@ object V {
   val bcutil = "1.86"
 
   // ---- benchmark stack (bench/ + sidecar-scala) ----
-  // Gatling: the load driver. 3.13.5 publishes UNSUFFIXED artifacts that are Scala 2.13-compiled;
+  // Gatling: the load driver. It publishes UNSUFFIXED artifacts that are Scala 2.13-compiled;
   // Scala 3 consumes them directly. `gatling-grpc` is FIRST-PARTY as of this line (built on
   // grpc-netty), so no third-party plugin is involved.
   val gatling = "3.15.1"
