@@ -67,7 +67,15 @@ jobs:
           # first failing command, so a test failure fails the step before the gate runs. `testJvm`
           # (defined in build.sbt next to the aggregate) runs the JVM modules; the JS module is
           # covered by the scalajs job, so it is intentionally not run here.
-          sbt -batch -no-colors ';testJvm ;protocolCore/runMain cli.Pstatus show' 2>&1 | tee /tmp/sbt.out
+          #
+          # `bench/Test/compile` is in the chain because NOTHING ELSE BUILT IT. `testJvm` lists the
+          # JVM modules explicitly and bench is not among them, and the job named "... (bench)" runs
+          # testNative against sidecarScalaNative — so the Gatling driver was compiled by no job at
+          # all. PRs #131/#132 (gatling 3.15.1) therefore reported every check green while breaking
+          # the build: GrpcProtocolBuilder stopped taking the GatlingConfiguration. It only compiles,
+          # not runs — the simulation needs a live obsd and a licence-capped user count — but a
+          # compile is what catches an API break, which is the failure that actually happened.
+          sbt -batch -no-colors ';testJvm ;bench/Test/compile ;protocolCore/runMain cli.Pstatus show' 2>&1 | tee /tmp/sbt.out
           # Labeling gate: a build without the real backend MUST report no metadata privacy. sbt 2.0's
           # `export fullClasspath` yields virtual ${OUT} paths (not a usable -cp), so we read the CLI's
           # JSON from the session log — but isolate the one line that is `cli.Pstatus`'s actual output
