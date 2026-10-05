@@ -49,7 +49,7 @@ object V {
   // http4s-grpc: a pure-Scala gRPC implementation on http4s — no grpc-java — which is why it, and
   // not fs2-grpc, is what cross-publishes for Scala Native. 0.3.0 targets http4s 0.23.34 and
   // scalapb-runtime 0.11.20 (= V.scalapb above), so the whole stack lines up on one pin.
-  val http4sGrpc = "0.3.0"
+  val http4sGrpc = "0.4.0"
   val http4s = "0.23.37"
   val catsEffect = "3.7.1"
   val fs2 = "3.13.0"
