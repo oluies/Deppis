@@ -13,7 +13,7 @@ object V {
   // never reimplement the ratchet, so keeping it current is a security concern, not just hygiene.
   val libsignal = "0.86.5"
   // Pekko typed actors — the round-orchestration skeleton for the networked TLS server (T020).
-  val pekko = "1.7.0"
+  val pekko = "1.7.1"
   // Bouncy Castle — generates the dev self-signed TLS cert (T020); netty's built-in generator uses
   // sun.security internals removed in modern JDKs. Vetted lib (Constitution I). bctls also supplies
   // the RFC 10024 hybrid TLS group (transport/.../PqTls.scala).
@@ -45,12 +45,14 @@ object V {
   // Gatling: the load driver. It publishes UNSUFFIXED artifacts that are Scala 2.13-compiled;
   // Scala 3 consumes them directly. `gatling-grpc` is FIRST-PARTY as of this line (built on
   // grpc-netty), so no third-party plugin is involved.
-  val gatling = "3.15.1"
+  val gatling = "3.16.0"
   // http4s-grpc: a pure-Scala gRPC implementation on http4s — no grpc-java — which is why it, and
-  // not fs2-grpc, is what cross-publishes for Scala Native. 0.3.0 targets http4s 0.23.34 and
-  // scalapb-runtime 0.11.20 (= V.scalapb above), so the whole stack lines up on one pin.
-  val http4sGrpc = "0.3.0"
-  val http4s = "0.23.37"
+  // not fs2-grpc, is what cross-publishes for Scala Native. 0.4.0 targets http4s 0.23.37 and
+  // scalapb-runtime 0.11.20 (= V.scalapb above, still aligned). V.http4s is one patch AHEAD of
+  // the 0.23.37 it was built against — deliberate, not drift: 0.23.x keeps binary compatibility
+  // across patches, so the newer pin evicts upward cleanly.
+  val http4sGrpc = "0.4.0"
+  val http4s = "0.23.38"
   val catsEffect = "3.7.1"
   val fs2 = "3.13.0"
   val log4cats = "2.8.0" // the newest that publishes for BOTH jvm and native0.5 (2.7.1 is jvm-only)

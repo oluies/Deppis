@@ -16,6 +16,9 @@ use tonic::{Request, Response, Status};
 pub mod pb {
     // tonic 0.14 codegen emits doc comments that trip clippy::doc_lazy_continuation (generated code).
     #![allow(clippy::doc_lazy_continuation)]
+    // The #[async_trait] the codegen puts on the service trait adds #[must_use] to methods whose
+    // boxed-future return type is already #[must_use] (clippy 1.99 double_must_use, generated code).
+    #![allow(clippy::double_must_use)]
     tonic::include_proto!("metadatamessenger.notify.v1");
 }
 
