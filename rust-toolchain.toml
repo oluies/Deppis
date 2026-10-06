@@ -1,0 +1,23 @@
+# Pinned Rust toolchain — Constitution XI (dependencies pinned, builds reproducible).
+#
+# Why pinned and not a floating channel: CI used `dtolnay/rust-toolchain@stable`, so when stable
+# rolled to 1.99.0 it enabled clippy::double_must_use inside tonic's generated code and turned
+# every open PR red at once under `-D warnings` (see #159). A compiler is a build input; a
+# floating one means the build is not reproducible and unrelated PRs break on someone else's
+# release schedule.
+#
+# Why this file is at the repo root rather than next to the crate in oblivious-sidecar/:
+# rustup resolves the toolchain file by walking up from the *current directory*, not from the
+# --manifest-path. The CI integration job runs `cargo build --manifest-path
+# oblivious-sidecar/Cargo.toml` from the repo root, so a file inside oblivious-sidecar/ would be
+# ignored there. At the root it governs both that job and the sidecar job (which sets
+# working-directory: oblivious-sidecar and finds this by walking up). Do not move it down.
+#
+# Bumping: edit `channel` here and both `dtolnay/rust-toolchain@<ver>` pins in
+# .github/workflows/ci.yml in the same commit — the hygiene job fails the build if they drift —
+# then run `cargo clippy --all-targets -- -D warnings` locally before pushing, because a new
+# stable routinely enables new lints.
+[toolchain]
+channel = "1.99.0"
+components = ["rustfmt", "clippy"]
+profile = "minimal"
