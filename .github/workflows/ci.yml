@@ -198,7 +198,9 @@ jobs:
       - uses: actions/checkout@v7
       - name: Install protoc (tonic-build)
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-      - uses: dtolnay/rust-toolchain@stable
+      # Pinned, not @stable: a new stable can enable new clippy lints and redden every open PR
+      # at once (#159). Keep in step with rust-toolchain.toml — the hygiene job checks they match.
+      - uses: dtolnay/rust-toolchain@1.99.0
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
@@ -220,7 +222,8 @@ jobs:
           distribution: temurin
           java-version: "24"
       - uses: sbt/setup-sbt@v1
-      - uses: dtolnay/rust-toolchain@stable
+      # Pinned — see rust-toolchain.toml.
+      - uses: dtolnay/rust-toolchain@1.99.0
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: oblivious-sidecar
@@ -411,6 +414,12 @@ jobs:
           test -f oblivious-sidecar/Cargo.lock || { echo "::error::Cargo.lock must be committed"; exit 1; }
           test -f package-lock.json || { echo "::error::package-lock.json must be committed (pinned JS deps)"; exit 1; }
           echo "pinned-deps OK"
+      # The Rust toolchain is pinned in two places that nothing reconciles on its own:
+      # rust-toolchain.toml (what rustup uses for every cargo call) and the
+      # dtolnay/rust-toolchain@<ver> refs in this workflow (what CI installs — that action ignores
+      # rust-toolchain.toml). One-sided bumps defeat the pin, so check it mechanically.
+      - name: Rust toolchain pinned and consistent (Constitution XI)
+        run: python3 scripts/check-rust-toolchain-pin.py
       # project/V.scala keeps one version key per BouncyCastle artifact (BC versions them
       # independently). Separate keys can drift into a set no BouncyCastle BOM sanctions while the TLS
       # tests still pass, so this pins them mechanically to bc-jdk18on-bom at V.bcBom. It goes red on
