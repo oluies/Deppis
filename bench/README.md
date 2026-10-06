@@ -12,8 +12,19 @@ Run everything with `./bench/run-all.sh`. Gatling's HTML reports land in `bench/
 
 ## Results
 
-macOS arm64 (Apple silicon, 18 cores), JDK 26, 5 virtual users, 30 s, capacity 4096, batch 1,
-**median of 3 reps**. Each virtual user writes a 256-byte frame and reads it straight back.
+macOS arm64 (Apple silicon, 18 cores), JDK 26, **Gatling 3.13.5**, 5 virtual users, 30 s, capacity
+4096, batch 1, **median of 3 reps**. Each virtual user writes a 256-byte frame and reads it straight
+back.
+
+> **These numbers predate the current load driver.** They were produced by Gatling 3.13.5; the build
+> is now on 3.16.0. The 3.15.1 bump changed the gRPC protocol builder and brought a different netty
+> and gRPC client with it, and the driver was re-checked against a live `obsd` at **3.15.1** —
+> 123,464 requests, 0 failures, throughput in the same band — so it still worked there, but that was
+> a single short run, not a re-measurement. **3.16.0 has only been compile-verified** (the
+> `bench/Test/compile` now in `testJvm`, green in CI); no live run has been done against it. Treat
+> the table as produced by the 3.13.5 driver until the suite is re-run. The Gatling version is
+> recorded here, alongside JDK and SN, so each driver bump makes this staleness visible — which is
+> exactly what 3.16.0 just did to this note.
 
 | target | stack | median rps | vs control | spread across reps |
 |---|---|---:|---:|---|
