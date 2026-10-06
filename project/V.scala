@@ -47,9 +47,11 @@ object V {
   // grpc-netty), so no third-party plugin is involved.
   val gatling = "3.16.0"
   // http4s-grpc: a pure-Scala gRPC implementation on http4s — no grpc-java — which is why it, and
-  // not fs2-grpc, is what cross-publishes for Scala Native. 0.3.0 targets http4s 0.23.34 and
-  // scalapb-runtime 0.11.20 (= V.scalapb above), so the whole stack lines up on one pin.
-  val http4sGrpc = "0.3.0"
+  // not fs2-grpc, is what cross-publishes for Scala Native. 0.4.0 targets http4s 0.23.37 and
+  // scalapb-runtime 0.11.20 (= V.scalapb above, still aligned). V.http4s is one patch AHEAD of
+  // the 0.23.37 it was built against — deliberate, not drift: 0.23.x keeps binary compatibility
+  // across patches, so the newer pin evicts upward cleanly.
+  val http4sGrpc = "0.4.0"
   val http4s = "0.23.38"
   val catsEffect = "3.7.1"
   val fs2 = "3.13.0"
