@@ -12,25 +12,47 @@ Run everything with `./bench/run-all.sh`. Gatling's HTML reports land in `bench/
 
 ## Results
 
-macOS arm64 (Apple silicon, 18 cores), JDK 26, **Gatling 3.13.5**, 5 virtual users, 30 s, capacity
-4096, batch 1, **median of 3 reps**. Each virtual user writes a 256-byte frame and reads it straight
-back.
-
-> **These numbers predate the current load driver.** They were produced by Gatling 3.13.5; the build
-> is now on 3.16.0. The 3.15.1 bump changed the gRPC protocol builder and brought a different netty
-> and gRPC client with it, and the driver was re-checked against a live `obsd` at **3.15.1** —
-> 123,464 requests, 0 failures, throughput in the same band — so it still worked there, but that was
-> a single short run, not a re-measurement. **3.16.0 has only been compile-verified** (the
-> `bench/Test/compile` now in `testJvm`, green in CI); no live run has been done against it. Treat
-> the table as produced by the 3.13.5 driver until the suite is re-run. The Gatling version is
-> recorded here, alongside JDK and SN, so each driver bump makes this staleness visible — which is
-> exactly what 3.16.0 just did to this note.
+Apple M5 Pro (macOS arm64, 18 cores), JDK 27, **Gatling 3.16.0**, Scala Native 0.5.12, 5 virtual
+users, 30 s, capacity 4096, batch 1, **median of 3 reps after a discarded warm-up**. Each virtual
+user writes a 256-byte frame and reads it straight back. Load average 6.07 entering the batch, 5.24
+leaving it.
 
 | target | stack | median rps | vs control | spread across reps |
 |---|---|---:|---:|---|
-| `obsd` | Rust, tonic, gRPC/HTTP2, `--release` | **8,643** | control | 7,102–10,191 (±20%) |
-| `sidecar-scala` (JVM) | http4s-grpc + Ember, gRPC/HTTP1.1 | **5,495** | 0.64× | 4,543–5,619 |
-| `sidecar-scala` (Native) | same source, SN 0.5.12 `releaseFast` | **484** | 0.06× | 481–485 (±0.5%) |
+| `obsd` | Rust, tonic, gRPC/HTTP2, `--release` | **13,960** | control | 13,449–14,521 (±4%) |
+| `sidecar-scala` (JVM) | http4s-grpc + Ember, gRPC/HTTP1.1 | **9,200** | 0.66× | 8,883–9,231 (±2%) |
+| `sidecar-scala` (Native) | same source, SN 0.5.12 `releaseFast` | **639** | 0.046× | 637–644 (±0.5%) |
+
+Every rep recorded **0 failed requests**: 1.30 M requests for the Rust row, 847 k for the JVM,
+59 k for Native.
+
+### What the 3.16.0 re-measurement did to the old numbers
+
+The previous table was Gatling 3.13.5 on JDK 26. Both moved, so this is not a one-variable
+comparison — but it is the first batch that tests the claim this document has always made about
+which column to read:
+
+| | 3.13.5 / JDK 26 | 3.16.0 / JDK 27 |
+|---|---:|---:|
+| `obsd` (control) | 8,643 | 13,960 |
+| JVM vs control | 0.64× | **0.66×** |
+| Native vs control | 0.056× | **0.046×** |
+
+**The JVM ratio reproduced and the absolutes did not.** Every absolute moved 30–60% (`obsd`
+8,643 → 13,960, JVM 5,495 → 9,200, Native 484 → 639) while the JVM's ratio to the control shifted
+by 0.02. That is the case for reading the ratio column, measured rather than asserted.
+
+**Native's ratio moved more — by about 18% — and in the opposite direction.** It gained the least
+in absolute terms (+32%, against +61% for the control and +67% for the JVM), which is consistent
+with this document's finding that Native is bottlenecked on the oblivious scan while the other two
+are bottlenecked on transport and framework overhead: a faster host and a newer JDK buy the
+transport-bound rows more than they buy a CPU-bound byte loop. Consistent with, not evidence for —
+attributing it properly would need the capacity sweep re-run, which this batch did not do.
+
+**Two batches, same code, 23% apart.** The first attempt at this re-measurement — same commit, same
+harness, same machine, eleven hours earlier — put `obsd` at 11,367 rps against this batch's 13,960.
+Nothing in the sidecar changed between them. Treat that as the live calibration for how much weight
+a single absolute figure carries here.
 
 **Do not quote the absolute numbers.** On a workstation they are not reproducible to more than one
 significant figure: an unrelated desktop app at 30% CPU moved the `obsd` figure by 42% between two
@@ -41,14 +63,16 @@ the load average at both ends of the run. The ratio to the control is the number
 The spread column is itself informative: `obsd` is noisy because it is fast enough that the load
 generator and the machine dominate, while Native is steady to ±0.5% because it *is* the bottleneck.
 
-Two caveats on that column specifically. These figures come from a batch run BEFORE the harness
-discarded a warm-up rep, so the JVM row's 4,543 → 5,495 → 5,619 is monotonically increasing and is
-at least as well explained by JIT warm-up as by machine noise — the server is started once per
-target and reused across reps. `run-all.sh` now runs and discards one warm-up rep per target, so
-later batches do not carry that bias, but the numbers above still do. Separately, `during(duration)`
-can cut a virtual user between its `WriteBatch` and the paired `ReadBatch`, so each rep can leave up
-to `users × batch` slots occupied in a store that is not reset between reps; at capacity 4096 with
-5 users that is negligible, but it would not be at small capacities.
+One caveat on that column. `during(duration)` can cut a virtual user between its `WriteBatch` and
+the paired `ReadBatch`, so each rep can leave up to `users × batch` slots occupied in a store that
+is not reset between reps; at capacity 4096 with 5 users that is negligible, but it would not be at
+small capacities.
+
+The JIT-warm-up bias that used to be the other caveat here is gone from the table above: the
+3.13.5 batch ran before `run-all.sh` discarded a warm-up rep, and its JVM row was monotonic
+(4,543 → 5,495 → 5,619), which JIT warm-up explained at least as well as machine noise did — the
+server is started once per target and reused across reps. The 3.16.0 batch discards one, and its
+JVM row is not monotonic (8,883 → 9,231 → 9,200), which is what that fix was supposed to achieve.
 
 ### Where the Native gap actually comes from
 
@@ -65,14 +89,19 @@ Native only 16% (465 → 390 rps), so it is not waiting on locks or fibers eithe
 roughly one request in flight. **Native's framework overhead is competitive** (within 1.4× of the
 JVM once the scan is small); the gap is the scan.
 
-**These capacity figures are a different batch from the headline table above, and are single runs
-rather than medians** — 3,899 and 465 rps here versus 5,495 and 484 there for what is otherwise the
-same configuration. Given the ±20-40% batch-to-batch movement this document insists on, only the
-*within-row* ratios are meaningful; do not read the absolute numbers across the two tables.
+**These capacity figures were NOT re-measured on 3.16.0.** They predate the headline table — same
+era as the old 3.13.5 numbers, a different batch even from those, and single runs rather than
+medians: 3,899 and 465 rps here versus 5,495 and 484 in the 3.13.5 table for what is otherwise the
+same configuration. Against the 3.16.0 headline (9,200 and 639) they are a batch, a driver and a
+JDK apart. Given the ±20-40% batch-to-batch movement this document insists on — and the 23% it
+measured between two batches of identical code — only the *within-row* ratios here are meaningful.
+Do not read absolute numbers across these tables.
 
 Second, what about the scan. `sidecar.Main bench` and `storebench` run the loop with no transport
 at all (see "The core microbenchmark" below). At capacity 4096, µs per write+read round — these are
-single runs, but the effect sizes are 10-25×, far above the run-to-run variance:
+single runs, and were also NOT re-measured on 3.16.0 (they involve no Gatling at all, so the driver
+bump cannot touch them, but the JDK and host since moved) — the effect sizes are 10-25×, far above
+the run-to-run variance:
 
 | implementation | µs/round | vs Rust | vs JVM |
 |---|---:|---:|---:|
@@ -126,7 +155,7 @@ is the one that added Scala Native 0.5 support with the work-stealing pool cross
 kqueue/epoll polling. Under load the Native binary shows **29 threads and ~395% CPU** on an 18-core
 box. So the Native figure is not a single-core artifact.
 
-## Three things that would have made these numbers a lie
+## Four things that would have made these numbers a lie
 
 **Scala Native's defaults.** The first run measured 561 rps — not because Scala Native is slow, but
 because the default link is a *debug* build and, worse, auto-detects whether to support threads.
@@ -160,6 +189,21 @@ cell held a number and the harness silently recorded KO throughput as the result
 named column, echoes OK/KO counts per rep, keeps sbt's exit status instead of `|| true`, re-checks
 the port before every rep, fails a rep on any KO, and continues to the remaining targets instead of
 letting `set -e` abort the whole batch (which also cost the summary and the environment footer).
+
+**A response whose status line contradicted its own framing.** http4s-grpc stamps its replies
+`HTTP/2.0` — what gRPC nominally runs over — while Ember serves them over HTTP/1.1 with
+`Transfer-Encoding: chunked` and `Connection: keep-alive`, both of which HTTP/2 forbids. netty
+tolerated that contradiction for years. netty 4.2.18, which **Gatling 3.16.0** bundles, rejects it
+with `TransferEncodingNotAllowedException`, and the shape of the failure is the dangerous part: the
+server logs a clean startup line and stays up, the port accepts, and every single request fails. It
+reads exactly like a server refusing connections, or like the licence cap recording nothing.
+
+Confirmed with `curl --http1.1`, independent of Gatling, and reproduced byte-identically on
+http4s-grpc **0.3.0** — so it is long-standing upstream behaviour that a stricter decoder started
+enforcing, not a regression from the 0.4.0 bump. `sidecar/Main.scala` now normalises the response
+version to `HTTP/1.1`, which is what Ember actually speaks; the proper fix belongs upstream. Note
+what this means for the compile-only gate: `bench/Test/compile` in `testJvm` passed throughout, as
+it must — a compile cannot catch a protocol mismatch. Only a live run does.
 
 ## Why the Rust and Scala runs don't share a transport
 

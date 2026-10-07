@@ -5,6 +5,7 @@ import cats.effect.std.Mutex
 import com.comcast.ip4s.{Host, Port}
 import metadatamessenger.store.v1.store as pb
 import org.http4s.ember.server.EmberServerBuilder
+import org.http4s.{HttpApp, HttpVersion}
 import org.typelevel.log4cats.LoggerFactory
 import org.typelevel.log4cats.noop.NoOpFactory
 
@@ -77,7 +78,19 @@ object Main extends IOApp:
         .default[IO]
         .withHost(host)
         .withPort(port)
-        .withHttpApp(routes.orNotFound)
+        // http4s-grpc stamps its responses `HTTP/2.0` because that is what gRPC nominally runs
+        // over, but Ember serves HTTP/1.1 and frames these replies with `Transfer-Encoding:
+        // chunked` + `Connection: keep-alive` — both FORBIDDEN in HTTP/2. The result is a reply
+        // whose status line contradicts its own framing. netty tolerated it for years; 4.2.18
+        // (which Gatling 3.16.0 bundles) rejects it with TransferEncodingNotAllowedException, so
+        // every bench request against the Scala targets failed while the server looked healthy.
+        // Verified with curl --http1.1, independent of Gatling, and reproduced identically on
+        // http4s-grpc 0.3.0 — upstream behaviour, not a regression from the 0.4.0 bump.
+        // Correcting the version to what Ember actually speaks is the honest reading; a proper fix
+        // belongs upstream in http4s-grpc.
+        .withHttpApp(HttpApp[IO] { req =>
+          routes.orNotFound.run(req).map(_.withHttpVersion(HttpVersion.`HTTP/1.1`))
+        })
         .build
         .useForever
         .as(ExitCode.Success)
