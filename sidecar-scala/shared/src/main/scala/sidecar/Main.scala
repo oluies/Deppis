@@ -5,7 +5,7 @@ import cats.effect.std.Mutex
 import com.comcast.ip4s.{Host, Port}
 import metadatamessenger.store.v1.store as pb
 import org.http4s.ember.server.EmberServerBuilder
-import org.http4s.{HttpApp, HttpVersion}
+import org.http4s.{HttpApp, HttpRoutes, HttpVersion}
 import org.typelevel.log4cats.LoggerFactory
 import org.typelevel.log4cats.noop.NoOpFactory
 
@@ -78,20 +78,33 @@ object Main extends IOApp:
         .default[IO]
         .withHost(host)
         .withPort(port)
-        // http4s-grpc stamps its responses `HTTP/2.0` because that is what gRPC nominally runs
-        // over, but Ember serves HTTP/1.1 and frames these replies with `Transfer-Encoding:
-        // chunked` + `Connection: keep-alive` — both FORBIDDEN in HTTP/2. The result is a reply
-        // whose status line contradicts its own framing. netty tolerated it for years; 4.2.18
-        // (which Gatling 3.16.0 bundles) rejects it with TransferEncodingNotAllowedException, so
-        // every bench request against the Scala targets failed while the server looked healthy.
-        // Verified with curl --http1.1, independent of Gatling, and reproduced identically on
-        // http4s-grpc 0.3.0 — upstream behaviour, not a regression from the 0.4.0 bump.
-        // Correcting the version to what Ember actually speaks is the honest reading; a proper fix
-        // belongs upstream in http4s-grpc.
-        .withHttpApp(HttpApp[IO] { req =>
-          routes.orNotFound.run(req).map(_.withHttpVersion(HttpVersion.`HTTP/1.1`))
-        })
+        .withHttpApp(httpApp(routes))
         .build
         .useForever
         .as(ExitCode.Success)
     yield exit
+
+  /** `routes` as an `HttpApp`, with the response version corrected to the one Ember actually
+    * speaks.
+    *
+    * http4s-grpc stamps its responses `HTTP/2.0` because that is what gRPC nominally runs over,
+    * but Ember serves HTTP/1.1 and frames these replies with `Transfer-Encoding: chunked` +
+    * `Connection: keep-alive` — both FORBIDDEN in HTTP/2. The result is a reply whose status line
+    * contradicts its own framing. netty tolerated it for years; 4.2.18 (which Gatling 3.16.0
+    * bundles) rejects it with `TransferEncodingNotAllowedException`, so every bench request
+    * against the Scala targets failed while the server logged a clean startup line and held the
+    * port open. Established with `curl --http1.1`, independent of Gatling, and reproduced
+    * byte-identically on http4s-grpc 0.3.0 — long-standing upstream behaviour that a stricter
+    * decoder began enforcing, not a regression from the 0.4.0 bump. The proper fix belongs
+    * upstream in http4s-grpc.
+    *
+    * `orNotFound` is bound ONCE here rather than inside the request lambda: it allocates a fresh
+    * `Kleisli`, and this is the hot path of the server the benchmark measures, so rebuilding it
+    * per call would fold an allocation the benchmark does not mean to measure into every request.
+    *
+    * `private[sidecar]` so [[MainHttpSuite]] can drive it in process. That test is the only
+    * automated gate on the correction: a compile cannot catch a protocol mismatch, and CI runs no
+    * load test, so without it deleting the `withHttpVersion` below would go unnoticed. */
+  private[sidecar] def httpApp(routes: HttpRoutes[IO]): HttpApp[IO] =
+    val app = routes.orNotFound
+    HttpApp[IO](req => app.run(req).map(_.withHttpVersion(HttpVersion.`HTTP/1.1`)))

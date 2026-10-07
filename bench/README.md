@@ -28,9 +28,9 @@ Every rep recorded **0 failed requests**: 1.30 M requests for the Rust row, 847 
 
 ### What the 3.16.0 re-measurement did to the old numbers
 
-The previous table was Gatling 3.13.5 on JDK 26. Both moved, so this is not a one-variable
-comparison — but it is the first batch that tests the claim this document has always made about
-which column to read:
+The previous table was Gatling 3.13.5 on JDK 26. Both moved and the host may have too (see the
+variable count below), so this is nowhere near a one-variable comparison — but it is the first
+batch that tests the claim this document has always made about which column to read:
 
 | | 3.13.5 / JDK 26 | 3.16.0 / JDK 27 |
 |---|---:|---:|
@@ -38,16 +38,25 @@ which column to read:
 | JVM vs control | 0.64× | **0.66×** |
 | Native vs control | 0.056× | **0.046×** |
 
-**The JVM ratio reproduced and the absolutes did not.** Every absolute moved 30–60% (`obsd`
-8,643 → 13,960, JVM 5,495 → 9,200, Native 484 → 639) while the JVM's ratio to the control shifted
-by 0.02. That is the case for reading the ratio column, measured rather than asserted.
+**The JVM ratio reproduced and the absolutes did not.** Every absolute moved by between +32% and
++67% (`obsd` 8,643 → 13,960, +61%; JVM 5,495 → 9,200, +67%; Native 484 → 639, +32%) while the
+JVM's ratio to the control shifted by 0.02. That is the case for reading the ratio column,
+measured rather than asserted.
 
 **Native's ratio moved more — by about 18% — and in the opposite direction.** It gained the least
 in absolute terms (+32%, against +61% for the control and +67% for the JVM), which is consistent
 with this document's finding that Native is bottlenecked on the oblivious scan while the other two
-are bottlenecked on transport and framework overhead: a faster host and a newer JDK buy the
+are bottlenecked on transport and framework overhead: a newer JDK and lower contention buy the
 transport-bound rows more than they buy a CPU-bound byte loop. Consistent with, not evidence for —
 attributing it properly would need the capacity sweep re-run, which this batch did not do.
+
+**How many variables actually moved is not fully known, and that bounds all of the above.** Two
+are recorded: Gatling 3.13.5 → 3.16.0 and JDK 26 → 27. The host is a third unknown — the 3.13.5
+table named no chip, only "Apple silicon, 18 cores", so whether it ran on this Apple M5 Pro cannot
+be recovered from what was written down. Machine contention differed too and is unquantified for
+the old batch, which recorded no load average. This is why the chip is now named in the headline
+line and the load averages are now reported at both ends: so the next comparison does not inherit
+the same gap.
 
 **Two batches, same code, 23% apart.** The first attempt at this re-measurement — same commit, same
 harness, same machine, eleven hours earlier — put `obsd` at 11,367 rps against this batch's 13,960.
@@ -203,7 +212,10 @@ http4s-grpc **0.3.0** — so it is long-standing upstream behaviour that a stric
 enforcing, not a regression from the 0.4.0 bump. `sidecar/Main.scala` now normalises the response
 version to `HTTP/1.1`, which is what Ember actually speaks; the proper fix belongs upstream. Note
 what this means for the compile-only gate: `bench/Test/compile` in `testJvm` passed throughout, as
-it must — a compile cannot catch a protocol mismatch. Only a live run does.
+it must — a compile cannot catch a protocol mismatch. `MainHttpSuite` now drives
+[[Main.httpApp]] in process and asserts the response version, so CI does gate this without a load
+test; it was written against the bug, by deleting the correction and confirming the assertion
+fails with `major = 2, minor = 0`.
 
 ## Why the Rust and Scala runs don't share a transport
 
