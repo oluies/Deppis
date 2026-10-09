@@ -195,7 +195,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       # Pinned, not @stable: a new stable can enable new clippy lints and redden every open PR
       # at once (#159). Keep in step with rust-toolchain.toml — the hygiene job checks they match.
-      - uses: dtolnay/rust-toolchain@1.99.0
+      - uses: dtolnay/rust-toolchain@1.120.0
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
@@ -218,7 +218,7 @@ jobs:
           java-version: "24"
       - uses: sbt/setup-sbt@v1
       # Pinned — see rust-toolchain.toml.
-      - uses: dtolnay/rust-toolchain@1.99.0
+      - uses: dtolnay/rust-toolchain@1.120.0
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: oblivious-sidecar
