@@ -38,7 +38,7 @@ object V {
   val bcBom = "1.86.1"
   val bcprov = "1.86"
   val bcpkix = "1.86"
-  val bctls = "1.86.1"
+  val bctls = "1.86.2"
   val bcutil = "1.86"
 
   // ---- benchmark stack (bench/ + sidecar-scala) ----
