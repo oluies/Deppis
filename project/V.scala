@@ -7,7 +7,7 @@ object V {
   // ScalaPB runtime + the grpc-java version it targets. Formerly read from
   // `scalapb.compiler.Version`, but ScalaPB's compilerplugin is no longer on the sbt 2.0 metabuild
   // classpath (codegen runs sandboxed — see project/plugins.sbt), so these are pinned here directly.
-  val scalapb = "0.11.20"
+  val scalapb = "0.11.21"
   val grpcJava = "1.84.0"
   // The audited Signal double-ratchet (Rust core + JNI bindings). Constitution I: we wrap this and
   // never reimplement the ratchet, so keeping it current is a security concern, not just hygiene.
