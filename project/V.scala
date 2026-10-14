@@ -7,8 +7,8 @@ object V {
   // ScalaPB runtime + the grpc-java version it targets. Formerly read from
   // `scalapb.compiler.Version`, but ScalaPB's compilerplugin is no longer on the sbt 2.0 metabuild
   // classpath (codegen runs sandboxed — see project/plugins.sbt), so these are pinned here directly.
-  val scalapb = "0.11.20"
-  val grpcJava = "1.84.0"
+  val scalapb = "0.11.21"
+  val grpcJava = "1.84.2"
   // The audited Signal double-ratchet (Rust core + JNI bindings). Constitution I: we wrap this and
   // never reimplement the ratchet, so keeping it current is a security concern, not just hygiene.
   val libsignal = "0.86.5"
@@ -47,10 +47,11 @@ object V {
   // grpc-netty), so no third-party plugin is involved.
   val gatling = "3.16.0"
   // http4s-grpc: a pure-Scala gRPC implementation on http4s — no grpc-java — which is why it, and
-  // not fs2-grpc, is what cross-publishes for Scala Native. 0.4.0 targets http4s 0.23.37 and
-  // scalapb-runtime 0.11.20 (= V.scalapb above, still aligned). V.http4s is one patch AHEAD of
-  // the 0.23.37 it was built against — deliberate, not drift: 0.23.x keeps binary compatibility
-  // across patches, so the newer pin evicts upward cleanly.
+  // not fs2-grpc, is what cross-publishes for Scala Native. 0.4.0 was built against http4s 0.23.37
+  // and scalapb-runtime 0.11.20, and BOTH pins here now sit one patch ahead of that — V.http4s at
+  // 0.23.38, V.scalapb at 0.11.21. Deliberate, not drift: both lines keep binary compatibility
+  // across patches, so the newer pins evict upward cleanly. If either ever needs to move a MINOR
+  // version ahead of what http4s-grpc was built against, check it rather than assuming.
   val http4sGrpc = "0.4.0"
   val http4s = "0.23.38"
   val catsEffect = "3.7.1"
