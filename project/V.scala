@@ -27,15 +27,23 @@ object V {
   // The SOURCE OF TRUTH for which combination is supported is BouncyCastle's own BOM,
   // org.bouncycastle:bc-jdk18on-bom. `bcBom` names the BOM version these four claim to match, and
   // CI ENFORCES it (scripts/check-bc-bom.py, in the Hygiene job): any key that disagrees with that
-  // BOM's pins fails the build. Currently bc-jdk18on-bom 1.86.1: bcprov/bcpkix/bcutil 1.86, bctls
-  // 1.86.1 — a mixed set, and BC's own supported configuration.
+  // BOM's pins fails the build. Currently bc-jdk18on-bom 1.86.2: bcprov/bcpkix/bcutil 1.86, bctls
+  // 1.86.2 — a mixed set, and BC's own supported configuration.
   //
   // Steward does not track bcBom (it is not a dependency), so a Steward PR bumping any BC key will go
   // RED on that check. Deliberately: every BC bump then needs a human to find the BOM that sanctions
-  // the new set and set bcBom plus all four keys to match, in the same PR. (bctls 1.86.1 fixes the 1.86 multi-release-jar NoSuchMethodError:
-  // its versions/9 SSLEngineUtil.create now returns javax.net.ssl.SSLEngine, matching the caller —
-  // verified with javap. Upstream: bcgit/bc-java#2448.)
-  val bcBom = "1.86.1"
+  // the new set and set bcBom plus all four keys to match, in the same PR. #167 is the worked
+  // example: Steward proposed bctls 1.86.2 alone, the check rejected it against BOM 1.86.1, and
+  // bc-jdk18on-bom 1.86.2 turned out to sanction exactly that set (bctls 1.86.2, the other three
+  // unchanged at 1.86), so only bcBom had to move with it.
+  //
+  // WHY bctls runs ahead of the other three: 1.86's multi-release jar threw NoSuchMethodError
+  // because its versions/9 SSLEngineUtil.create disagreed with the caller's expected return type.
+  // 1.86.1 fixed that (upstream bcgit/bc-java#2448) and 1.86.2 keeps it — re-checked with javap on
+  // the 1.86.2 jar: versions/9 SSLEngineUtil.create returns javax.net.ssl.SSLEngine, matching the
+  // base copy. Worth re-running that javap check on any future bctls bump, since the failure is a
+  // runtime NoSuchMethodError rather than anything a compile would catch.
+  val bcBom = "1.86.2"
   val bcprov = "1.86"
   val bcpkix = "1.86"
   val bctls = "1.86.2"
