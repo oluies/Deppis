@@ -411,8 +411,11 @@ jobs:
           echo "pinned-deps OK"
       # The Rust toolchain is pinned in two places that nothing reconciles on its own:
       # rust-toolchain.toml (what rustup uses for every cargo call) and the
-      # dtolnay/rust-toolchain@<ver> refs in this workflow (what CI installs — that action ignores
-      # rust-toolchain.toml). One-sided bumps defeat the pin, so check it mechanically.
+      # dtolnay/rust-toolchain@<ver> refs in the workflows (what CI installs — that action ignores
+      # rust-toolchain.toml, taking the version from the @rev or a `with: toolchain:` input and
+      # nothing else). One-sided bumps defeat the pin, so check it mechanically. The script scans
+      # EVERY workflow here, inspects that input too, and reports — without enforcing — the
+      # separate, measurement-bound Rust pin in deploy/enclave/Dockerfile.
       - name: Rust toolchain pinned and consistent (Constitution XI)
         run: python3 scripts/check-rust-toolchain-pin.py
       # project/V.scala keeps one version key per BouncyCastle artifact (BC versions them
