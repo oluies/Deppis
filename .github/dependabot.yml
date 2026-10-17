@@ -10,6 +10,20 @@ updates:
     groups:
       github-actions:
         patterns: ["*"]
+    # dtolnay/rust-toolchain is NOT an ordinary action bump: its @rev selects the Rust compiler,
+    # which is pinned in rust-toolchain.toml as well, and scripts/check-rust-toolchain-pin.py
+    # fails the build when the two disagree. Dependabot cannot satisfy that — it does not know the
+    # .toml has to move in the same commit — so a bump here is red by construction.
+    #
+    # It already happened (#164): Dependabot proposed 1.99.0 -> 1.120.0, which is not even a Rust
+    # release, the install failed outright and the drift check rejected it. Worse, because the
+    # group above is `*`, that one unsatisfiable bump reddens the whole weekly actions PR and
+    # blocks every unrelated action in it.
+    #
+    # The toolchain moves deliberately instead: edit rust-toolchain.toml and both ci.yml refs
+    # together, then re-run clippy locally, because a new stable routinely enables new lints.
+    ignore:
+      - dependency-name: "dtolnay/rust-toolchain"
 
   - package-ecosystem: "cargo"
     directory: "/oblivious-sidecar"

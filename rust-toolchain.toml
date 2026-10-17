@@ -13,10 +13,23 @@
 # ignored there. At the root it governs both that job and the sidecar job (which sets
 # working-directory: oblivious-sidecar and finds this by walking up). Do not move it down.
 #
-# Bumping: edit `channel` here and both `dtolnay/rust-toolchain@<ver>` pins in
-# .github/workflows/ci.yml in the same commit — the hygiene job fails the build if they drift —
-# then run `cargo clippy --all-targets -- -D warnings` locally before pushing, because a new
-# stable routinely enables new lints.
+# Bumping: edit `channel` here and EVERY `dtolnay/rust-toolchain@<ver>` ref under
+# .github/workflows/ in the same commit — the hygiene job fails the build if they drift, and it
+# scans all workflows, not just ci.yml — then run `cargo clippy --all-targets -- -D warnings`
+# locally before pushing, because a new stable routinely enables new lints.
+#
+# Dependabot will NOT propose that bump: `dtolnay/rust-toolchain` is in the ignore list in
+# .github/dependabot.yml, because it cannot move this file in the same commit and a one-sided
+# bump is red by construction (it tried in #164, with a version that was not even a Rust release).
+#
+# A THIRD Rust pin exists and is deliberately NOT governed by this file:
+# deploy/enclave/Dockerfile builds obsd `FROM rust:<ver>-bookworm`, recorded in
+# deploy/enclave/measurement.txt. That compiler is bound to the enclave measurement — bumping it
+# changes MRENCLAVE — so it moves on the attestation's schedule, not CI's, and a CI toolchain bump
+# must not drag it along. The hygiene check reports it for visibility and never enforces it. Note
+# the consequence: no CI job builds that image, so sidecar code CI accepts under the channel above
+# can still fail the reproducible enclave build at its own version, and that only surfaces on a
+# manual measurement rebuild.
 [toolchain]
 channel = "1.99.0"
 components = ["rustfmt", "clippy"]
