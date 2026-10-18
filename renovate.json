@@ -1,0 +1,53 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended"],
+  "description": [
+    "Replaces .github/dependabot.yml, so one bot owns dependency updates here.",
+    "",
+    "Scoped to cargo and github-actions. Scala/sbt dependencies are Scala Steward's",
+    "(.github/workflows/scala-steward.yml) and Renovate is kept off them, so the two",
+    "do not propose the same bump twice. The old Dependabot config said the same:",
+    "it covered 'the ecosystems Scala Steward does not'.",
+    "",
+    "Renovate does understand sbt. If Steward is ever retired, drop the",
+    "enabledManagers line and Renovate will pick up the sbt build."
+  ],
+  "enabledManagers": ["cargo", "github-actions"],
+  "schedule": ["before 6am on monday"],
+  "timezone": "Europe/Stockholm",
+  "packageRules": [
+    {
+      "description": [
+        "PIN, carried over verbatim from .github/dependabot.yml's `ignore` list.",
+        "",
+        "dtolnay/rust-toolchain is NOT an ordinary action bump: its @rev selects the",
+        "Rust compiler, which is pinned in rust-toolchain.toml as well, and",
+        "scripts/check-rust-toolchain-pin.py fails the build when the two disagree.",
+        "No bot can satisfy that -- it does not know the .toml has to move in the",
+        "same commit -- so a bump here is red by construction.",
+        "",
+        "It has happened twice. #164 proposed 1.99.0 -> 1.120.0, which is not even a",
+        "Rust release: the install failed outright and the drift check rejected it.",
+        "#169 was the same bump again, and was closed. Because the actions group is",
+        "`*`, one unsatisfiable bump reddens the whole weekly PR and blocks every",
+        "unrelated action in it -- which is why this is an ignore and not a cap.",
+        "",
+        "The toolchain moves deliberately instead: edit rust-toolchain.toml and both",
+        "ci.yml refs together, then re-run clippy locally, because a new stable",
+        "routinely enables new lints."
+      ],
+      "matchPackageNames": ["dtolnay/rust-toolchain"],
+      "enabled": false
+    },
+    {
+      "description": "Was the github-actions 'github-actions' group (patterns: *), weekly. dtolnay/rust-toolchain is excluded by the rule above.",
+      "matchManagers": ["github-actions"],
+      "groupName": "github-actions"
+    },
+    {
+      "description": "Was the cargo ecosystem on /oblivious-sidecar, group 'cargo' (patterns: *), weekly.",
+      "matchManagers": ["cargo"],
+      "groupName": "cargo"
+    }
+  ]
+}
