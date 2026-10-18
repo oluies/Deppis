@@ -32,9 +32,11 @@
         "`*`, one unsatisfiable bump reddens the whole weekly PR and blocks every",
         "unrelated action in it -- which is why this is an ignore and not a cap.",
         "",
-        "The toolchain moves deliberately instead: edit rust-toolchain.toml and both",
-        "ci.yml refs together, then re-run clippy locally, because a new stable",
-        "routinely enables new lints."
+        "The toolchain moves deliberately instead: edit rust-toolchain.toml and EVERY",
+        "dtolnay/rust-toolchain ref under .github/workflows/ together, then re-run",
+        "clippy locally, because a new stable routinely enables new lints. The check",
+        "scans all workflows, not only ci.yml, and also rejects a `with: toolchain:`",
+        "input disagreeing with the pin -- so 'both ci.yml refs' understated it."
       ],
       "matchPackageNames": ["dtolnay/rust-toolchain"],
       "enabled": false

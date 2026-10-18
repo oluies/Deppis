@@ -46,8 +46,16 @@ ACTION = "dtolnay/rust-toolchain"
 # The leading `- ` is OPTIONAL: `uses:` is only the step's first key in the unnamed form. The
 # common `- name: Install Rust` / `uses: ...` shape has no dash on the uses line, and requiring
 # one let a floating @stable install hide in a named step while the gate reported OK.
-USES_RE = re.compile(rf"^(?P<indent>\s*)(?:-\s*)?uses:\s*{re.escape(ACTION)}@(?P<ref>\S+)")
-TOOLCHAIN_INPUT_RE = re.compile(r"^(?P<indent>\s*)toolchain:\s*(?P<val>\S+)")
+# The quotes are optional too: `uses: "dtolnay/rust-toolchain@stable"` is legal YAML and used to
+# make the whole step invisible.
+USES_RE = re.compile(
+    rf"""^(?P<indent>\s*)(?:-\s*)?uses:\s*["']?{re.escape(ACTION)}@(?P<ref>[^\s"']+)"""
+)
+TOOLCHAIN_INPUT_RE = re.compile(r"^(?P<indent>\s*)toolchain:\s*(?P<val>[^\s#]+)")
+# `with: { toolchain: stable }` — a flow mapping, which the line-anchored pattern above misses.
+TOOLCHAIN_FLOW_RE = re.compile(r"[{,]\s*toolchain:\s*(?P<val>[^\s,}#]+)")
+# Any mention at all, for the fail-closed backstop below.
+MENTION_RE = re.compile(re.escape(ACTION))
 ENCLAVE_FROM_RE = re.compile(r"^FROM\s+rust:(?P<ver>[0-9][^\s-]*)", re.MULTILINE)
 # A pin is an exact version; a channel name is what we are trying to keep out.
 SEMVER_RE = re.compile(r"^\d+\.\d+(\.\d+)?$")
@@ -65,28 +73,89 @@ def key_indent(line: str) -> int:
     return lead + 2 if stripped.startswith("- ") else lead
 
 
-def installs(path: Path, rel: Path) -> list[tuple[str, str | None, int]]:
+def raw_indent(line: str) -> int:
+    """Column of the first non-space character, dash included."""
+    return len(line) - len(line.lstrip())
+
+
+def skippable(line: str) -> bool:
+    """Blank or comment — carries no structure, so a step walk must step OVER it."""
+    stripped = line.lstrip()
+    return not stripped or stripped.startswith("#")
+
+
+def step_bounds(lines: list[str], i: int, step_col: int) -> tuple[int, int]:
+    """The [start, end) line range of the step whose `uses:` key sits at `step_col` on line i.
+
+    The boundary test is RAW indent, not key_indent: a sibling list item's dash sits at
+    step_col - 2, so raw indent catches it while key_indent (which adds 2 for `- `) reports an
+    equal column and walks straight into the next step. That bug attributed a later step's
+    `toolchain:` input to this one. Blank and comment lines are stepped over rather than treated
+    as a boundary — a comment at the dash column used to end the walk early and hide an override.
+
+    Scans BOTH directions, because `with:`/`toolchain:` may be written above the `uses:` key.
+    """
+    start = i
+    while start > 0:
+        prev = lines[start - 1]
+        if skippable(prev):
+            start -= 1
+            continue
+        if raw_indent(prev) < step_col:
+            break
+        start -= 1
+    end = i + 1
+    while end < len(lines):
+        nxt = lines[end]
+        if skippable(nxt):
+            end += 1
+            continue
+        if raw_indent(nxt) < step_col:
+            break
+        end += 1
+    return start, end
+
+
+def toolchain_override(lines: list[str], span: tuple[int, int], step_col: int) -> str | None:
+    """The step's `toolchain:` input, block or flow form, if it has one."""
+    for line in lines[span[0] : span[1]]:
+        if skippable(line):
+            continue
+        if (t := TOOLCHAIN_INPUT_RE.match(line)) and len(t.group("indent")) > step_col:
+            return t.group("val").strip("\"'")
+        if (f := TOOLCHAIN_FLOW_RE.search(line)) and raw_indent(line) >= step_col:
+            return f.group("val").strip("\"'")
+    return None
+
+
+def installs(path: Path) -> list[tuple[str, str | None, int]]:
     """Every `dtolnay/rust-toolchain` step in one workflow: (ref, toolchain-input, line no)."""
     lines = path.read_text().splitlines()
     found = []
     for i, line in enumerate(lines):
-        m = USES_RE.match(line)
-        if not m:
+        if not (m := USES_RE.match(line)):
             continue
         step_col = key_indent(line)
-        # Walk the rest of this step: sibling keys sit at step_col, nested ones deeper. A line
-        # indented LESS has left the step (the next list item, or the end of the block).
-        override = None
-        for later in lines[i + 1 :]:
-            if not later.strip():
-                continue
-            if key_indent(later) < step_col:
-                break
-            if (t := TOOLCHAIN_INPUT_RE.match(later)) and len(t.group("indent")) > step_col:
-                override = t.group("val").strip("\"'")
-                break
+        override = toolchain_override(lines, step_bounds(lines, i, step_col), step_col)
         found.append((m.group("ref"), override, i + 1))
     return found
+
+
+def unparsed_mentions(path: Path, matched_lines: set[int]) -> list[int]:
+    """Lines naming the action that the structured scan did NOT claim.
+
+    FAIL CLOSED. Both earlier rounds of this gate shipped the same shape of bug: a YAML form the
+    matcher did not anticipate PASSED silently, which is strictly worse than a false alarm. Any
+    unrecognised mention is now an error, so the failure mode of a parsing gap is noise rather
+    than a floating toolchain nobody notices.
+    """
+    out = []
+    for i, line in enumerate(path.read_text().splitlines(), start=1):
+        if skippable(line) or i in matched_lines:
+            continue
+        if MENTION_RE.search(line):
+            out.append(i)
+    return out
 
 
 def main() -> None:
@@ -116,12 +185,23 @@ def main() -> None:
 
     # EVERY workflow, not just ci.yml: a Rust install added to any other one escaped the old check.
     steps: list[tuple[Path, str, str | None, int]] = []
+    unparsed: list[str] = []
     for wf in sorted(p for p in wf_dir.iterdir() if p.suffix in (".yml", ".yaml")):
         rel = WORKFLOW_DIR / wf.name
-        steps.extend((rel, ref, override, ln) for ref, override, ln in installs(wf, rel))
+        got = installs(wf)
+        steps.extend((rel, ref, override, ln) for ref, override, ln in got)
+        unparsed += [f"{rel}:{ln}" for ln in unparsed_mentions(wf, {ln for _, _, ln in got})]
 
     if not steps:
         fail(f"no {ACTION} step found under {WORKFLOW_DIR} — expected the pinned action")
+
+    if unparsed:
+        fail(
+            f"{ACTION} named in a form this check cannot read, so its version cannot be verified: "
+            + ", ".join(unparsed)
+            + ". Write it as `uses: "
+            + f"{ACTION}@<version>` (quotes optional), or teach this script the new shape."
+        )
 
     problems = []
     for rel, ref, override, ln in steps:
