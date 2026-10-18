@@ -93,10 +93,17 @@ def step_bounds(lines: list[str], i: int, step_col: int) -> tuple[int, int]:
     `toolchain:` input to this one. Blank and comment lines are stepped over rather than treated
     as a boundary — a comment at the dash column used to end the walk early and hide an override.
 
-    Scans BOTH directions, because `with:`/`toolchain:` may be written above the `uses:` key.
+    Scans backward too, because `with:`/`toolchain:` may be written above the `uses:` key — but
+    ONLY in the named-step form. When `uses:` carries the list dash it IS the step's first key, so
+    nothing above it belongs to the step; walking back from there crossed into the PRECEDING step
+    (whose `with:` sits at step_col and whose inputs sit deeper, both passing a `>= step_col`
+    test) and claimed its `toolchain:` input. That is the over-attribution bug in mirror image,
+    and it was live in this repo: the step at ci.yml:198 spanned back into `Install protoc`,
+    harmless only because that step has no `toolchain:` key.
     """
+    dash_carried = key_indent(lines[i]) != raw_indent(lines[i])
     start = i
-    while start > 0:
+    while start > 0 and not dash_carried:
         prev = lines[start - 1]
         if skippable(prev):
             start -= 1
@@ -153,7 +160,12 @@ def unparsed_mentions(path: Path, matched_lines: set[int]) -> list[int]:
     for i, line in enumerate(path.read_text().splitlines(), start=1):
         if skippable(line) or i in matched_lines:
             continue
-        if MENTION_RE.search(line):
+        # Strip a TRAILING comment before looking. YAML needs whitespace before an inline `#`,
+        # so splitting on " #" is safe, and without it an inert mention in a comment on an
+        # unrelated step (`uses: Swatinem/rust-cache@v2  # must follow dtolnay/rust-toolchain`)
+        # was reported as an unreadable reference, with neither suggested remedy applicable.
+        code = line.split(" #", 1)[0]
+        if MENTION_RE.search(code):
             out.append(i)
     return out
 
@@ -192,9 +204,9 @@ def main() -> None:
         steps.extend((rel, ref, override, ln) for ref, override, ln in got)
         unparsed += [f"{rel}:{ln}" for ln in unparsed_mentions(wf, {ln for _, _, ln in got})]
 
-    if not steps:
-        fail(f"no {ACTION} step found under {WORKFLOW_DIR} — expected the pinned action")
-
+    # BEFORE the "no step" check: if every mention is in an unreadable form, naming the line we
+    # could not parse is the useful diagnostic. Reporting "no step found" first sent the reader
+    # hunting for something missing rather than at the line that exists.
     if unparsed:
         fail(
             f"{ACTION} named in a form this check cannot read, so its version cannot be verified: "
@@ -202,6 +214,9 @@ def main() -> None:
             + ". Write it as `uses: "
             + f"{ACTION}@<version>` (quotes optional), or teach this script the new shape."
         )
+
+    if not steps:
+        fail(f"no {ACTION} step found under {WORKFLOW_DIR} — expected the pinned action")
 
     problems = []
     for rel, ref, override, ln in steps:
