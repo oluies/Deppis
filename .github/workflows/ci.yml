@@ -418,6 +418,12 @@ jobs:
       # separate, measurement-bound Rust pin in deploy/enclave/Dockerfile.
       - name: Rust toolchain pinned and consistent (Constitution XI)
         run: python3 scripts/check-rust-toolchain-pin.py
+      # The gate above parses workflow YAML by hand, and that parser has regressed THREE times —
+      # each fix opening a new blind spot, every round "verified" against fixtures that were then
+      # thrown away (roborev 1998, 2040, 2041). These tests are those fixtures, kept. stdlib
+      # unittest, so they add no dependency the gate itself refuses.
+      - name: Toolchain-pin gate regression tests
+        run: python3 scripts/test_check_rust_toolchain_pin.py
       # project/V.scala keeps one version key per BouncyCastle artifact (BC versions them
       # independently). Separate keys can drift into a set no BouncyCastle BOM sanctions while the TLS
       # tests still pass, so this pins them mechanically to bc-jdk18on-bom at V.bcBom. It goes red on
