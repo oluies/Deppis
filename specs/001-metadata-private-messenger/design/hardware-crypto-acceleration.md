@@ -118,3 +118,126 @@ primitives are already fixed-control-flow. Start with **GPU oblivious-sort** (no
 gates) for the fun/benchmark, and treat **FPGA AEAD via vetted IP** as the only "real crypto in
 hardware" candidate. Do **not** emit a fresh AEAD/MAC core in Chisel for production — that trips
 Constitution I. Everything stays gated by **attested + vetted + constant-time + differential-KAT'd**.
+
+## Basing the RTL on a CUTE-style tensor engine (Brokkr) — what transfers, what does not
+
+[Brokkr](https://oluies.github.io/brokkr/) asks whether a CUTE-style Chisel tensor engine can
+accelerate quantum simulation. It is a sibling project worth mining, with one caveat up front:
+**Brokkr implements no cryptographic primitives.** Its workload is state-vector and density-matrix
+simulation (Grover, brickwork, Kraus channels). There is no crypto datapath there to copy.
+
+### Do NOT base the datapath on CUTE
+
+CUTE is a **multiply-accumulate** engine: dense complex MAC arrays, a 2^k-wide product tree, an
+operand-staging fabric. Our hot path has **no multiplication at all**:
+
+| Our operation | Arithmetic | CUTE's expensive unit |
+|---|---|---|
+| Oblivious store scan (`store.rs`) | compare 32 B token, conditional-select 256 B frame, per slot | unused |
+| Bitonic sort (`primitives.rs`) | compare-exchange | unused |
+| Oblivious compaction | fixed routing, no arithmetic | unused |
+| PING digest aggregation (`notify.rs`) | OR-reduction over a fixed-size digest | unused |
+
+Brokkr's own analysis notes that routing diagonal/monomial blocks through dense hardware wastes
+~8.5× area per block. Our case is the limit of that argument: routing a compare/select workload
+through a complex MAC array wastes **the entire multiplier array**, which is the part that costs
+(~20,000 cells/MAC in Brokkr's estimate). A scan/sort engine is a comparator tree, a mux network
+and a wide streaming datapath. **Start the datapath from scratch.**
+
+### DO lift Brokkr's surrounding machinery
+
+The datapath is the cheap part to write and the least reusable. What is expensive, and directly
+reusable:
+
+1. **Banked SRAM + XOR bank mapping.** Brokkr measures extended-Hamming XOR-combined address bits
+   reaching 18.2 of 32 banks against 1.1 for naive low-bit banking — a 16× bandwidth gain. The
+   oblivious **store scan** is sequential and barely needs this, but the **bitonic network's**
+   compare-exchange pairs are strided by a power of two per stage, which is precisely the
+   collide-everything-in-one-bank pattern that mapping fixes.
+2. **The Benes permutation network.** Brokkr's monomial path already has one, verified on arbitrary
+   permutations. **Oblivious compaction is a fixed routing network** — this is the single most
+   directly transferable block in the project.
+3. **The difftest harness.** Brokkr difftests RTL against Scotty, its golden software model, with a
+   stated fixed-point error budget. Gate 4 above demands exactly that discipline, and we already
+   have the oracle: `portable_sort.rs`'s proptest asserts the portable schedule ≡ the recursive CPU
+   reference byte for byte. Our comparison is **exact**, not an error budget — integer compare/select
+   has no rounding — so the harness gets simpler, not harder.
+4. **The descriptor-queue host interface.** Brokkr's `TaskController` + form-tagged operator
+   descriptors is the right offload shape for "here is a batch of slots, scan them".
+
+### Build-system reality: do not drag Chisel into this build
+
+Brokkr is **Chisel 6.7.0 on Scala 2.13.15** (dual-built Mill + sbt). This repo is **Scala 3.9.0 on
+sbt 2.0.10**. A Chisel subproject here would need its own `scalaVersion := "2.13.x"` — legal
+per-project, but it introduces a second Scala version into a build that pins every dependency
+(Constitution XI) and whose plugin set is sbt-2-specific. No Chisel source can be shared with
+`protocol-core` or the sidecar regardless, because the language versions differ.
+
+**Recommendation: keep the Chisel work in Brokkr (or its own repo) and let this repo consume only
+the artifact** — the bitstream plus a thin host shim behind the trait in the staged path above.
+Deppis then depends on a *measurement*, not on a 2.13 toolchain, which is also what gates 3 and 5
+want (attested, measured, reproducible, transparency-logged).
+
+## The four-way sidecar comparison
+
+`bench/` already compares three implementations of the same store against one load profile, with
+the Rust path as the in-batch control: `obsd` (Rust/tonic), `sidecar-scala` on the JVM, and the same
+Scala sources linked by Scala Native. A **Chisel/FPGA leg is a natural fourth** and the harness
+needs no new methodology — `run-all.sh` already starts a server per target, discards a warm-up rep,
+reports the median of repetitions and the ratio to the control.
+
+Three constraints on making that comparison honest:
+
+- **Measure the SCAN, not per-frame RPC throughput.** Frames are 256 bytes. ChaCha20-Poly1305 on
+  256 B is well under a microsecond on a CPU, while a PCIe round trip is one to a few microseconds,
+  so a per-frame offload is a *slowdown* by construction. The scan is the opposite shape: at
+  capacity 4096 each call touches 4096 × (32 + 256 + 1) B ≈ **1.2 MB** of branchless byte work, and
+  `bench/README.md` records that throughput is dominated by that scan rather than the network front.
+  `BENCH_CAPACITY` is therefore the independent variable that matters, and the existing capacity
+  sweep is the right table to extend — it already shows a 16× capacity cut buying the JVM only 1.7×
+  but Scala Native 10.5×, i.e. it separates transport-bound from scan-bound targets, which is
+  exactly what an accelerator leg needs to demonstrate.
+- **Report FPGA+host, and say so.** The accelerator leg's number includes the host shim and the bus
+  crossing. That is the honest figure for a deployment, but it is not comparable to a CPU figure as
+  "the hardware is N× faster" — state both the end-to-end rate and the on-device scan rate.
+- **Scope parity.** `sidecar-scala` implements the **store only** (the notify path needs
+  libsodium-backed sealed tokens, which has not been ported). A fourth leg should match that scope
+  or the table stops being like-for-like.
+
+## Roadmap placement: when to run this spike
+
+**Not before Phase C, and the hardware part belongs in Phase D or later.** Two reasons, one of them
+decisive:
+
+1. **Gate 3 is the binding constraint, and it IS Phase C.** No key may cross to an unattested
+   accelerator; the accelerator must sit inside the TEE or be attested into the same quote. The
+   attestation flow — Veraison verifier, CoRIM transparency-logged reference values, client-side
+   appraisal — *is* Phase C. Before Phase C exists there is nothing to bind an accelerator into, so
+   an FPGA path built earlier would have to be rebuilt against the real attestation boundary anyway.
+2. **Phase C is the MVP release gate.** Per the phasing section of `plan.md`, the first shippable
+   build is Phase C, not before. Non-MVP work competing for attention with the release gate delays
+   the release, and this note's status line already says NOT MVP, NOT scheduled. That stays true.
+
+What **can** land early, cheaply, and is worth doing on its own merits — because it is software, has
+no constitutional gates and no hardware:
+
+- **The trait seam** (step 1 of the staged path). Today the sidecar has no trait: `grep` finds only
+  gRPC service impls, and `portable_sort` exposes free functions. The CPU oracle exists; the
+  injection point does not. An `ObliviousOps`-shaped trait with the current functions as the
+  always-on CPU implementation costs little and makes every later backend a drop-in.
+- **Promoting the differential proptest to a conformance suite** any backend must pass.
+- **A fourth target slot in `run-all.sh`**, so the comparison table has somewhere to put a leg.
+
+Suggested placement, then:
+
+| Work | Phase | Why there |
+|---|---|---|
+| Trait seam + conformance suite + 4th bench slot | alongside **Phase B** | Pure software, no gates, useful immediately, de-risks everything after |
+| GPU bitonic sort (wgpu/Vulkan from Rust) | **Phase D** or any post-MVP slack | No key material → gates 1 and 3 are light; highest signal per unit effort |
+| FPGA oblivious-scan / sort engine (Chisel, scratch datapath) | **Phase D or later**, after C's attestation flow is real | Needs the attestation boundary to exist; the "custom hardware" piece |
+| FPGA AEAD | **only** with vetted IP, never as fresh RTL | Constitution I — see gate 1 |
+
+The cheapest useful signal, if the goal is the four-way comparison rather than a deployment, is the
+trait seam plus the GPU leg: it exercises the whole comparison harness end to end with no keys, no
+attestation and no synthesis flow, and tells you whether the scan actually accelerates before any
+RTL is written.
