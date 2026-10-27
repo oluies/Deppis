@@ -4,9 +4,28 @@ object V {
   val scalatest = "3.3.0-alpha.2"
   val scalatestPlus = "3.3.0.0-alpha.2"
   val upickle = "4.4.3"
-  // ScalaPB runtime + the grpc-java version it targets. Formerly read from
-  // `scalapb.compiler.Version`, but ScalaPB's compilerplugin is no longer on the sbt 2.0 metabuild
-  // classpath (codegen runs sandboxed — see project/plugins.sbt), so these are pinned here directly.
+  // ScalaPB runtime, and the grpc-java version `transport` puts on the classpath beside it
+  // (grpc-netty-shaded + grpc-inprocess). Both were formerly read from `scalapb.compiler.Version`,
+  // but ScalaPB's compilerplugin is no longer on the sbt 2.0 metabuild classpath (codegen runs
+  // sandboxed — see project/plugins.sbt), so they are pinned here directly.
+  //
+  // These two are NO LONGER in step, and that is worth stating rather than implying otherwise.
+  // `grpcJava` used to BE ScalaPB's targeted version — #31 pinned 1.62.2, exactly what
+  // scalapb-runtime-grpc declares. Scala Steward has since moved it four times on its own
+  // (1.83.1 #102, 1.84.0 #150, 1.84.2 #166, 1.84.3 #175), because Steward tracks the `io.grpc`
+  // artifacts directly and knows nothing about what ScalaPB declares. So the pin below is ~22
+  // minor versions AHEAD of the grpc-java that scalapb-runtime-grpc 0.11.21 was built against
+  // (grpc-stub / grpc-protobuf 1.62.2, read from its POM), and the newer one evicts forward on the
+  // shared `transport` classpath.
+  //
+  // That has held — `transport/test` and the cross-process integration job both exercise the
+  // combination on every PR — but it holds by TEST, not by construction: scalapb-runtime-grpc
+  // could use a grpc-java API that a later 1.x changes or that was @ExperimentalApi, and nothing
+  // here would catch it ahead of a runtime failure. Contrast the BouncyCastle keys a few lines
+  // down, where `bcBom` + scripts/check-bc-bom.py make the same class of relationship mechanical
+  // and go red on a one-sided bump by design. No equivalent gate exists for this pair; if the
+  // forward eviction ever stops being safe, the symptom will be a NoSuchMethodError in the gRPC
+  // path rather than a red check.
   val scalapb = "0.11.21"
   val grpcJava = "1.84.3"
   // The audited Signal double-ratchet (Rust core + JNI bindings). Constitution I: we wrap this and
