@@ -19,3 +19,11 @@ clients/flutter/web/protocol-engine.js
 
 # Gatling benchmark output (reports, per-run logs, staged classpath)
 bench/target/
+
+# Python bytecode cache. scripts/test_check_scalapb_grpc_pin.py loads the gate it tests via
+# importlib (its filename has dashes, so a plain import will not do), which writes
+# scripts/__pycache__/. The toolchain-gate tests next door drive their script by subprocess and
+# leave nothing behind; this one cannot, so ignore the cache rather than let it show up as
+# untracked noise in every working tree that has run the hygiene checks.
+__pycache__/
+*.pyc
