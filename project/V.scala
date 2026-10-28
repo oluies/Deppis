@@ -11,12 +11,13 @@ object V {
   //
   // These two are NO LONGER in step, and that is worth stating rather than implying otherwise.
   // `grpcJava` used to BE ScalaPB's targeted version — #31 pinned 1.62.2, exactly what
-  // scalapb-runtime-grpc declares. Scala Steward has since moved it four times on its own
-  // (1.83.1 #102, 1.84.0 #150, 1.84.2 #166, 1.84.3 #175), because Steward tracks the `io.grpc`
-  // artifacts directly and knows nothing about what ScalaPB declares. So the pin below is ~22
-  // minor versions AHEAD of the grpc-java that scalapb-runtime-grpc 0.11.21 was built against
-  // (grpc-stub / grpc-protobuf 1.62.2, read from its POM), and the newer one evicts forward on the
-  // shared `transport` classpath.
+  // scalapb-runtime-grpc declares. Scala Steward has since moved it FIVE times on its own —
+  // 1.83.1 (#102), 1.84.0 (#150), 1.84.2 (#166), 1.84.3 (#175), 1.85.1 (#177) — because Steward
+  // tracks the `io.grpc` artifacts directly and knows nothing about what ScalaPB declares. #177
+  // arrived the day after this note first recorded the drift, so treat that as the drift rate.
+  // The pin below is therefore ~23 minor versions AHEAD of the grpc-java that
+  // scalapb-runtime-grpc 0.11.21 was built against (grpc-stub / grpc-protobuf 1.62.2, read from
+  // its POM), and the newer one evicts forward on the shared `transport` classpath.
   //
   // That has held — `transport/test` and the cross-process integration job both exercise the
   // combination on every PR — but it holds by TEST, not by construction: scalapb-runtime-grpc
