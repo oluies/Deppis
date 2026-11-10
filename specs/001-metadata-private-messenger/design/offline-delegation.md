@@ -4,10 +4,12 @@ Status: **PROPOSED.** Nothing here is implemented. This document picks the mecha
 ("send to and catch up while offline") before any code is written, because the obvious
 implementation leaks exactly what the task forbids ("no real-vs-idle leak on gaps").
 
-Revision 2 replaces the first draft's "hand over a bundle when you go offline" with an
+Revision 2 replaced the first draft's "hand over a bundle when you go offline" with an
 always-on provider front and a standing bundle, after design review (roborev job 2345) showed
 that the first draft didn't cover abrupt disconnects and leaked presence to the backend through
-connection switching.
+connection switching. Revision 3 (roborev job 2346) splits the provider round in two so live
+reads stay notify-guided (§3.1), and adds the rule that a repeated frame must never make the peer
+step its ratchet (§4.5). Without that rule a long absence pushes the pair past `MaxSkip`.
 
 ## 1. What already works, and the one case that doesn't
 
@@ -83,22 +85,37 @@ apart by content:
 | `writeToken` | 32 B | `dirToken(addrKey, self, peer, r)` for the buddy whose head goes out in round `r`, else a fresh cover token from `coverKey` |
 | `frame` | 256 B | that head's wire **re-sealed under a fresh nonce** (§4.1), an ack-only frame (§3.4), or a cover frame |
 | `sealedSignal` | fixed | the round-`r` notify signal — real peer `(label, bit_r)` or the decoy to the void label — **sealed to the PING enclave** (§4.2) |
-| `readToken` | 32 B | the read for round `r − 1`: a buddy's `dirToken` (live only, notify-guided) or a fresh cover-read token |
+| `readToken` | 32 B | the read of round `r − 1`'s writes: a buddy's `dirToken(…, r − 1)` chosen from digest(r − 1) (live only), or a fresh cover-read token |
 
-Each round `r`, the provider executes the chosen set:
+`Engine.tick` fetches the digest **before** it picks its read, so the read is notify-guided
+(FR-004). The provider round therefore has two phases:
 
-1. `submit(writeToken, frame)` to the store.
-2. `signal(r, sealedSignal)` to PING.
-3. `fetchDigest(r − 1, clientLabel)`. This is the previous round, exactly as `Engine.tick` reads
-   `readRound = roundId − 1`; round `r`'s digest is still being written during round `r`. The
-   result is **sealed to the device** (§4.3).
-4. `retrieve(readToken)`.
-5. Return to the device a **receipt** for round `r`: which source ran (live or slot), the sealed
-   digest, and the retrieved frame if any. If the device is away, the provider keeps receipts for
-   the rounds it ran from slots, at most H of them, and deletes them on delivery.
+**Phase A — round start.**
 
-Because the provider is the only party that fetches digests, each `(round, label)` digest is
-fetched exactly once, including across absences and returns.
+1. `fetchDigest(r − 1, clientLabel)`. This is the previous round, exactly as `Engine.tick` reads
+   `readRound = roundId − 1`; round `r − 1`'s signals are complete by then. The result is
+   **sealed to the device** (§4.3).
+2. Push the sealed digest to the device if it is connected; otherwise keep it with the round's
+   receipt.
+
+**Phase B — at the cutoff**, run the chosen set (live if it arrived, else the slot):
+
+3. `submit(writeToken, frame)` to the store.
+4. `signal(r, sealedSignal)` to PING.
+5. `retrieve(readToken)`.
+6. Return a **receipt** for round `r`: which source ran (live or slot) and the retrieved frame, if
+   any. While the device is away, the provider keeps receipts (with their phase-A digests) for the
+   rounds it ran from slots, at most H of them, and deletes them on delivery.
+
+The device builds its live set for round `r` only after it has the phase-A digest: it opens the
+digest, picks the read exactly as `Engine.tick` does today, and submits before the cutoff. This
+splits today's `Engine.tick` into `beginRound(sealedDigest) → liveSet` and `applyReceipt(receipt)`
+(Phase 2), with the same `readRound = roundId − 1` rule and the same one-round latency. A device
+that receives the digest too late to make the cutoff simply misses the round, and the slot runs.
+
+Because the provider is the only party that fetches digests, and fetches one in phase A of every
+round whatever happens in phase B, each `(round, label)` digest is fetched exactly once, including
+across absences and returns.
 
 ### 3.2 Arbitration and the cutoff
 
@@ -138,8 +155,9 @@ device does not tick past rounds; those rounds were silent for every user of tha
   day) is about 2.3 MB per refresh. See open question 2.
 
 A bundle can be up to F rounds stale when it starts running: a head acked in that window is still
-retransmitted (the peer can't decrypt the copies and re-acks; wasteful but harmless), and a message
-queued after the last refresh isn't in it. The device can reduce staleness by refreshing more
+retransmitted, and a message queued after the last refresh isn't in it. The peer can't decrypt
+those copies. That is only harmless because of §4.5: under today's receive path every undecryptable
+copy triggers a freshly encrypted re-ack, one chain step each. The device can reduce staleness by refreshing more
 often, but only on the fixed cadence.
 
 ### 3.4 What building a bundle may do to engine state
@@ -150,16 +168,19 @@ Building a bundle must not step the ratchet more than a normal tick would. The r
   `Engine.tick` would** — consults `ChunkScheduler`, advances `nextSendSeq`, encrypts once. That is
   one ratchet step, the same step the next live tick would have taken. Without it, the message
   typed just before an abrupt disconnect (the very case in §1, row 3) would not be in the bundle.
-- **A buddy we owe an ack:** the builder encrypts **one** ack-only frame (one ratchet step) and
-  re-seals it into the slots that would otherwise be covers for that buddy's rotation share. The
-  peer decrypts the first copy and stops retransmitting its current head; later copies fail to
-  decrypt and are ignored. The peer's *next* message then waits for the device's return (§6).
+- **A buddy we owe an ack:** the builder uses that pair's **cached ack-only wire** for the current
+  `highRecv` (§4.5), encrypting it only if none exists yet for that value. It re-seals copies into
+  the slots that would otherwise be covers for that buddy's rotation share. The live path uses the
+  same cached wire, so a refresh never creates an ack-only frame the live path would not also have
+  sent. The peer decrypts the first copy and stops retransmitting its current head; later copies
+  are recognised as duplicates and change nothing (§4.5). The peer's *next* message then waits for
+  the device's return (§6).
 - **Nothing else.** Re-sealing (§4.1) does not touch chain state. `sendCursor` and the rekey state
   are left as they were. Bundle building never starts a rekey attempt (§4.4).
 
-The invariant the tests check: building a bundle opens at most one head and makes at most one
-ack-only frame per buddy, and after that no ratchet step happens until the device itself ticks
-again.
+The invariant the tests check: building a bundle opens at most one head per buddy and creates at
+most one ack-only frame per `(buddy, highRecv)` value **across all refreshes**. After that, no
+ratchet step happens until the device itself ticks again.
 
 ## 4. What has to change so the provider and backend learn nothing
 
@@ -175,7 +196,7 @@ frame layout shares one random 12-byte nonce between both AEADs (`DoubleRatchet.
 this is "seal again with a new random nonce" using the existing `Aead.seal`. Under random 96-bit
 nonces, H ≤ 10⁴ copies per key is far inside the birthday bound. The receiver is unaffected: the
 first copy decrypts and consumes the message key; later copies fail to decrypt, as cached
-retransmits do today. It applies to **all** retransmits, live and bundled, so the format never
+retransmits do today; §4.5 says what the receiver must do with them. It applies to **all** retransmits, live and bundled, so the format never
 differs between them.
 
 Control heads re-seal safely too. `Engine.tick` encrypts an `EPOCH_COMMIT` exactly once because its
@@ -272,6 +293,41 @@ it out. In detail:
 Test: start a rekey, drop the device abruptly, keep it away for more than `TimeoutRounds` rounds,
 bring it back; the queued content is delivered and the pair completes (or can later start) a rekey.
 
+### 4.5 A repeated frame must never make the peer step its ratchet
+
+Under delegation a peer can receive the same frame (re-sealed) hundreds or thousands of times: a
+stale head, or the bundle's ack-only frame. Today's receive path turns each one into a ratchet step
+on the **peer's** sending chain. A frame that fails to decrypt sets `ackOwed`
+(`Engine.scala:1583`), and the ack-only frame that pays it is a fresh `encrypt`
+(`Engine.scala:1493-1501`). An online, idle peer reading one of the device's bundle copies per slot
+would therefore step its chain toward the absent device up to H times. `DoubleRatchet.MaxSkip` is
+1,000 and a larger jump is rejected as a carrier (`DoubleRatchet.scala:57-60`), so after about a
+thousand copies the returning device can no longer decrypt that peer, and nothing resets it. The
+same mechanism also breaks today's receive-side assumption that ack-only frames are always
+encrypted fresh and so always decode.
+
+**Rule:** no frame that is sent more than once — re-sealed retransmit, bundle slot, re-ack — may
+cause the receiver to step its ratchet. Two changes in the engine:
+
+1. **Re-acks re-seal a cached ack-only wire.** Each pair caches its ack-only wire together with the
+   `highRecv` it carries and its retained `(MK, HK)` (as for heads, §4.1). While `highRecv` is
+   unchanged, a re-ack is a re-seal of that wire under a fresh nonce: **zero chain steps**. A new
+   ack-only frame is encrypted only when `highRecv` advances, which is bounded by the content the
+   peer actually delivers. The cached keys are wiped when `highRecv` advances, when a content frame
+   carries the ack instead, on buddy removal and on close. Bundles reuse the same cache (§3.4).
+2. **Duplicate ack-only copies don't owe an ack.** The header still decrypts for a re-sealed
+   duplicate (same header key), so the receiver can see its chain position. It records the
+   positions of the ack-only frames it has consumed (the last few per pair) and does not set
+   `ackOwed` for a duplicate at one of those positions. That stops two peers bouncing re-sealed
+   acks at each other indefinitely. Duplicates whose header no longer decrypts (an older chain)
+   still set `ackOwed`, but by rule 1 that costs a re-seal, not a step.
+
+Rule 1 alone is what keeps every pair inside `MaxSkip`. Rule 2 removes useless traffic.
+
+Test (Phase 1): A disconnects abruptly while B is online and idle; A stays away for more than
+`MaxSkip` of its bundle's slots to B; when A returns, B's later messages decrypt at A, and B's
+sending chain advanced by at most one step per content message A actually delivered.
+
 ## 5. Bounded retention at the provider
 
 The provider holds, per device: one standing bundle (H slots), the receipts for rounds it ran
@@ -309,8 +365,12 @@ directly would leak presence through the connection switch and must not claim th
   peer's next message waits until the device returns.
 - **Staleness.** A bundle is up to F rounds old: it can retransmit an already-acked head
   (harmless) and won't contain messages queued since the last refresh (they go out on return).
-- **Retained HK** (§4.1) — a device compromise links the device's own frames on its current
+- **Retained HK** (§4.1, §4.5) — a device compromise links the device's own frames on its current
   sending chain.
+- **One skipped key per pair from a bundle-built ack.** If a refresh built the cached ack-only frame
+  and a live content frame then carries the ack instead, the ack-only position is never delivered.
+  The peer stashes that one skipped message key until `MaxSkipStore` (2,000) evicts it. Because
+  the cache is per `highRecv` value (§4.5), repeated refreshes add no further skipped keys.
 - **Provider–backend collusion** — the provider knows which operation sets it submitted for which
   of its users. The backend alone does not.
 
@@ -325,13 +385,20 @@ Each phase is reviewable on its own and keeps the labeling rule: provider routin
    - Across disconnect → reconnect, every `(round, label)` digest is fetched exactly once and the
      device makes exactly one write per round.
    - The rekey-across-absence test from §4.4.
+   - The MaxSkip-across-absence test from §4.5.
 2. **Engine side (protocol-core).**
    - `DoubleRatchet` re-seal with retained `(MK, HK)` and its wipe points (§4.1).
-   - The bundle builder under the §3.4 rules, and `Engine.applyReceipt` (live or slot ran).
+   - Split `Engine.tick` into `beginRound(sealedDigest) → liveSet` and `applyReceipt(receipt)`
+     (§3.1), keeping `readRound = roundId − 1` and the one-round latency; the existing
+     `RoundTransportSpec` suite must pass unchanged on top of the split.
+   - Cached, re-sealed re-acks and duplicate-ack suppression (§4.5), with the receive-path
+     comments updated to match.
+   - The bundle builder under the §3.4 rules.
    - The live-tick rekey timeout (§4.4).
    - Property tests: slots pairwise byte-distinct and the same shape with an empty or a full
-     outbox; no token recurs across build → absence → resume; the §3.4 ratchet-step bound; MK
-     unrecoverable after the head drains.
+     outbox; no token recurs across build → absence → resume; the §3.4 ratchet-step bound; after
+     N refreshes with no live sends, the peer holds at most one skipped key from bundle builds;
+     MK unrecoverable after the head drains.
 3. **T038 — `server/provider/`, and routing through it.**
    - An untrusted `ProviderBuffer`: atomic bundle replace, the per-round arbiter with the cutoff,
      receipts, and the §5 retention bounds. In-memory first, behind an interface that Postgres or
