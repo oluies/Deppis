@@ -430,6 +430,16 @@ jobs:
       # every Steward BC bump by design — see the comment in project/V.scala.
       - name: BouncyCastle versions match a BouncyCastle BOM (Constitution XI)
         run: python3 scripts/check-bc-bom.py
+      # V.grpcJava sits deliberately AHEAD of the grpc-java scalapb-runtime-grpc is compiled
+      # against, and the two drifted apart silently across several Steward bumps (the comment in
+      # V.scala that described the relationship went false twice). This verifies the declared
+      # baseline against ScalaPB's published POM. It does NOT demand equality with V.grpcJava, so a
+      # Steward grpc bump stays green; what goes red is a `scalapb` bump that moves ScalaPB's own
+      # grpc target, or V.grpcJava dropping below the baseline.
+      - name: scalapb/grpc-java baseline still holds (Constitution XI)
+        run: python3 scripts/check-scalapb-grpc-pin.py
+      - name: scalapb/grpc-java gate regression tests
+        run: python3 scripts/test_check_scalapb_grpc_pin.py
       # Same GitHub-releases flakiness as the lint job: this download failed twice in one evening
       # (`503`, then `curl: (56) Connection died`), failing the secret scan for network reasons. A
       # security gate that goes red on a CDN hiccup trains people to ignore it, so cache the binary

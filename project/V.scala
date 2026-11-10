@@ -19,18 +19,26 @@ object V {
   // No count or PR list is recorded here ON PURPOSE. Steward's bumps are a one-line +1/-1 on the
   // `val` and never touch this comment, so any tally written here goes stale at the next bump —
   // which is exactly how the earlier wording ("the grpc-java version it targets") became false,
-  // and then how its replacement went stale one day later. The two version literals are the only
-  // things that have to be right.
+  // and then how its replacement went stale one day later. The version literals below, and the
+  // check that verifies them, are the only things that have to be right.
   //
-  // That has held — `transport/test` and the cross-process integration job both exercise the
-  // combination on every PR — but it holds by TEST, not by construction: scalapb-runtime-grpc
-  // could use a grpc-java API that a later 1.x changes or that was @ExperimentalApi, and nothing
-  // here would catch it ahead of a runtime failure. Contrast the BouncyCastle keys a few lines
-  // down, where `bcBom` + scripts/check-bc-bom.py make the same class of relationship mechanical
-  // and go red on a one-sided bump by design. No equivalent gate exists for this pair; if the
-  // forward eviction ever stops being safe, the symptom will be a NoSuchMethodError in the gRPC
-  // path rather than a red check.
+  // CI ENFORCES the baseline: scripts/check-scalapb-grpc-pin.py (Hygiene job) reads
+  // scalapb-runtime-grpc's published POM at `scalapb` and fails if `grpcJavaBaseline` disagrees,
+  // or if `grpcJava` ever drops BELOW it. Deliberately NOT an equality check against `grpcJava` —
+  // the forward eviction is intended, so a Steward grpc bump PASSES. What goes red is a `scalapb`
+  // bump that moves ScalaPB's own grpc target, which is the moment a human must re-confirm the
+  // eviction and move the baseline in the same commit. That is a narrower gate than `bcBom` +
+  // check-bc-bom.py a few lines down, which red-flags any one-sided BouncyCastle bump, because a
+  // mixed BC set is genuinely unsupported whereas running ahead of ScalaPB's grpc target is not.
+  //
+  // What NO version check can catch: scalapb-runtime-grpc using a grpc-java API that a later 1.x
+  // changed or that was @ExperimentalApi. That is a runtime NoSuchMethodError, and only
+  // `transport`'s suite and the cross-process integration job exercise it. The gate narrows the
+  // silent-drift window; it does not settle the compatibility question.
   val scalapb = "0.11.21"
+  // The grpc-java scalapb-runtime-grpc at `scalapb` is COMPILED against, verified against its POM
+  // by the hygiene check. Move it only together with a `scalapb` bump that changes it.
+  val grpcJavaBaseline = "1.62.2"
   val grpcJava = "1.85.1"
   // The audited Signal double-ratchet (Rust core + JNI bindings). Constitution I: we wrap this and
   // never reimplement the ratchet, so keeping it current is a security concern, not just hygiene.
