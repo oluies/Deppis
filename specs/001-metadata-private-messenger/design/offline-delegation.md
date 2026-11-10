@@ -4,31 +4,38 @@ Status: **PROPOSED.** Nothing here is implemented. This document picks the mecha
 ("send to and catch up while offline") before any code is written, because the obvious
 implementation leaks exactly what the task forbids ("no real-vs-idle leak on gaps").
 
+Revision 2 replaces the first draft's "hand over a bundle when you go offline" with an
+always-on provider front and a standing bundle, after design review (roborev job 2345) showed
+that the first draft didn't cover abrupt disconnects and leaked presence to the backend through
+connection switching.
+
 ## 1. What already works, and the one case that doesn't
 
 Messaging today is round-based stop-and-wait ARQ over round-derived tokens
 (`retry-safe-addressing.md`). Each round a device makes exactly one store write, one notify
-signal, one digest fetch and one store read. A sender **retransmits its head message every
-round, under that round's fresh token, until the peer acks it**. The wire is cached, so a
-retransmit does not advance the ratchet and an absent peer stays inside `MaxSkip`.
+signal, one digest fetch (for the previous round) and one store read. A sender **retransmits its
+head message every round, under that round's fresh token, until the peer acks it**. The wire is
+cached, so a retransmit does not advance the ratchet and an absent peer stays inside `MaxSkip`.
 
 That gives most of US4 for free:
 
 | Case | Today |
 |---|---|
-| B offline, A stays online | **Works.** A retransmits every round; when B returns it reads the current round's slot, acks, and the queue drains in order. `RoundTransportSpec:469` covers 1500 offline rounds. |
+| B offline, A stays online | **Works.** A retransmits every round; when B returns it reads the current slot, acks, and the queue drains in order. `RoundTransportSpec:469` covers 1500 offline rounds. |
 | B offline with several messages queued from A | **Works**, in order, one message per round trip (stop-and-wait). |
-| A sends, then **A goes offline before B returns** | **Fails.** A's retransmits stop when A stops ticking. The frame A wrote in round r sits under round r's token, but B, when it returns in round R > r + 1, only ever reads round `R − 1`. Nothing delivers it until A comes back. |
-| A device is offline at all | **Leaks presence.** An offline device makes no per-round writes, signals, fetches or reads, so the backend sees online vs offline directly. |
+| A sends, then **A goes offline before B returns** | **Fails.** A's retransmits stop when A stops ticking. The frame A wrote in round r sits under round r's token, but B, when it returns in round R > r + 1, only reads round `R − 1`. Nothing delivers it until A comes back. |
+| A device is offline at all | **Leaks presence.** An offline device makes no per-round operations, so the backend sees online vs offline directly. |
 
-So the gap is not "the receiver needs to catch up". On return the receiver doesn't need history:
-as long as the sender is still retransmitting, normal operation *is* the catch-up. The gap is
-that **the sender's retransmissions must outlive the sender's device**, and that an offline
-device's traffic must look like an online one's.
+The receiver doesn't need history on return: as long as the sender is still retransmitting,
+normal operation *is* the catch-up. The gap is that **the sender's retransmissions must outlive
+the sender's device**, and that an absent device must look the same as a present one.
+
+On mobile, "offline" usually means the app was killed, the OS suspended it, the battery died or
+the network dropped. None of these gives the device a chance to announce anything, so the
+mechanism cannot depend on the device saying "I'm leaving".
 
 `device.Device` (T039) computes a missed-round range on reconnect. Under this design the engine
-does not replay that range; `Device` is still used for the presence state and for the horizon
-bookkeeping in §5.
+does not replay that range; `Device` remains the presence state machine.
 
 ## 2. Options
 
@@ -38,210 +45,326 @@ Keep frames in the store for the retention window; on reconnect, read every miss
 for every buddy.
 
 - **Leaks the gap length.** The returning device issues a burst of reads proportional to how
-  long it was away. That is the "real-vs-idle leak on gaps" T039's own text rules out, and it
-  breaks the one-read-per-round invariant (FR-012).
+  long it was away, which T039's text rules out and which breaks one-read-per-round (FR-012).
 - **Cost.** Up to 512 buddies × missed rounds of reads, most of them misses.
-- **Doesn't fix presence.** The offline period is still visible as silence.
+- **Doesn't fix presence.** The absence is still visible as silence.
 
-### Option 2 — the provider runs the device's rounds while it is away (recommended)
+### Option 2 — hand the provider a bundle when going offline (rejected, revision 1)
 
-Before going offline, the device precomputes its next **H** rounds of traffic and hands them to
-its service provider as a *delegation bundle*. Each round the provider performs that round's
-operations against the backend exactly as the device would have. The provider holds no keys and
-makes no decisions: every operation is a precomputed, opaque, round-bound value.
+The first draft. It fails on both counts above: an abrupt disconnect uploads nothing, and when
+traffic moves from the device's connection to the provider's and back, the backend sees the
+switch.
 
-This is the Groove-style oblivious delegation `research.md` D10 already chose for the provider.
-It fixes the failing case (the sender's head keeps being retransmitted) and the presence leak
-(the backend sees the same per-round shape whether the device is online or not), and the
-returning device needs no replay.
+### Option 3 — the provider fronts every round; a standing bundle covers absences (recommended)
 
-## 3. The delegation bundle
+This is the Groove model `research.md` D10 already chose for the provider.
 
-For each round `r` in `[R0, R0 + H)` the bundle holds one **slot**:
+- **All of a device's backend traffic goes through its provider, always.** The backend (store
+  and PING) only ever talks to providers, never to devices. Whether a given round's operations
+  came from the live device or from a precomputed slot is invisible to the backend.
+- **The device keeps a standing bundle at the provider.** It covers the next H rounds and is
+  refreshed on a fixed cadence while the device is online. The provider holds it but only uses a
+  slot when the device's live operations for that round don't arrive in time.
+- **Per round, the provider runs exactly one operation set for the device:** the live one if it
+  arrived before the cutoff, otherwise the bundle slot.
+
+An abrupt disconnect is then just a run of missed cutoffs. Nothing has to be announced, and the
+backend sees the same shape throughout.
+
+## 3. Rounds at the provider
+
+### 3.1 Operation set
+
+Live operations and bundle slots have the **same format**, so the provider cannot tell them
+apart by content:
 
 | Field | Size | Content |
 |---|---|---|
-| `writeToken` | 32 B | `dirToken(addrKey, self, peer, r)` for the buddy whose head is retransmitted in `r` (send-side rotation as in `Engine.tick`), else a fresh cover token from `coverKey` |
-| `frame` | 256 B | that head's wire, **re-sealed under a fresh nonce for this slot** (§4.1), else a cover frame |
-| `sealedSignal` | fixed | the round-`r` notify signal — the real peer's `(label, bit_r)` or the decoy to the void label — **sealed to the enclave** (§4.2) |
-| `readToken` | 32 B | a fresh cover-read token (§4.3) |
+| `writeToken` | 32 B | `dirToken(addrKey, self, peer, r)` for the buddy whose head goes out in round `r`, else a fresh cover token from `coverKey` |
+| `frame` | 256 B | that head's wire **re-sealed under a fresh nonce** (§4.1), an ack-only frame (§3.4), or a cover frame |
+| `sealedSignal` | fixed | the round-`r` notify signal — real peer `(label, bit_r)` or the decoy to the void label — **sealed to the PING enclave** (§4.2) |
+| `readToken` | 32 B | the read for round `r − 1`: a buddy's `dirToken` (live only, notify-guided) or a fresh cover-read token |
 
-About 400 B a slot. At the 15 s round interval (`schedule.Latency`), one day is 5,760 rounds,
-about 2.3 MB. `H` is a fixed protocol constant, never a function of how much the user has queued,
-so the bundle's size reveals nothing.
+Each round `r`, the provider executes the chosen set:
 
-What the provider does per round `r`:
+1. `submit(writeToken, frame)` to the store.
+2. `signal(r, sealedSignal)` to PING.
+3. `fetchDigest(r − 1, clientLabel)`. This is the previous round, exactly as `Engine.tick` reads
+   `readRound = roundId − 1`; round `r`'s digest is still being written during round `r`. The
+   result is **sealed to the device** (§4.3).
+4. `retrieve(readToken)`.
+5. Return to the device a **receipt** for round `r`: which source ran (live or slot), the sealed
+   digest, and the retrieved frame if any. If the device is away, the provider keeps receipts for
+   the rounds it ran from slots, at most H of them, and deletes them on delivery.
 
-1. `submit(writeToken_r, frame_r)` to the store.
-2. `signal(r, sealedSignal_r)` to PING.
-3. `fetchDigest(r, clientLabel)` and **drop** the result (it is sealed to the device, §4.3).
-4. `retrieve(readToken_r)` and drop the result (a cover read).
-5. Delete slot `r` (bounded retention, §5).
+Because the provider is the only party that fetches digests, each `(round, label)` digest is
+fetched exactly once, including across absences and returns.
 
-The provider never interprets anything. If it skips, delays or reorders slots, messages are
-delayed, which it could cause anyway by going down. Every slot is bound to its round: the token is
-round-derived, and the sealed signal binds `r` (`DevNotificationServer` already rejects a token
-for the wrong round). A slot replayed in another round is a miss; a slot replayed in the same
-round reuses a single-use write token, which the store rejects.
+### 3.2 Arbitration and the cutoff
 
-## 4. What has to change so the provider learns nothing
+The provider accepts the device's live set for round `r` until a **cutoff** inside the round
+(proposed: 10 s into the 15 s round, leaving time to execute). A live set that arrives later is
+dropped, never run, and the slot runs instead. The provider never runs both for the same round, so
+the device makes exactly one write per round and no token is presented twice.
 
-Three things the current code does are fine when the device talks to the backend directly but
-leak once an untrusted provider relays the traffic.
+From the device's side, every round ends with a receipt that says what actually ran:
 
-### 4.1 Retransmits are byte-identical today
+- **Live ran.** The device applies the read result and digest as `Engine.tick` does today.
+- **Slot ran** (the device was away, or late). The device treats its own live set for that round
+  as never sent. Nothing in it can recur: a dropped write token was round-bound to `r` and is
+  never used again; cover counters advance whether or not the value was used (§3.3). An
+  unacknowledged head is still cached and simply goes out again next round.
 
-`Engine.tick` caches `headWire` and resubmits the **same 256 bytes** every round. In a bundle,
-real slots would then repeat while cover slots are fresh random frames, so the provider could see
-"this device has a pending message, retransmitted from round x to y", and which slots belong to
-the same message.
+When the device reconnects, it collects the receipts for the rounds the provider ran on its
+behalf and resumes at `max(lastExecuted + 1, currentRound)`. If the provider itself was down, the
+device does not tick past rounds; those rounds were silent for every user of that provider (§6).
+
+### 3.3 The standing bundle
+
+- **Contents.** One slot (§3.1) for each round in `[s, s + H)`, where `s` is the round after the
+  upload. Slots retransmit whatever heads are open at build time (re-sealed, §4.1), rotated across
+  buddies as `Engine.tick` rotates senders; the remaining slots are covers. Slot read tokens are
+  always cover reads, because nothing guides a read while the device is away and nothing needs
+  receiving until the device can decrypt it.
+- **Fixed size.** H is a network-wide constant. The bundle is the same size whether the outbox is
+  empty or full.
+- **Fixed cadence.** The device uploads a fresh bundle every F rounds while it is online (proposed
+  F = 240 rounds, one hour), whether or not anything changed. A refresh triggered by the outbox
+  changing would tell the provider when real messages are queued. The upload replaces the old
+  bundle atomically.
+- **Counters.** Building a bundle advances `coverCounter` and `coverReadCounter` past every value
+  in it, used or not, so a cover token can never recur (FR-014).
+- **Size.** About 400 B a slot. At the 15 s round interval (`schedule.Latency`), H = 5,760 (one
+  day) is about 2.3 MB per refresh. See open question 2.
+
+A bundle can be up to F rounds stale when it starts running: a head acked in that window is still
+retransmitted (the peer can't decrypt the copies and re-acks; wasteful but harmless), and a message
+queued after the last refresh isn't in it. The device can reduce staleness by refreshing more
+often, but only on the fixed cadence.
+
+### 3.4 What building a bundle may do to engine state
+
+Building a bundle must not step the ratchet more than a normal tick would. The rule:
+
+- **A buddy with queued content but no open head:** the builder opens the head **exactly as
+  `Engine.tick` would** — consults `ChunkScheduler`, advances `nextSendSeq`, encrypts once. That is
+  one ratchet step, the same step the next live tick would have taken. Without it, the message
+  typed just before an abrupt disconnect (the very case in §1, row 3) would not be in the bundle.
+- **A buddy we owe an ack:** the builder encrypts **one** ack-only frame (one ratchet step) and
+  re-seals it into the slots that would otherwise be covers for that buddy's rotation share. The
+  peer decrypts the first copy and stops retransmitting its current head; later copies fail to
+  decrypt and are ignored. The peer's *next* message then waits for the device's return (§6).
+- **Nothing else.** Re-sealing (§4.1) does not touch chain state. `sendCursor` and the rekey state
+  are left as they were. Bundle building never starts a rekey attempt (§4.4).
+
+The invariant the tests check: building a bundle opens at most one head and makes at most one
+ack-only frame per buddy, and after that no ratchet step happens until the device itself ticks
+again.
+
+## 4. What has to change so the provider and backend learn nothing
+
+### 4.1 Re-seal retransmits under a fresh nonce
+
+`Engine.tick` caches `headWire` and resubmits the **same 256 bytes** every round. Through a
+provider — and in a bundle, where real slots would repeat while covers are fresh — that tells the
+provider which slots belong to one pending message.
 
 **Change:** a `DoubleRatchet` operation that re-seals an already-built message under a **fresh
-nonce** with the same header key and message key and the same plaintexts, without advancing any
-chain. The frame layout already shares one random 12-byte nonce between both AEADs
-(`DoubleRatchet.scala:32-36`), so this is "seal again with a new random nonce". Under random
-96-bit nonces, H ≤ 10⁴ copies per key is far inside the birthday bound. The receiver is
-unaffected: the first copy decrypts and consumes the message key, and later copies fail to decrypt
-exactly as cached retransmits do today. This also removes the same repetition from what the store
-sees when the device is online, so it should apply to all retransmits, not only bundles.
+nonce** with the same header key, message key and plaintexts, without advancing any chain. The
+frame layout shares one random 12-byte nonce between both AEADs (`DoubleRatchet.scala:32-36`), so
+this is "seal again with a new random nonce" using the existing `Aead.seal`. Under random 96-bit
+nonces, H ≤ 10⁴ copies per key is far inside the birthday bound. The receiver is unaffected: the
+first copy decrypts and consumes the message key; later copies fail to decrypt, as cached
+retransmits do today. It applies to **all** retransmits, live and bundled, so the format never
+differs between them.
 
-The re-seal stays inside `DoubleRatchet` and calls the existing `Aead.seal`. No new primitive
-(Constitution I).
+Control heads re-seal safely too. `Engine.tick` encrypts an `EPOCH_COMMIT` exactly once because its
+anchor is valid only at the chain position it was built at (`Engine.scala:1468-1471`). A re-seal
+keeps the same message key and so the same position; only the nonce changes.
 
-### 4.2 Notify signals are sealed by the backend, not the device
+**Key retention.** Re-sealing needs the head's message key (MK) and header key (HK) after
+`encrypt` returns, which departs from the rule that every retired key is wiped
+(`DoubleRatchet.scala:25-26`). The rule becomes:
+
+- Each `BuddyRuntime` holds at most one retained `(MK, HK)` pair: its current head's.
+- It is wiped when the head is dropped on ack, when `abortRekey` drops a control head, when the
+  buddy is removed, and when the engine is closed. Nothing else holds it.
+- Property test: once a head drains (or is aborted, or its buddy removed), its MK is unrecoverable
+  from engine state.
+
+**Forward-secrecy cost.** A device compromise while a head is unacknowledged exposes that head's
+MK. The plaintext of that same head is still in the outbox until it is acked, so the compromise
+already reveals the message; retaining MK adds nothing there. Retaining HK lets a compromise
+decrypt the headers of this device's own frames on the current sending chain, which links them.
+That goes in the threat model as a residual.
+
+### 4.2 Seal notify signals to the PING enclave, on the device, every round
 
 On the real path the device sends `(round, bit, label)` to the attested enclave front, which seals
-it; in dev, `GrpcRoundTransport` seals with the dev notify key. A provider relaying a precomputed
-signal would see the **peer's notify label**. That is a buddy relationship, and exactly what
-FR-010/SC-008 forbid the provider from learning.
+it; in dev, `GrpcRoundTransport` seals with the dev notify key. A provider relaying that would see
+the **peer's notify label**, which is a buddy relationship (FR-010/SC-008).
 
-**Change:** the device encrypts each slot's `(r, bit, labelTag)` to the enclave's **attested public
-key** (the key `AttestedProvisioning` already releases only on a passing appraisal) with a vetted
-public-key sealing construction, either HPKE (RFC 9180, Bouncy Castle) or libsodium's
-`crypto_box_seal`. PING opens it inside the enclave and ORs the bit as today. Labels are already
+**Change:** the device encrypts every signal — live and bundled, real and decoy — to the PING
+enclave's **attested public key**, the key `AttestedProvisioning` releases only on a passing
+appraisal. PING opens it inside the enclave and ORs the bit as today. Labels are already
 fixed-width (`NotifyDigest.labelTag`), so real and decoy ciphertexts have the same length.
 
+**Key lifetime.** A bundle seals signals up to H rounds ahead, so:
+
+- The enclave's sealing key has an epoch of at least H + F rounds, and the enclave keeps retired
+  keys for H rounds after rotating.
+- A signal sealed to a key the enclave no longer holds is dropped **silently**: PING's `signal`
+  already responds uniformly, and it must not return a distinguishable error.
+- The device seals a new bundle only with a key whose appraisal is at most F rounds old. A key
+  appraised once and then trusted for a day would weaken the attestation rule.
+
 An alternative with the same effect is the mechanism FR-003 describes and
-`DevNotificationServer.issueToken` already implements: the *receiver* issues sealed, round-bound
-tokens to the sender, so the sender only ever holds opaque blobs. Since T041c rotates the bit every
-round, a receiver would have to issue one token per future round, which is a large pre-issue for
-H rounds × 512 buddies. Sealing on the sender to the enclave key is cheaper and is the
-recommendation.
+`DevNotificationServer.issueToken` already implements: the receiver issues sealed, round-bound
+tokens to the sender. Since T041c rotates the bit every round, a receiver would have to pre-issue
+H rounds × 512 buddies of them, so sender-side sealing is the recommendation.
 
-### 4.3 Digests are plaintext to whoever presents the client label
+**Construction.** Constitution I forbids composing this ourselves from X25519 + AEAD + KDF.
+`protocol-core` has neither dependency today: Bouncy Castle is a main dependency only of
+`transport` (and test-only in `crypto`), and `crypto/Sodium.scala` does not bind
+`crypto_box_seal`. Candidates, decided by what exists on both platforms (open question 3):
 
-`fetchDigest(roundId, clientLabel)` returns the receiver's bitmap in the clear and consumes it
-(`digestAndReset`). A provider fetching on the device's behalf would learn which rounds had mail
-and how many buddies wrote: the user's incoming activity, again an SC-008 violation. A provider
-that simply doesn't fetch breaks the uniform per-round shape.
+- **HPKE (RFC 9180)** — Bouncy Castle's `HPKE` on the JVM (moving `bcprov` into `crypto`'s main
+  scope) and `@hpke/core` for Scala.js, cross-checked with RFC 9180 test vectors.
+- **libsodium sealed box** — a new `crypto_box_seal` binding in `crypto/Sodium.scala` (FFM) and
+  `libsodium-wrappers` for Scala.js, cross-checked against libsodium's own vectors.
 
-**Change:** PING returns the digest **sealed to a device-registered key**, so the provider can
-fetch it on schedule and drop the opaque bytes. The device doesn't need the dropped digests: on
-return it reads the live digest of the current round, because senders are still retransmitting
-(§1).
+Either way, the construction gets library known-answer tests on both platforms before any code
+depends on it.
 
-Reads made by the provider are therefore always **cover reads**. No read is guided by
-notifications while the device is away, which is fine, because nothing needs to be received until
-the device can decrypt it anyway.
+### 4.3 Seal digests to the device, every round
 
-## 5. Handoff, horizon and retention
+`fetchDigest(roundId, clientLabel)` returns the receiver's bitmap in the clear. A provider fetching
+it would learn when mail arrives and from how many buddies.
 
-**Going offline (device).** At round `R0` the device builds the bundle for `[R0, R0 + H)`, uploads
-it in one atomic provider transaction, and stops ticking. Covers and cover reads consume counter
-values; the device advances `coverCounter` and `coverReadCounter` **past every value it put in the
-bundle**, whether or not the provider ends up using it, so a cover token can never recur after
-return (FR-014).
+**Change:** PING returns every digest sealed to a **digest key** the device registers.
 
-**Coming back (device).** At round `R'` the device asks the provider to **revoke** the bundle from
-round `R' + 1` on. The revoke is atomic with the provider's round cursor (this is the "atomic
-transactions" in T038). The provider either has already executed slot `R'` or never will, and it
-returns the last round it executed. The device resumes ticking at that round + 1. The device and
-the provider never both act in one round: two writes in a round would break the one-write rule, and
-a reused round token would be rejected.
+- **Registration.** The device registers its digest public key with the PING enclave over the
+  attested channel, bound to its `clientLabel`. Only the device holding the label's registration
+  can replace it.
+- **Rotation.** The device rotates the digest key on the same cadence as the enclave sealing key;
+  the enclave keeps the previous one until the device's bundle that might fetch with it has
+  expired.
+- The provider gets an opaque blob of fixed size every round and returns it in the receipt. While
+  the device is away the provider simply stores the receipts; the device can discard old digests on
+  return, since senders are still retransmitting (§1).
 
-**Ratchet and ARQ state on return.** Bundles never advance a ratchet (§4.1 re-seals), so the
-device's state is exactly as it left it. If a peer acked the head while the device was away, the
-device learns that from the peer's next frame (the peer keeps re-acking a retransmit it can't
-decrypt — existing behavior), drops the head, and moves on. A rekey started before going offline
-falls under the existing `maybeTimeoutRekey`.
+### 4.4 Rekeys and absences
 
-**Horizon expiry.** If the device stays away past `R0 + H`, the provider runs out of slots and the
-device goes silent: a presence leak after H rounds, and its head stops being retransmitted. H is a
-fixed trade between bundle size and how long the leak and the strand are deferred. The
-`Device.Retention` window (10,000 rounds, about 42 h) is a natural upper bound; a day (5,760
-rounds) is a reasonable default. A device can refresh its bundle while online without changing its
-traffic shape, since uploading to its own provider is not backend traffic.
+`PqRekey.TimeoutRounds` is 2,000 rounds (`Engine.scala:88`), less than H. Counted in wall-clock
+rounds, a day's absence would time out any rekey in flight: a pre-commit attempt would be aborted
+after the peer may already have processed it, and a committed one would be stranded, so the pair
+never rekeys again.
 
-**Retention.** The provider holds only unexecuted slots and deletes each one when it executes it,
-so it holds at most H slots per device, none older than the current round. A slot contains no
-sender identity: tokens are PRF outputs, frames and signals are ciphertext (FR-008, "bounded
-retention not leaking sender").
+**Change:** the rekey timeout counts only rounds in which **the device itself ran** (live receipts),
+not rounds the provider covered from a bundle. An absence then pauses an attempt instead of timing
+it out. In detail:
 
-## 6. What the provider learns, and what it doesn't
+- A control head open at bundle-build time is retransmitted from the bundle like any head
+  (re-sealed, §4.1), so the rekey keeps progressing on the peer's side.
+- Bundle building never starts a new attempt; `maybeStartRekey` runs only in live ticks.
+- Content queued behind a control head waits, as it does today when a control head holds the slot.
 
-| The provider learns | The provider does not learn |
-|---|---|
-| that this device delegated, and when it came back (presence is inherent to having a helper) | which buddies the user has (tokens are per-round PRF outputs; signals are sealed to the enclave) |
-| the bundle's size (constant H) | whether any slot is a real retransmit or cover (§4.1) |
-| the user's own client label (needed to fetch the digest) | whether the user has mail waiting (§4.3) |
-| | any message content or ratchet state |
+Test: start a rekey, drop the device abruptly, keep it away for more than `TimeoutRounds` rounds,
+bring it back; the queued content is delivered and the pair completes (or can later start) a rekey.
 
-Within the backend, a delegated device's traffic is identical to an online device's. So the
-backend learns **less** than it does today, where an offline device is visibly silent.
+## 5. Bounded retention at the provider
 
-**Residuals to state in the threat model:**
+The provider holds, per device: one standing bundle (H slots), the receipts for rounds it ran
+while the device was away (at most H), and nothing else. A slot is deleted when its round passes,
+whether or not it ran; a receipt is deleted when delivered. Nothing older than H rounds survives.
+No stored value identifies a sender: tokens are PRF outputs, frames, signals and digests are
+ciphertext (FR-008, "bounded retention not leaking sender").
 
-- The provider sees presence. That is inherent to having a provider and matches FR-010's model
-  (the provider "participates on the user's behalf"); it must not be combined with anything that
-  links presence to buddies.
-- **One message per buddy while the sender is away.** Stop-and-wait advances only on an ack the
-  provider can't read, so a bundle can retransmit only each buddy's current head. Messages queued
-  behind it go out when the device returns. See open question 1.
-- Provider and backend colluding: the provider knows which tokens it submitted for this user. Since
-  the backend already sees those tokens arrive from the provider's connection, this is the same
-  exposure as today's client→backend connection, where the backend learns the client's network
-  identity. Nothing new is linked.
+Slots are round-bound, so a misbehaving provider can only delay or drop traffic, which it could do
+anyway by going down. A slot replayed in another round is a miss (round-derived token) or rejected
+(PING checks the sealed round). A slot replayed in the same round reuses a single-use write token,
+which the store rejects.
+
+## 6. What each party learns
+
+| | Learns | Does not learn |
+|---|---|---|
+| **Provider** | when the device is present (live sets arriving, inherent to having a helper); the user's `clientLabel` | which buddies the user has; whether any slot or live set carries a real message; whether the user has mail waiting; any content or ratchet state |
+| **Backend** (store, PING) | that a provider submitted one operation set per user per round | whether the device behind it is online, offline or late; anything new about network identity — devices no longer connect to it at all |
+
+The backend claim holds only because all traffic goes through the provider and the sealed formats
+(§4.1–§4.3) are used on **every** round. A deployment where online devices talk to the backend
+directly would leak presence through the connection switch and must not claim this property.
+
+**Residuals for the threat model:**
+
+- **Presence to the provider** — inherent; matches FR-010's model. Must not be combined with
+  anything that links presence to buddies.
+- **Provider downtime** — every user of that provider goes silent at once. That reveals provider
+  availability, not any one user's presence.
+- **One message per buddy while away.** Stop-and-wait advances only on an ack the provider can't
+  read, so a bundle retransmits each buddy's current head only. Messages queued behind it go out
+  on return. See open question 1.
+- **One ack per peer while away.** The bundle's ack-only frame stops a peer's current head; the
+  peer's next message waits until the device returns.
+- **Staleness.** A bundle is up to F rounds old: it can retransmit an already-acked head
+  (harmless) and won't contain messages queued since the last refresh (they go out on return).
+- **Retained HK** (§4.1) — a device compromise links the device's own frames on its current
+  sending chain.
+- **Provider–backend collusion** — the provider knows which operation sets it submitted for which
+  of its users. The backend alone does not.
 
 ## 7. Phased plan
 
-Each phase is reviewable on its own and keeps the labeling rule: delegation runs labeled
+Each phase is reviewable on its own and keeps the labeling rule: provider routing runs labeled
 `DEV, NO METADATA PRIVACY` until Phase 4 has landed.
 
-1. **T037 — failing test first.** An integration test in `server/provider/src/test/scala/`: A
-   queues a message to B; B is offline; A goes offline before B returns; B comes back; the message
-   arrives, then a second queued message arrives in order. It fails today (row 3 of §1).
-2. **Engine side (protocol-core).** `DoubleRatchet` re-seal (§4.1, applied to all retransmits);
-   `Engine.delegate(R0, H): DelegationBundle` and `Engine.resume(lastExecutedRound)`; counter
-   advancement past bundled covers. Property tests:
-   - bundle slots are pairwise byte-distinct and the same shape whether the outbox is empty or
-     full;
-   - no token recurs across delegate → resume → normal ticking;
-   - the engine's state after resume equals its state before delegate, apart from counters.
-3. **T038 — `server/provider/`.** An untrusted `ProviderBuffer`: atomic `upload` / `revoke`
-   against a per-device round cursor, a round driver that executes one slot per round and deletes
-   it, and at most H slots per device. In-memory first, behind an interface that a Postgres or
-   embedded-KV store can implement later (`plan.md`). Makes T037 pass.
-4. **Sealing (privacy-bearing).** Device-side sealing of signals to the enclave key (§4.2) and
-   sealed digests (§4.3), with PING changes in both the Scala dev server and the Rust sidecar. Only
-   after this phase can delegation be part of a `METADATA PRIVATE` build.
+1. **T037 — failing tests first**, in `server/provider/src/test/scala/`:
+   - A queues a message to B while B is offline; A **disconnects abruptly** (no announcement); B
+     returns; the message arrives, then a second queued message arrives in order after A returns.
+   - Across disconnect → reconnect, every `(round, label)` digest is fetched exactly once and the
+     device makes exactly one write per round.
+   - The rekey-across-absence test from §4.4.
+2. **Engine side (protocol-core).**
+   - `DoubleRatchet` re-seal with retained `(MK, HK)` and its wipe points (§4.1).
+   - The bundle builder under the §3.4 rules, and `Engine.applyReceipt` (live or slot ran).
+   - The live-tick rekey timeout (§4.4).
+   - Property tests: slots pairwise byte-distinct and the same shape with an empty or a full
+     outbox; no token recurs across build → absence → resume; the §3.4 ratchet-step bound; MK
+     unrecoverable after the head drains.
+3. **T038 — `server/provider/`, and routing through it.**
+   - An untrusted `ProviderBuffer`: atomic bundle replace, the per-round arbiter with the cutoff,
+     receipts, and the §5 retention bounds. In-memory first, behind an interface that Postgres or
+     an embedded KV can implement later (`plan.md`). The storage key is the **user**, not the
+     device (open question 4).
+   - A `ProviderRoundTransport` so online clients reach the backend only through their provider,
+     replacing direct use of `GrpcRoundTransport` by devices. Makes T037 pass.
+4. **Sealing (privacy-bearing).**
+   - Choose and bind the sealing construction, with library known-answer tests on JVM and Scala.js.
+   - Signals sealed to the PING enclave key every round, with the key epoch and silent-drop rules
+     (§4.2).
+   - Digest-key registration, rotation and sealed digests (§4.3), in both the Scala dev PING and
+     the Rust sidecar.
+   - Only after this phase can provider routing be part of a `METADATA PRIVATE` build.
 5. **Docs.** Threat-model entries for the §6 residuals and a README note on what the provider can
    and cannot see (T062).
 
 ## 8. Open questions
 
-1. **More than one message per buddy while away.** Options: (a) accept it — the queue drains on
-   return; (b) let a bundle cycle the first k queued messages (msg 1, msg 2, …, msg 1, …). The
-   receiver de-duplicates by sequence number and only accepts the next in order, so this delivers
-   in order at a cost of about k rounds per message. It needs the ratchet to pre-encrypt k sends,
-   which it can, and `headWireAck` / ARQ bookkeeping that tolerates more than one in-flight frame.
-   Recommendation: ship (a), keep (b) for later.
-2. **H.** One day (5,760 rounds) as a default? It could be configurable per device, but then H
-   itself becomes a fingerprint. Prefer a single network-wide constant.
-3. **Sealing construction for §4.2.** HPKE via Bouncy Castle (already a dependency) or libsodium
-   `crypto_box_seal` (already bound over FFM, and available in the browser through
-   `@noble`/libsodium-wrappers for the Scala.js engine). The JS side decides it: whichever has a
-   vetted implementation on both platforms.
-4. **Multi-device (US5, T043–T045).** Two devices of one user each delegating would emit two
-   shapes. The FR-011 non-coordination design should reuse the bundle format (one provider-held
-   schedule per user, not per device) rather than invent a second mechanism. Out of scope here,
-   but Phase 3's storage key should be the user, not the device, so it doesn't need migrating.
+1. **More than one message per buddy while away.** (a) Accept it — the queue drains on return.
+   (b) Let a bundle cycle the first k queued messages; the receiver de-duplicates by sequence and
+   accepts only the next in order, so this delivers in order at about k rounds per message, but it
+   needs k retained key pairs per buddy and ARQ bookkeeping for more than one frame in flight.
+   Recommendation: ship (a).
+2. **H and F.** One day (H = 5,760) refreshed hourly (F = 240) gives about 55 MB a day of uploads
+   per device, which is too much for mobile. Options: a smaller H (say 6 h), a delta upload that
+   only replaces slots that changed (it must not reveal *which* changed, so the delta has to be a
+   fixed-size rewrite of the next F slots), or both. H must be one network-wide constant either way;
+   a per-device H is a fingerprint.
+3. **Sealing construction.** HPKE (Bouncy Castle + `@hpke/core`) or libsodium sealed box
+   (new FFM binding + `libsodium-wrappers`). Decide by the Scala.js side: whichever has a vetted,
+   maintained implementation there.
+4. **Multi-device (US5, T043–T045).** With all traffic through the provider, two devices of one
+   user can share one per-user schedule at the provider: one operation set per user per round, fed
+   by whichever device is live. That is likely the FR-011 non-coordination mechanism, which is why
+   Phase 3 keys storage by user. Out of scope here.
