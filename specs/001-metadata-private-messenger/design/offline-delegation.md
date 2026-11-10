@@ -194,7 +194,7 @@ provider which slots belong to one pending message.
 nonce** with the same header key, message key and plaintexts, without advancing any chain. The
 frame layout shares one random 12-byte nonce between both AEADs (`DoubleRatchet.scala:32-36`), so
 this is "seal again with a new random nonce" using the existing `Aead.seal`. Under random 96-bit
-nonces, H ≤ 10⁴ copies per key is far inside the birthday bound. The receiver is unaffected: the
+nonces, H ≤ 10⁴ copies per key is far inside the birthday bound. The receiver's decrypt is unchanged: the
 first copy decrypts and consumes the message key; later copies fail to decrypt, as cached
 retransmits do today; §4.5 says what the receiver must do with them. It applies to **all** retransmits, live and bundled, so the format never
 differs between them.
