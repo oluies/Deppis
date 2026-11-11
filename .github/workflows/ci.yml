@@ -41,7 +41,7 @@ jobs:
       - uses: actions/setup-java@v6
         with:
           distribution: temurin
-          java-version: "24" # Foreign Function & Memory API is final since 22
+          java-version: "27" # Foreign Function & Memory API is final since 22
       - uses: sbt/setup-sbt@v1
       # Go is the independent TLS stack that PqTlsInteropSpec drives against the hybrid-only PQ bind
       # (transport). Its crypto/tls has had X25519MLKEM768 on by default since 1.24. Pinned like
@@ -86,7 +86,7 @@ jobs:
       # because the cache's failure mode is SILENT: a missing/stale/JDK-mismatched cache makes the
       # JVM print `[error][aot] ...` lines ON STDOUT and still exit 0, which would corrupt the JSON
       # contract above without failing anything. So we assert stdout purity directly, on the same
-      # JDK 24 CI actually ships — the measurements in build.sbt were taken on JDK 26.
+      # JDK 27 CI actually ships — the measurements in build.sbt were taken on JDK 26.
       - name: Staged CLI + AOT cache — stdout stays pure JSON
         run: |
           set -o pipefail
@@ -117,9 +117,9 @@ jobs:
             exit 1
           fi
           cli="${clis[0]}"
-          # JEP 483 landed in JDK 24, so on this runner the cache MUST have been produced. If it was
+          # JEP 483 landed in JDK 24 (CI runs 27), so on this runner the cache MUST have been produced. If it was
           # not, the task fell back silently and we would lose the speedup without noticing.
-          [ -f "$cli/pstatus.aot" ] || { echo "::error::no AOT cache staged — JEP 483 expected on JDK 24"; exit 1; }
+          [ -f "$cli/pstatus.aot" ] || { echo "::error::no AOT cache staged — JEP 483 expected on JDK 24+"; exit 1; }
           # Exactly one line, and it must be the gate JSON: proves no AOT/CDS diagnostics leaked.
           out="$("$cli/pstatus" show)"
           echo "staged pstatus -> $out"
@@ -148,7 +148,7 @@ jobs:
       - uses: actions/setup-java@v6
         with:
           distribution: temurin
-          java-version: "24"
+          java-version: "27"
       # The Coursier launcher comes from GitHub releases, the flakiest hop in this workflow: it failed
       # three times in one evening with `socket hang up`, red-flagging PRs whose code was fine. Cache
       # the binary so a healthy run touches that host ZERO times, and retry when a cache miss forces
@@ -215,7 +215,7 @@ jobs:
       - uses: actions/setup-java@v6
         with:
           distribution: temurin
-          java-version: "24"
+          java-version: "27"
       - uses: sbt/setup-sbt@v1
       # Pinned — see rust-toolchain.toml.
       - uses: dtolnay/rust-toolchain@1.99.0
@@ -307,7 +307,7 @@ jobs:
       - uses: actions/setup-java@v6
         with:
           distribution: temurin
-          java-version: "24"
+          java-version: "27"
       - uses: sbt/setup-sbt@v1
       # Scala Native needs a C/C++ toolchain to link. `commix` (the GC pinned in build.sbt) ships
       # with Scala Native, so no Boehm libgc is required; protoc is needed because the module
@@ -343,7 +343,7 @@ jobs:
       - uses: actions/setup-java@v6
         with:
           distribution: temurin
-          java-version: "24"
+          java-version: "27"
       - uses: sbt/setup-sbt@v1
       - uses: actions/setup-node@v7
         with:

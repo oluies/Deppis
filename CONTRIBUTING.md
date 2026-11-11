@@ -32,7 +32,7 @@ and are not up for debate in a PR:
 
 | Tool | Version | Why |
 |---|---|---|
-| **JDK** | **22 or newer** (CI uses **24**) | The `crypto` layer calls libsodium through the finalized Foreign Function & Memory API (JEP 454, GA in JDK 22). Older JDKs lack the final FFM API. |
+| **JDK** | **22 or newer** (CI uses **27**) | The `crypto` layer calls libsodium through the finalized Foreign Function & Memory API (JEP 454, GA in JDK 22). Older JDKs lack the final FFM API. |
 | **sbt** | **2.0** | Build tool (pinned in `project/build.properties`). |
 | **Rust + cargo** | stable | Builds the `obsd` oblivious sidecar and runs its tests. |
 | **libsodium** | system package | Loaded at runtime by the `crypto` module via FFM (`libsodium-dev` on Debian/Ubuntu; `brew install libsodium` on macOS). |
