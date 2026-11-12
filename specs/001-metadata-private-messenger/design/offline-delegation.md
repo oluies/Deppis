@@ -642,7 +642,22 @@ Each phase is reviewable on its own and keeps the labeling rule: provider routin
      outbox; no token recurs across build → absence → resume; the §3.4 ratchet-step bound; after
      N refreshes with no live sends, the peer holds at most one skipped key from bundle builds;
      the §4.1 wipe table.
-3. **T038 — `server/provider/`, and routing through it.**
+3. **T038 — `server/provider/`, and routing through it.** Landing in two PRs:
+   - **Provider core — landed:** `provider.Provider` (phase A digest fetch, `submitLive` before the
+     cutoff, `closeRound` runs exactly one operation set per user — live, else slot, else silence —
+     and keeps a receipt), `provider.ProviderStore` + `InMemoryProviderStore` (keyed by user,
+     atomic bundle replace, receipts capped at H), `provider.DevProviderBackend` (the dev store
+     and dev notify server behind `RoundTransport`), and the device-side
+     `provider.ProviderSession` (live rounds through `beginRound` / `applyReceipt`, bundle refresh
+     on the fixed cadence). H and F are network-wide constants in `engine.Delegation`, and
+     `PqRekey.PauseAllowanceRounds` is derived from them. `ProviderSpec` carries the two T037
+     end-to-end tests (a control run with bundle slots disabled confirms delivery depends on the
+     bundle) and the provider's rules. Labeled `DEV, NO METADATA PRIVACY`.
+   - **Routing — next:** a networked provider front (a gRPC contract in `contracts/`) and a
+     client-side `ProviderRoundTransport`, so devices reach the backend only through their
+     provider.
+
+   The full Phase 3 list:
    - An untrusted `ProviderBuffer`: atomic bundle replace, the per-round arbiter with the cutoff,
      receipts, and the §5 retention bounds. In-memory first, behind an interface that Postgres or
      an embedded KV can implement later (`plan.md`). The storage key is the **user**, not the
