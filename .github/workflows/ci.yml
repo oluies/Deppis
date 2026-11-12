@@ -14,8 +14,21 @@ concurrency:
 
 jobs:
   jvm:
-    name: JVM — sbt test + labeling gate
+    # Two legs: the pinned JDK (must pass) and the next JDK's early-access build, run so a regression
+    # on the coming release shows up early. The EA leg is ALLOWED TO FAIL (`continue-on-error`): it
+    # shows red on the run but never fails the workflow, because an EA JDK can break for reasons
+    # that are not ours. The pinned leg keeps the job's original name.
+    name: JVM — sbt test + labeling gate${{ matrix.experimental && format(' (JDK {0}, allowed to fail)', matrix.java) || '' }}
     runs-on: ubuntu-latest
+    continue-on-error: ${{ matrix.experimental }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - java: "27" # Foreign Function & Memory API is final since 22
+            experimental: false
+          - java: "28-ea" # Temurin early access, from the Adoptium API
+            experimental: true
     env:
       # Cross-stack PQ TLS interop must actually run here, not cancel. See PqTlsInteropSpec.
       REQUIRE_PQ_INTEROP: "1"
@@ -41,7 +54,7 @@ jobs:
       - uses: actions/setup-java@v6
         with:
           distribution: temurin
-          java-version: "27" # Foreign Function & Memory API is final since 22
+          java-version: ${{ matrix.java }}
       - uses: sbt/setup-sbt@v1
       # Go is the independent TLS stack that PqTlsInteropSpec drives against the hybrid-only PQ bind
       # (transport). Its crypto/tls has had X25519MLKEM768 on by default since 1.24. Pinned like
@@ -58,8 +71,9 @@ jobs:
             ~/.cache/coursier
             ~/.sbt
             ~/.ivy2/cache
-          key: sbt-${{ runner.os }}-${{ hashFiles('build.sbt', 'project/build.properties', 'project/plugins.sbt', 'project/V.scala') }}
-          restore-keys: sbt-${{ runner.os }}-
+          # Per JDK, so the early-access leg can never poison the pinned leg's cache.
+          key: sbt-${{ runner.os }}-jdk${{ matrix.java }}-${{ hashFiles('build.sbt', 'project/build.properties', 'project/plugins.sbt', 'project/V.scala') }}
+          restore-keys: sbt-${{ runner.os }}-jdk${{ matrix.java }}-
       - name: Test the JVM modules + labeling gate (T008) in one sbt session
         run: |
           set -o pipefail
@@ -86,7 +100,7 @@ jobs:
       # because the cache's failure mode is SILENT: a missing/stale/JDK-mismatched cache makes the
       # JVM print `[error][aot] ...` lines ON STDOUT and still exit 0, which would corrupt the JSON
       # contract above without failing anything. So we assert stdout purity directly, on the same
-      # JDK 27 CI actually ships — the measurements in build.sbt were taken on JDK 26.
+      # JDK CI actually ships (each matrix leg) — the measurements in build.sbt were taken on JDK 26.
       - name: Staged CLI + AOT cache — stdout stays pure JSON
         run: |
           set -o pipefail
@@ -117,7 +131,7 @@ jobs:
             exit 1
           fi
           cli="${clis[0]}"
-          # JEP 483 landed in JDK 24 (CI runs 27), so on this runner the cache MUST have been produced. If it was
+          # JEP 483 landed in JDK 24 (CI runs 27 and 28-ea), so on this runner the cache MUST have been produced. If it was
           # not, the task fell back silently and we would lose the speedup without noticing.
           [ -f "$cli/pstatus.aot" ] || { echo "::error::no AOT cache staged — JEP 483 expected on JDK 24+"; exit 1; }
           # Exactly one line, and it must be the gate JSON: proves no AOT/CDS diagnostics leaked.
