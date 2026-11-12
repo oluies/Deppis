@@ -123,7 +123,7 @@ three with no ordering constraint between conversations.
 **Independent Test**: Send to an offline buddy; buddy returns and retrieves; multiple queued
 messages all arrive in order.
 
-- [ ] T037 [P] [US4] Integration test: offline send + ordered catch-up in `server/provider/src/test/scala/` (write first, MUST fail)
+- [ ] T037 [P] [US4] Integration test: offline send + ordered catch-up in `server/provider/src/test/scala/` (write first, MUST fail) — PARTIAL: design `design/offline-delegation.md` (#184, #186); protocol-core half landed in `protocol-core/crosstest/src/test/scala/engine/OfflineDelegationCrossSpec.scala` (rekey-timeout-across-absence ×4 and MaxSkip-across-absence, pending until Phase 2; silent-peer guards ×2 passing). End-to-end provider tests wait for `server/provider/` (T038)
 - [ ] T038 [US4] Implement the untrusted service-provider buffer (atomic transactions, retention window) in `server/provider/src/main/scala/` (FR-007/FR-008), bounded retention not leaking sender
 - [X] T039 [US4] Implement device `Online/Offline` + missed-round catch-up in `protocol-core/shared/src/main/scala/device/` (FR-008, no real-vs-idle leak on gaps) — DONE (#39): Online/Offline state model with bounded catch-up
 
