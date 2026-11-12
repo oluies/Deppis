@@ -10,6 +10,14 @@ that the first draft didn't cover abrupt disconnects and leaked presence to the 
 connection switching. Revision 3 (roborev job 2346) splits the provider round in two so live
 reads stay notify-guided (§3.1), and adds the rule that a repeated frame must never make the peer
 step its ratchet (§4.5). Without that rule a long absence pushes the pair past `MaxSkip`.
+Revision 4 (roborev job 2366) adds §4.6: store requests are sealed to the store enclave and
+store responses to the device. Without that, a provider serving both ends of a conversation links
+them, because the sender's write token *is* the receiver's read token one round later. It also
+moves attestation and key registration behind the provider (§4.2, §4.3), gates the rekey timeout on
+both sides (§4.4), and places the engine tests in protocol-core (§7). Revision 5 (roborev jobs
+2367, 2369) makes the client label self-certifying so the provider can't register its own keys
+(§4.3), bounds the rekey pause so a silent peer still times out (§4.4), fixes one response key
+(§4.6), and recomputes sizes for the sealed formats (§3.3). Revision 6 (roborev job 2370) delivers the signed registration to both enclaves, makes failure responses well-formed seals under a throwaway key, and requires registration state to survive restarts or the sealing key to rotate (§4.3, §4.6).
 
 ## 1. What already works, and the one case that doesn't
 
@@ -80,12 +88,16 @@ backend sees the same shape throughout.
 Live operations and bundle slots have the **same format**, so the provider cannot tell them
 apart by content:
 
-| Field | Size | Content |
+| Field | Sealed to | Holds inside the seal |
 |---|---|---|
-| `writeToken` | 32 B | `dirToken(addrKey, self, peer, r)` for the buddy whose head goes out in round `r`, else a fresh cover token from `coverKey` |
-| `frame` | 256 B | that head's wire **re-sealed under a fresh nonce** (§4.1), an ack-only frame (§3.4), or a cover frame |
-| `sealedSignal` | fixed | the round-`r` notify signal — real peer `(label, bit_r)` or the decoy to the void label — **sealed to the PING enclave** (§4.2) |
-| `readToken` | 32 B | the read of round `r − 1`'s writes: a buddy's `dirToken(…, r − 1)` chosen from digest(r − 1) (live only), or a fresh cover-read token |
+| `sealedWrite` | store enclave (§4.6) | `writeToken` — `dirToken(addrKey, self, peer, r)` for the buddy whose head goes out in round `r`, else a fresh cover token from `coverKey` — and the 256-byte `frame`: that head's wire **re-sealed under a fresh nonce** (§4.1), an ack-only frame (§3.4), or a cover frame |
+| `sealedSignal` | PING enclave (§4.2) | the round-`r` notify signal — real peer `(round, bit_r, labelTag)` or the decoy to the void label |
+| `sealedRead` | store enclave (§4.6) | `readToken` — a buddy's `dirToken(…, r − 1)` chosen from digest(r − 1) (live only), or a fresh cover-read token — and the device's `labelTag`, which names the registered key the response is sealed to |
+
+Every field has a fixed size (sizes in §3.3). The plaintext tokens and frame exist only on the
+device and inside the enclaves; the provider never sees them. Dev builds before Phase 4 carry them
+in the clear, which is one reason provider routing stays labeled `DEV, NO METADATA PRIVACY` until
+then (§6).
 
 `Engine.tick` fetches the digest **before** it picks its read, so the read is notify-guided
 (FR-004). The provider round therefore has two phases:
@@ -100,12 +112,15 @@ apart by content:
 
 **Phase B — at the cutoff**, run the chosen set (live if it arrived, else the slot):
 
-3. `submit(writeToken, frame)` to the store.
+3. `submit(sealedWrite)` to the store — `(writeToken, frame)` sealed to the store enclave (§4.6).
 4. `signal(r, sealedSignal)` to PING.
-5. `retrieve(readToken)`.
-6. Return a **receipt** for round `r`: which source ran (live or slot) and the retrieved frame, if
-   any. While the device is away, the provider keeps receipts (with their phase-A digests) for the
-   rounds it ran from slots, at most H of them, and deletes them on delivery.
+5. `retrieve(sealedRead)` — `readToken` sealed to the store enclave. The store answers with a
+   fixed-size response **sealed to the device** whether or not a frame was found (§4.6).
+6. Return a **receipt** for round `r`: which source ran (live or slot) and the sealed read
+   response. While the device is away, the provider keeps receipts (with their phase-A digests)
+   for the rounds it ran from slots, at most H of them, and deletes them on delivery.
+
+So the provider handles only ciphertext: it never sees a token, a frame, or whether a read hit.
 
 The device builds its live set for round `r` only after it has the phase-A digest: it opens the
 digest, picks the read exactly as `Engine.tick` does today, and submits before the cutoff. This
@@ -151,8 +166,24 @@ device does not tick past rounds; those rounds were silent for every user of tha
   bundle atomically.
 - **Counters.** Building a bundle advances `coverCounter` and `coverReadCounter` past every value
   in it, used or not, so a cover token can never recur (FR-014).
-- **Size.** About 400 B a slot. At the 15 s round interval (`schedule.Latency`), H = 5,760 (one
-  day) is about 2.3 MB per refresh. See open question 2.
+- **Size.** For a classical seal (X25519-based HPKE or sealed box: 32 B encapsulation + 16 B tag =
+  48 B overhead per sealed field):
+
+  | Field | Inside the seal | Sealed size |
+  |---|---|---|
+  | `sealedWrite` | token 32 + frame 256 | 336 B |
+  | `sealedSignal` | round 8 + bit 2 + label tag 32 | 90 B |
+  | `sealedRead` | token 32 + label tag 32 | 112 B |
+  | **per slot** | | **≈ 540 B** |
+
+  Each cadence point (every F rounds) adds, **for each of the two enclaves** (PING and the
+  store), an attestation fetch (≈ 80 B) and a registration request (≈ 160 B, §4.3): about 480 B per
+  cadence point, H / F ≈ 24 of them per bundle, about 12 KB. At the 15 s round interval
+  (`schedule.Latency`), H = 5,760 (one day) is therefore about **3.1 MB per refresh**.
+
+  If the seals must be post-quantum like the rest of the stack (hybrid X25519 + ML-KEM-768
+  HPKE, about 1,120 B of encapsulation per field), each slot grows to about 3.9 KB and a one-day
+  bundle to about 22 MB. See open question 2.
 
 A bundle can be up to F rounds stale when it starts running: a head acked in that window is still
 retransmitted, and a message queued after the last refresh isn't in it. The peer can't decrypt
@@ -203,15 +234,19 @@ Control heads re-seal safely too. `Engine.tick` encrypts an `EPOCH_COMMIT` exact
 anchor is valid only at the chain position it was built at (`Engine.scala:1468-1471`). A re-seal
 keeps the same message key and so the same position; only the nonce changes.
 
-**Key retention.** Re-sealing needs the head's message key (MK) and header key (HK) after
+**Key retention.** Re-sealing needs a frame's message key (MK) and header key (HK) after
 `encrypt` returns, which departs from the rule that every retired key is wiped
-(`DoubleRatchet.scala:25-26`). The rule becomes:
+(`DoubleRatchet.scala:25-26`). The rule becomes: each `BuddyRuntime` holds **at most two**
+retained `(MK, HK)` pairs, and nothing else in the engine holds either.
 
-- Each `BuddyRuntime` holds at most one retained `(MK, HK)` pair: its current head's.
-- It is wiped when the head is dropped on ack, when `abortRekey` drops a control head, when the
-  buddy is removed, and when the engine is closed. Nothing else holds it.
-- Property test: once a head drains (or is aborted, or its buddy removed), its MK is unrecoverable
-  from engine state.
+| Pair | Purpose | Wiped when |
+|---|---|---|
+| **head** | re-seal the current head (content or control) | the head drops on ack; `abortRekey` drops a control head; buddy removed; engine closed |
+| **ack** | re-seal the cached ack-only wire (§4.5) | `highRecv` advances; a content frame carries the ack instead; buddy removed; engine closed |
+
+Property test (Phase 2): after each wipe event in the table, the corresponding MK and HK are
+unrecoverable from engine state, and at no point does a `BuddyRuntime` hold more than these two
+pairs.
 
 **Forward-secrecy cost.** A device compromise while a head is unacknowledged exposes that head's
 MK. The plaintext of that same head is still in the outbox until it is acked, so the compromise
@@ -238,6 +273,13 @@ fixed-width (`NotifyDigest.labelTag`), so real and decoy ciphertexts have the sa
   already responds uniformly, and it must not return a distinguishable error.
 - The device seals a new bundle only with a key whose appraisal is at most F rounds old. A key
   appraised once and then trusted for a day would weaken the attestation rule.
+- **Attestation goes through the provider too.** The device fetches evidence (with its fresh
+  nonce) and appraises it itself, but the request and response travel through the provider, like
+  every other backend call. Freshness comes from the nonce, so the relay can't replay old evidence.
+  These fetches run on a fixed network-wide cadence, once every F rounds. While the device is away,
+  its bundle carries a precomputed, identically shaped fetch for each cadence point in its window.
+  The backend therefore sees attestation traffic at the same rate whether the device is present or
+  not.
 
 An alternative with the same effect is the mechanism FR-003 describes and
 `DevNotificationServer.issueToken` already implements: the receiver issues sealed, round-bound
@@ -262,17 +304,71 @@ depends on it.
 `fetchDigest(roundId, clientLabel)` returns the receiver's bitmap in the clear. A provider fetching
 it would learn when mail arrives and from how many buddies.
 
-**Change:** PING returns every digest sealed to a **digest key** the device registers.
+**Change:** PING returns every digest sealed to a **device key** the device registers. The same
+key seals the store's read responses (§4.6). PING and the store are separate enclaves with separate
+attested keys, so the device sends **the same signed registration to both**, each sealed to that
+enclave's key, and each enclave verifies it independently with the rules below. There is one
+registration *format* and one device key, delivered twice. No enclave-to-enclave channel is needed,
+and neither enclave trusts the other's view of the key.
 
-- **Registration.** The device registers its digest public key with the PING enclave over the
-  attested channel, bound to its `clientLabel`. Only the device holding the label's registration
-  can replace it.
-- **Rotation.** The device rotates the digest key on the same cadence as the enclave sealing key;
-  the enclave keeps the previous one until the device's bundle that might fetch with it has
-  expired.
-- The provider gets an opaque blob of fixed size every round and returns it in the receipt. While
-  the device is away the provider simply stores the receipts; the device can discard old digests on
-  return, since senders are still retransmitting (§1).
+**Who may register a key for a label.** Sealing a registration to the enclave keeps it secret but
+proves nothing about who sent it, and the label is not a secret: the provider knows it (§6) and so
+does every buddy that signals to it. Whoever registers a key for the label receives that label's
+digests and read responses, so an unauthenticated registration would hand the provider exactly
+what this section hides. The fix is to make the label **self-certifying**:
+
+- **Identity key.** At enrolment the device generates a long-lived identity signing key with a
+  vetted library (Constitution I). Ed25519 is available on both platforms (libsodium on the JVM,
+  `@noble/curves` in Scala.js); whether it must be hybrid with ML-DSA-65 (liboqs, already bound;
+  `@noble/post-quantum` in JS) follows the project's PQ policy. That is open question 3.
+- **Label.** The client's raw label is a hash of the identity public key,
+  `clientLabel = H("deppis-label" ‖ identityPub)`, and the wire label is `labelTag(clientLabel)` as
+  today. Buddies still receive the label at pairing exactly as now; it just stops being arbitrary.
+- **Registration.** Inside the seal, a registration carries `identityPub`, the new device public
+  key, a strictly increasing counter, and a signature by the identity key over
+  `(labelTag, devicePub, counter)`. The enclave accepts it only if
+  `labelTag(H("deppis-label" ‖ identityPub))` equals the label being registered, the signature
+  verifies, and the counter exceeds the last accepted one. The first registration is protected the
+  same way, so there is no trust-on-first-use window and no direct enrolment channel to the
+  backend: no one but the identity key's holder can produce a registration the enclave accepts.
+- **Replay and rollback.** The counter stops the provider replaying an old registration to roll the
+  key back to one it might later learn. That only works while the enclave remembers the counter,
+  and the provider can keep an old sealed registration for as long as the enclave's sealing key can
+  still open it (an epoch of at least H + F rounds, plus H for retired keys, §4.2). So each enclave
+  must do one of two things:
+  - keep its per-label `(counter, device key)` state **durably and rollback-protected** across
+    restarts (sealed storage anchored to a monotonic counter the host can't reset), or
+  - if it restarts without that state, **generate a fresh sealing key and never open anything
+    sealed to an older one**, so no registration from before the restart can be replayed.
+
+  The second option is the fallback, and it costs availability. Bundled requests sealed to the old
+  key fail for the rest of their bundle: signals are dropped silently, writes are lost (the sender
+  retransmits once it is live again), reads come back as misses. The label has no registered key
+  until the device's next cadence registration. That is listed as a residual in §6.
+- **Dummies.** A bundle-carried dummy registration is marked as a dummy **inside** the seal; the
+  enclave opens it and applies nothing. A dummy can never replace a key, and outside the seal it
+  looks like a real registration.
+- **Uniform responses.** A registration that fails any check gets a response identical to a
+  successful one.
+
+**Cadence and rotation:**
+
+- **Cadence.** Registration and rotation requests run on the same fixed cadence as attestation
+  fetches (§4.2), one to each enclave, and a bundle carries an identically shaped dummy for each
+  enclave at each cadence point. The backend never sees a device-timed request.
+- **Rotation.** PING seals each round's digest (and the store each read response) to whichever key
+  is registered at that moment; neither keeps anything old. The constraint is on the **device**: it
+  keeps each retired private device key for H rounds after rotating, so it can still open receipts
+  the provider stored during an absence. A digest or response it can no longer open is discarded.
+  Nothing is lost by that: senders are still retransmitting (§1), so the live round after return
+  shows the same mail.
+- The provider gets an opaque blob of fixed size every round and returns it in the receipt.
+
+Tests (Phase 4), run against **both** PING and the store: a registration or rotation forged by the
+provider, or by a buddy who knows the label, is rejected, and its response is indistinguishable
+from an accepted one; a replayed older registration is rejected; a dummy registration changes
+nothing; after an enclave restart, replaying a registration from before the restart is rejected
+(whichever of the two restart rules the enclave uses).
 
 ### 4.4 Rekeys and absences
 
@@ -281,17 +377,48 @@ rounds, a day's absence would time out any rekey in flight: a pre-commit attempt
 after the peer may already have processed it, and a committed one would be stranded, so the pair
 never rekeys again.
 
-**Change:** the rekey timeout counts only rounds in which **the device itself ran** (live receipts),
-not rounds the provider covered from a bundle. An absence then pauses an attempt instead of timing
-it out. In detail:
+Both ends are affected. The absent device's clock keeps running in wall-clock rounds, and so
+does its **online peer's** (`maybeTimeoutRekey`, `Engine.scala:576`). The bundle can't answer
+control frames because it can't read, so the peer sees the attempt stall and times it out after
+2,000 rounds as well.
+
+**Change:** on both ends, the timeout clock pauses while the pair looks absent, **for a bounded
+time only**. A round counts toward `TimeoutRounds` if this device ran it live (a live receipt, not a
+bundle slot) and either
+
+- it has received a decryptable frame from that buddy within the last W rounds (W a small constant
+  covering a round trip, say 4), or
+- the attempt has already spent its **pause allowance**: P = H + F live rounds without such a
+  frame, counted across the attempt.
+
+An absence of up to H rounds on either side (plus up to F rounds of bundle staleness) therefore
+pauses the attempt instead of timing it out. A peer that stays silent for longer — one that aborted
+its own side, or is gone for good — still times out, at most `TimeoutRounds` + P live rounds after
+the attempt started. That bounds how long the initiator's KEM secret stays resident and guarantees
+the pair can eventually rekey again. A peer that is live and still sending decryptable frames but
+stuck times out after `TimeoutRounds`, as today. Gating on peer frames alone, without the
+allowance, would freeze the clock forever against a silent peer: its re-sealed duplicates never
+decrypt again (§4.1, §4.5) and an idle peer sends only covers. In detail:
 
 - A control head open at bundle-build time is retransmitted from the bundle like any head
-  (re-sealed, §4.1), so the rekey keeps progressing on the peer's side.
+  (re-sealed, §4.1). The peer decrypts the first copy, so the attempt still advances by that step.
 - Bundle building never starts a new attempt; `maybeStartRekey` runs only in live ticks.
 - Content queued behind a control head waits, as it does today when a control head holds the slot.
+- The stranded-attempt diagnostic (`strandedAttemptAgeRounds`) uses the same clock, so an absence
+  within the allowance doesn't report a stranding, and a silent peer is still reported stranded
+  within the same bound (`Engine.scala:580-586` requires it to stay reportable).
 
-Test: start a rekey, drop the device abruptly, keep it away for more than `TimeoutRounds` rounds,
-bring it back; the queued content is delivered and the pair completes (or can later start) a rekey.
+Tests, five variants:
+
+- **Absence (four variants):** the absent device as initiator and as responder, each before and
+  after commit. Start a rekey, drop one device abruptly, keep it away for more than
+  `TimeoutRounds` rounds but less than H while its peer stays online, bring it back. Neither end
+  aborts or strands the attempt, the queued content is delivered, and the pair completes the rekey
+  (or can start a new one).
+- **Silent peer:** the peer stays online but stops answering the attempt (or aborts its own side).
+  A pre-commit attempt on the other end aborts, and a committed one is reported stranded, within
+  `TimeoutRounds` + P live rounds; after the abort the pair can start a new attempt and the KEM
+  secret is gone.
 
 ### 4.5 A repeated frame must never make the peer step its ratchet
 
@@ -322,19 +449,73 @@ cause the receiver to step its ratchet. Two changes in the engine:
    acks at each other indefinitely. Duplicates whose header no longer decrypts (an older chain)
    still set `ackOwed`, but by rule 1 that costs a re-seal, not a step.
 
+   This needs a ratchet API change. `DoubleRatchet.decrypt` deliberately returns a bare `None`
+   for every undecryptable frame and never mutates state for one (`DoubleRatchet.scala:316-319`).
+   Rule 2 needs a third outcome, "header valid, position already consumed", which carries the
+   position. The new result type must keep the no-mutation guarantee for every non-delivering
+   outcome, and it must also recognise headers matched through the header keys of stashed
+   skipped-key epochs, not only the current and next ones.
+
 Rule 1 alone is what keeps every pair inside `MaxSkip`. Rule 2 removes useless traffic.
 
 Test (Phase 1): A disconnects abruptly while B is online and idle; A stays away for more than
 `MaxSkip` of its bundle's slots to B; when A returns, B's later messages decrypt at A, and B's
 sending chain advanced by at most one step per content message A actually delivered.
 
+### 4.6 Seal store requests to the store enclave, and responses to the device
+
+Today the store's interface is plain: `submit(token, frame)`, and `retrieve(token)` returns `None`
+on a miss and the exact 256 bytes on a hit (`RoundTransport.scala:29`). Relayed by a provider,
+that leaks two things:
+
+- **Whether a read hit.** A cover read always misses and a notify-guided read hits whenever mail
+  is waiting, so the provider learns when the user receives mail.
+- **Who talks to whom, when both ends share a provider** (the normal deployment). Round-derived
+  addressing gives the sender's write and the receiver's read the **same token**:
+  `dirToken(addrKey, A, B, r)` is written by A in round r and read by B in round r + 1. The frame
+  bytes match too. A provider seeing both sides links A and B as buddies — exactly what
+  FR-010/SC-008 forbid.
+
+Sealing only the read response would fix the first leak but not the second, because the token
+itself matches. So:
+
+**Change:**
+
+- **Requests are sealed to the store enclave.** The device seals `(writeToken, frame)` and
+  `readToken` to the store's attested public key, with the same key-lifetime, silent-drop and
+  appraisal-age rules as §4.2. The store opens them inside the enclave (or oblivious sidecar),
+  where the oblivious-access guarantees already apply. The provider sees fixed-size ciphertext,
+  fresh each time.
+- **Responses are sealed to the device's registered key.** The sealed read names the device's
+  `labelTag`; the store looks up the device key registered **with the store** for that label (§4.3:
+  the device sends the store its own copy of the signed registration, verified by the store
+  itself, with the same rotation and device-side retention rules) and answers
+  **every** read — hit or miss — with a response of the same fixed size, sealed under that key and
+  freshly randomized, so it never matches the bytes that were submitted. Per-request response keys
+  were considered and rejected: they would need a pre-generated key per bundle slot, and they add
+  nothing once registration is authenticated.
+- **Uniform failures.** If the enclave can't open a request (retired enclave key, malformed) or no
+  key is registered for the label, it has nothing to seal a response to. Random bytes would not do:
+  a real X25519-based seal starts with an encoded public key, which always has its top bit clear
+  and lies on the curve, and uniform random bytes fail those checks about half the time (ML-KEM
+  ciphertexts have structure too). Instead the enclave **generates a throwaway key pair for that
+  request and seals a well-formed miss to it**, then discards the private key. The response has
+  exactly the distribution of a real sealed miss; the device can't open it and treats it as a miss.
+  So a failure and a miss look the same to the provider and to the backend host, and behave the same
+  on the device.
+
+With this, nothing the provider handles for A's write in round r matches anything it handles for
+B's read in round r + 1. In dev builds the store has no enclave key, so this phase lands behind the
+`DEV, NO METADATA PRIVACY` label like the rest of §4.
+
 ## 5. Bounded retention at the provider
 
 The provider holds, per device: one standing bundle (H slots), the receipts for rounds it ran
 while the device was away (at most H), and nothing else. A slot is deleted when its round passes,
 whether or not it ran; a receipt is deleted when delivered. Nothing older than H rounds survives.
-No stored value identifies a sender: tokens are PRF outputs, frames, signals and digests are
-ciphertext (FR-008, "bounded retention not leaking sender").
+No stored value identifies a sender: store requests and signals are sealed to the enclaves, and
+read responses and digests are sealed to the device (FR-008, "bounded retention not leaking
+sender").
 
 Slots are round-bound, so a misbehaving provider can only delay or drop traffic, which it could do
 anyway by going down. A slot replayed in another round is a miss (round-derived token) or rejected
@@ -345,12 +526,14 @@ which the store rejects.
 
 | | Learns | Does not learn |
 |---|---|---|
-| **Provider** | when the device is present (live sets arriving, inherent to having a helper); the user's `clientLabel` | which buddies the user has; whether any slot or live set carries a real message; whether the user has mail waiting; any content or ratchet state |
-| **Backend** (store, PING) | that a provider submitted one operation set per user per round | whether the device behind it is online, offline or late; anything new about network identity — devices no longer connect to it at all |
+| **Provider** | when the device is present (live sets arriving, inherent to having a helper); the user's `clientLabel` | which buddies the user has, even when it also serves them (§4.6); whether any slot or live set carries a real message; whether a read hit; whether the user has mail waiting; any content or ratchet state |
+| **Backend** (store, PING) | that a provider submitted one operation set per user per round, and attestation / key-registration requests on a fixed cadence | whether the device behind it is online, offline or late; anything new about network identity — devices never connect to it directly, including for attestation and key registration (§4.2, §4.3) |
 
-The backend claim holds only because all traffic goes through the provider and the sealed formats
-(§4.1–§4.3) are used on **every** round. A deployment where online devices talk to the backend
-directly would leak presence through the connection switch and must not claim this property.
+Both columns hold only if **all** device traffic goes through the provider, including attestation
+and key registration, and the sealed formats (§4.1–§4.3, §4.6) are used on **every** round, live
+or delegated. A deployment where online devices talk to the backend directly would leak presence
+through the connection switch, and one that skips §4.6 lets a shared provider link buddies. Neither
+may claim these properties.
 
 **Residuals for the threat model:**
 
@@ -358,6 +541,11 @@ directly would leak presence through the connection switch and must not claim th
   anything that links presence to buddies.
 - **Provider downtime** — every user of that provider goes silent at once. That reveals provider
   availability, not any one user's presence.
+- **Enclave restart without durable state** (§4.3 fallback) — the enclave rotates its sealing key,
+  so bundled requests sealed to the old key fail until each device refreshes: delegated signals are
+  dropped, writes are lost until the sender retransmits live, reads miss, and labels have no
+  registered key until the next cadence registration. This affects availability for every user at
+  once, not any one user's privacy.
 - **One message per buddy while away.** Stop-and-wait advances only on an ack the provider can't
   read, so a bundle retransmits each buddy's current head only. Messages queued behind it go out
   on return. See open question 1.
@@ -366,7 +554,10 @@ directly would leak presence through the connection switch and must not claim th
 - **Staleness.** A bundle is up to F rounds old: it can retransmit an already-acked head
   (harmless) and won't contain messages queued since the last refresh (they go out on return).
 - **Retained HK** (§4.1, §4.5) — a device compromise links the device's own frames on its current
-  sending chain.
+  sending chain. At most two retained pairs per buddy (§4.1 table).
+- **Until Phase 4 lands**, a provider relays plaintext tokens and frames: one serving both ends of
+  a conversation can link them, and it can see read hits. This is why provider routing stays
+  labeled `DEV, NO METADATA PRIVACY` until then.
 - **One skipped key per pair from a bundle-built ack.** If a refresh built the cached ack-only frame
   and a live content frame then carries the ack instead, the ack-only position is never delivered.
   The peer stashes that one skipped message key until `MaxSkipStore` (2,000) evicts it. Because
@@ -379,26 +570,34 @@ directly would leak presence through the connection switch and must not claim th
 Each phase is reviewable on its own and keeps the labeling rule: provider routing runs labeled
 `DEV, NO METADATA PRIVACY` until Phase 4 has landed.
 
-1. **T037 — failing tests first**, in `server/provider/src/test/scala/`:
-   - A queues a message to B while B is offline; A **disconnects abruptly** (no announcement); B
-     returns; the message arrives, then a second queued message arrives in order after A returns.
-   - Across disconnect → reconnect, every `(round, label)` digest is fetched exactly once and the
-     device makes exactly one write per round.
-   - The rekey-across-absence test from §4.4.
-   - The MaxSkip-across-absence test from §4.5.
-2. **Engine side (protocol-core).**
-   - `DoubleRatchet` re-seal with retained `(MK, HK)` and its wipe points (§4.1).
+1. **T037 — failing tests first**, split by where the behavior lives so each later phase is
+   verified by its own tests:
+   - **protocol-core** (`protocol-core/shared/src/test/scala/engine/`, next to
+     `RoundTransportSpec`), driving engines through a simulated provider and bundle:
+     - the five rekey-timeout variants: four across an absence, one with a silent peer (§4.4);
+     - the MaxSkip-across-absence test (§4.5);
+     - the §3.4 ratchet-step bound.
+   - **End to end** (`server/provider/src/test/scala/`, created with T038):
+     - A queues a message to B while B is offline; A **disconnects abruptly** (no
+       announcement); B returns; the message arrives, then a second queued message arrives in
+       order after A returns.
+     - Across disconnect → reconnect, every `(round, label)` digest is fetched exactly once and
+       the device makes exactly one write per round.
+2. **Engine side (protocol-core).** Makes the protocol-core tests from Phase 1 pass.
+   - `DoubleRatchet` re-seal with the two retained `(MK, HK)` pairs and their wipe points (§4.1).
+   - The `DoubleRatchet` decrypt-result change that distinguishes "position already consumed"
+     from a carrier without mutating state (§4.5).
    - Split `Engine.tick` into `beginRound(sealedDigest) → liveSet` and `applyReceipt(receipt)`
      (§3.1), keeping `readRound = roundId − 1` and the one-round latency; the existing
      `RoundTransportSpec` suite must pass unchanged on top of the split.
    - Cached, re-sealed re-acks and duplicate-ack suppression (§4.5), with the receive-path
      comments updated to match.
    - The bundle builder under the §3.4 rules.
-   - The live-tick rekey timeout (§4.4).
+   - The paused-but-bounded rekey timeout, on both ends, with the pause allowance P (§4.4).
    - Property tests: slots pairwise byte-distinct and the same shape with an empty or a full
      outbox; no token recurs across build → absence → resume; the §3.4 ratchet-step bound; after
      N refreshes with no live sends, the peer holds at most one skipped key from bundle builds;
-     MK unrecoverable after the head drains.
+     the §4.1 wipe table.
 3. **T038 — `server/provider/`, and routing through it.**
    - An untrusted `ProviderBuffer`: atomic bundle replace, the per-round arbiter with the cutoff,
      receipts, and the §5 retention bounds. In-memory first, behind an interface that Postgres or
@@ -410,8 +609,21 @@ Each phase is reviewable on its own and keeps the labeling rule: provider routin
    - Choose and bind the sealing construction, with library known-answer tests on JVM and Scala.js.
    - Signals sealed to the PING enclave key every round, with the key epoch and silent-drop rules
      (§4.2).
-   - Digest-key registration, rotation and sealed digests (§4.3), in both the Scala dev PING and
-     the Rust sidecar.
+   - The identity key and self-certifying label, and signed, counter-protected device-key
+     registration with in-seal dummies and rotation (§4.3), delivered to **both** enclaves and
+     verified by each: the Scala dev PING and the Rust sidecar, and the Scala dev store and the Rust
+     `obsd`. Restart handling per §4.3 (durable rollback-protected state, or rotate the sealing key
+     on restart). The forged / replayed / dummy / restart-replay registration tests run against
+     both enclaves.
+   - Sealed digests (§4.3).
+   - Store requests sealed to the store enclave and fixed-size responses sealed to the device,
+     with throwaway-key sealed misses on failure (§4.6), in both the Scala dev store and the Rust
+     `obsd`. Test: failure responses pass the same encoding checks as real sealed misses.
+   - Attestation fetches and key registrations relayed through the provider on the fixed cadence,
+     with bundle-carried dummies during absences (§4.2, §4.3).
+   - Test: for a provider serving both A and B, the bytes it handles during a real A → B delivery
+     are indistinguishable in shape from a cover round, and no token, frame or response byte string
+     appears in both A's and B's traffic.
    - Only after this phase can provider routing be part of a `METADATA PRIVATE` build.
 5. **Docs.** Threat-model entries for the §6 residuals and a README note on what the provider can
    and cannot see (T062).
@@ -423,14 +635,23 @@ Each phase is reviewable on its own and keeps the labeling rule: provider routin
    accepts only the next in order, so this delivers in order at about k rounds per message, but it
    needs k retained key pairs per buddy and ARQ bookkeeping for more than one frame in flight.
    Recommendation: ship (a).
-2. **H and F.** One day (H = 5,760) refreshed hourly (F = 240) gives about 55 MB a day of uploads
-   per device, which is too much for mobile. Options: a smaller H (say 6 h), a delta upload that
-   only replaces slots that changed (it must not reveal *which* changed, so the delta has to be a
-   fixed-size rewrite of the next F slots), or both. H must be one network-wide constant either way;
-   a per-device H is a fingerprint.
-3. **Sealing construction.** HPKE (Bouncy Castle + `@hpke/core`) or libsodium sealed box
-   (new FFM binding + `libsodium-wrappers`). Decide by the Scala.js side: whichever has a vetted,
-   maintained implementation there.
+2. **H and F.** With the sealed formats (§3.3), one day (H = 5,760) refreshed hourly (F = 240) is
+   about 3.1 MB per refresh, **about 74 MB a day** of uploads per device with classical seals, and
+   about 22 MB per refresh (over 500 MB a day) with post-quantum hybrid seals. Both are too much
+   for mobile. Options:
+   - a smaller H (6 h cuts it fourfold);
+   - a fixed-size rewrite of only the next F slots each refresh instead of the whole bundle (it must
+     not reveal *which* slots changed, so it rewrites all F of them every time), which cuts upload
+     by H / F ≈ 24×;
+   - for post-quantum seals, encapsulating once per refresh and deriving per-slot keys from it,
+     instead of one encapsulation per field — but only if a vetted library offers that construction
+     (Constitution I), not by composing it ourselves.
+
+   H must be one network-wide constant either way; a per-device H is a fingerprint.
+3. **Sealing and signing constructions.** For seals: HPKE (Bouncy Castle + `@hpke/core`) or
+   libsodium sealed box (new FFM binding + `libsodium-wrappers`), decided by whichever has a vetted,
+   maintained Scala.js implementation. Whether seals, and the §4.3 identity signature, must be
+   post-quantum hybrid follows the project's PQ policy, and it drives the size question above.
 4. **Multi-device (US5, T043–T045).** With all traffic through the provider, two devices of one
    user can share one per-user schedule at the provider: one operation set per user per round, fed
    by whichever device is live. That is likely the FR-011 non-coordination mechanism, which is why
