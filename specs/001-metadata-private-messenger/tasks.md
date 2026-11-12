@@ -28,7 +28,7 @@ Multi-component layout (plan.md): `protocol-core/`, `crypto/`, `server/`, `obliv
 
 **Purpose**: Project initialization and pinned, reproducible build foundation (Constitution XI).
 
-- [ ] T001 Create the multi-module layout per plan.md (`protocol-core/{shared,jvm,js}`, `crypto/`, `server/{ping,pong,provider,attestation}`, `oblivious-sidecar/`, `anonymity/`, `clients/flutter/`, `deploy/`) — PARTIAL: layout as built differs from the plan — `crypto/` is a single JVM module, attestation + round services live in `transport/`; `server/provider/` does not exist yet (created by T038)
+- [ ] T001 Create the multi-module layout per plan.md (`protocol-core/{shared,jvm,js}`, `crypto/`, `server/{ping,pong,provider,attestation}`, `oblivious-sidecar/`, `anonymity/`, `clients/flutter/`, `deploy/`) — PARTIAL: layout as built differs from the plan — `crypto/` is a single JVM module, attestation + round services live in `transport/`; `server/provider/` now exists (T038)
 - [X] T002 Initialize the sbt cross-build (Scala 3) for `protocol-core` (JVM + Scala.js) and `crypto`/`server` JVM modules in `build.sbt`, with **pinned** dependency versions — protocol-core cross-builds JVM + Scala.js; all versions pinned in `project/V.scala`
 - [X] T003 [P] Initialize the Rust `oblivious-sidecar` crate with pinned deps in `oblivious-sidecar/Cargo.toml` — subtle (constant-time) + proptest, pinned; Cargo.lock committed
 - [X] T004 [P] Initialize the Flutter app skeleton in `clients/flutter/` (web platform; `ProtocolEngine` bridge + `DevEngine` stand-in + AppState; widget + engine tests)
@@ -123,8 +123,8 @@ three with no ordering constraint between conversations.
 **Independent Test**: Send to an offline buddy; buddy returns and retrieves; multiple queued
 messages all arrive in order.
 
-- [ ] T037 [P] [US4] Integration test: offline send + ordered catch-up in `server/provider/src/test/scala/` (write first, MUST fail) — PARTIAL: design `design/offline-delegation.md` (#184, #186); protocol-core half landed in `protocol-core/crosstest/src/test/scala/engine/OfflineDelegationCrossSpec.scala` (rekey-timeout-across-absence ×4 and MaxSkip-across-absence, pending until Phase 2; silent-peer guards ×2 passing). End-to-end provider tests wait for `server/provider/` (T038)
-- [ ] T038 [US4] Implement the untrusted service-provider buffer (atomic transactions, retention window) in `server/provider/src/main/scala/` (FR-007/FR-008), bounded retention not leaking sender
+- [X] T037 [P] [US4] Integration test: offline send + ordered catch-up in `server/provider/src/test/scala/` (write first, MUST fail) — DONE: design `design/offline-delegation.md` (#184, #186); protocol-core tests in `protocol-core/crosstest/src/test/scala/engine/OfflineDelegationCrossSpec.scala` (#187, passing since #188/#189) and `DelegationBundleCrossSpec.scala` (#190); end-to-end in `server/provider/src/test/scala/provider/ProviderSpec.scala`: an offline buddy receives a message sent before the sender disconnected abruptly, the queue drains in order, and the backend sees one fetch per (round, label) and one write and signal per user per round
+- [ ] T038 [US4] Implement the untrusted service-provider buffer (atomic transactions, retention window) in `server/provider/src/main/scala/` (FR-007/FR-008), bounded retention not leaking sender — PARTIAL: `provider.Provider` + `ProviderStore` (in-memory, keyed by user, atomic bundle replace, receipts ≤ H) + `ProviderSession`, over the dev backend, labeled DEV. Pending: the networked provider front and client routing; a persistent store; Phase 4 sealing before any privacy claim
 - [X] T039 [US4] Implement device `Online/Offline` + missed-round catch-up in `protocol-core/shared/src/main/scala/device/` (FR-008, no real-vs-idle leak on gaps) — DONE (#39): Online/Offline state model with bounded catch-up
 
 **Checkpoint**: US4 complete; offline/async works.

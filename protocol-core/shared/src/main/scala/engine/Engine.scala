@@ -103,7 +103,8 @@ object PqRekey:
     * [[TimeoutRounds]] again. P = H + F: the delegation horizon H = 5,760 rounds (one day at 15 s)
     * plus the bundle refresh period F = 240 rounds, so an absence the provider can cover never times
     * out an attempt, while the KEM secret a silent peer strands stays resident for a bounded time. */
-  val PauseAllowanceRounds: Long = 5760L + 240L
+  val PauseAllowanceRounds: Long =
+    Delegation.HorizonRounds.toLong + Delegation.RefreshEveryRounds.toLong
 
 /** Engine → caller events (engine-api.md). No event ever carries key material. */
 sealed trait EngineEvent
