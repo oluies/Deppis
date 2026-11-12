@@ -604,8 +604,12 @@ Each phase is reviewable on its own and keeps the labeling rule: provider routin
      wipe-table test (via the `retainedKeyPairsForTest` seam). As a side effect, retransmits no
      longer repeat byte for byte, which closes the distinguisher recorded in
      `continuous-pq-ratchet.md` §9 Q3 and `ARCHITECTURE.md` §6.
-   - **Step 2:** the bounded rekey timeout (§4.4), with the four absence tests and the update to
-     `PqRekeyCrossSpec`'s "stranding is OBSERVABLE".
+   - **Step 2 — landed:** the paused-but-bounded rekey timeout (§4.4) as
+     `PqRekey.LivenessWindowRounds` (W = 4) and `PqRekey.PauseAllowanceRounds` (P = 6,000), counted
+     per tick so it only ever sees rounds the device ran; only `Delivered` frames refresh liveness.
+     The four absence tests now pass. `PqRekeyCrossSpec`'s "stranding is OBSERVABLE" now measures
+     its window in the device's own ticks from the moment the peer vanished, and asserts that the
+     whole pause allowance is spent before an attempt strands.
    - **Step 3:** the `Engine.tick` split and the bundle builder (§3.1, §3.4).
 
    The full Phase 2 list:

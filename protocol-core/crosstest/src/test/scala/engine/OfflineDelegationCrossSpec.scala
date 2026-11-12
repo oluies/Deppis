@@ -17,11 +17,11 @@ import scala.collection.mutable
   * wire for that device. The tests only use the public engine API plus the same public token
   * derivations the engine uses, so they need no Phase 2 API to compile.
   *
-  * ==Expected-to-fail tests==
-  * The tests whose behaviour Phase 2 has not changed YET are wrapped in `pendingUntilFixed`: ScalaTest reports
-  * them PENDING while they fail and turns them into a FAILURE the moment they start passing, so the
-  * wrapper must be removed by the PR that fixes them and cannot be forgotten. The silent-peer tests
-  * pin behaviour that must hold both today and after Phase 2, so they run normally.
+  * ==History==
+  * These were written first (Phase 1) and wrapped in `pendingUntilFixed` while they failed. Phase 2
+  * step 1 (re-seal, cached re-acks) made the MaxSkip test pass; step 2 (the paused-but-bounded rekey
+  * clock) made the four absence tests pass. The silent-peer tests passed throughout and guard the
+  * bound on the pause.
   *
   * Out of scope here, by design: the §3.4 ratchet-step bound for bundle building (it is a property
   * of the bundle builder and lands with it in Phase 2), and the end-to-end provider tests
@@ -31,10 +31,6 @@ class OfflineDelegationCrossSpec extends AnyFunSuite:
   private val aLabel = "alice".getBytes("UTF-8")
   private val bLabel = "bob".getBytes("UTF-8")
   private val oob = "oob-shared-secret".getBytes("UTF-8")
-
-  /** The design's pause allowance P = H + F (§3.3, §4.4): H = 5,760 rounds (one day at 15 s),
-    * F = 240 rounds (one hour). Phase 2 introduces the engine constant; replace this with it then. */
-  private val PauseAllowance: Long = 5760L + 240L
 
   /** A confirmed classical pairing over one backend. `aliceUp` / `bobUp` let a test take either
     * device away (it stops ticking) and bring it back. */
@@ -245,16 +241,16 @@ class OfflineDelegationCrossSpec extends AnyFunSuite:
     assert(sa.epochsFolded >= 1 && sb.epochsFolded >= 1, s"the paused rekey completes: $sa / $sb")
 
   test("§4.4: initiator absent during a pre-commit rekey — no timeout, rekey completes"):
-    pendingUntilFixed(absenceAcrossRekey(Absent.Initiator, Phase.PreCommit))
+    absenceAcrossRekey(Absent.Initiator, Phase.PreCommit)
 
   test("§4.4: responder absent during a pre-commit rekey — no timeout, rekey completes"):
-    pendingUntilFixed(absenceAcrossRekey(Absent.Responder, Phase.PreCommit))
+    absenceAcrossRekey(Absent.Responder, Phase.PreCommit)
 
   test("§4.4: initiator absent after commit — no stranding, rekey completes"):
-    pendingUntilFixed(absenceAcrossRekey(Absent.Initiator, Phase.PostCommit))
+    absenceAcrossRekey(Absent.Initiator, Phase.PostCommit)
 
   test("§4.4: responder absent after commit — no stranding, rekey completes"):
-    pendingUntilFixed(absenceAcrossRekey(Absent.Responder, Phase.PostCommit))
+    absenceAcrossRekey(Absent.Responder, Phase.PostCommit)
 
   // ============================================================ §4.4 silent peer still times out
 
@@ -270,7 +266,9 @@ class OfflineDelegationCrossSpec extends AnyFunSuite:
       case Phase.PostCommit => driveUntil(p, p.alice, r)(s => s.inProgress && !s.abortSafe)
     val before = p.status(p.alice)
     p.bobUp = false
-    val bound = before.attemptStartRound + PqRekey.TimeoutRounds + PauseAllowance
+    // "Overdue" is STRICTLY more than `TimeoutRounds` counted rounds, and counting starts on the
+    // tick after the attempt opens, so the latest the attempt can end is one round past the sum.
+    val bound = before.attemptStartRound + PqRekey.TimeoutRounds + PqRekey.PauseAllowanceRounds + 1
     // An aborted attempt frees the slot and the initiator starts a NEW one straight away, so "no
     // attempt in progress" is never observed. What ends THIS attempt is an abort (pre-commit) or a
     // stranding report (post-commit).
