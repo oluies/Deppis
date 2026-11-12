@@ -747,6 +747,13 @@ stateDiagram-v2
      > ratchet (the reason the cache exists), so it likely needs a retransmit-specific re-wrap under
      > a key that does not move the ratchet, which is a design change, not a patch. Recorded, not
      > solved.
+     >
+     > **Resolved (this distinguisher only).** `design/offline-delegation.md` §4.1 is exactly that
+     > re-wrap: `DoubleRatchet.encryptRetained` keeps a sent frame's message and header keys, and
+     > every retransmit — head or ack-only — is `DoubleRatchet.reseal`ed under a fresh nonce at the
+     > same chain position, with no ratchet step. `FrameUniformityCrossSpec` now asserts that no
+     > written frame repeats, busy or idle. The rest of Q3 (timing/volume under the cover model) is
+     > still open.
   4. **Modeling a breaks-CDH-but-not-ML-KEM adversary in Tamarin.** This is the crux of any real PQ
      claim and is a new model, not an edit — feasibility and effort are unknown until attempted (§6.2).
   5. **Epoch-fold liveness under stranding.** Round-derived addressing can strand a frame under

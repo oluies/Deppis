@@ -213,30 +213,15 @@ class FrameUniformityCrossSpec extends AnyFunSuite:
     val reads = (ra.reads ++ rb.reads).map(PqTestKit.hex).toSeq
     assert(reads.distinct.size == reads.size, "a read token recurred (FR-014)")
 
-  test("RECORDED GAP: frame BYTES repeat under ARQ retransmit, and idle cover frames never do"):
-    // THIS TEST PINS A LEAK, NOT A GUARANTEE. It asserts what the code does today so that a fix is
-    // noticed; it is not a statement that the current behaviour is correct.
+  test("no frame BYTES ever repeat — neither ARQ retransmits nor idle cover frames"):
+    // This was the RECORDED GAP (continuous-pq-ratchet.md §9 Q3, ARCHITECTURE.md §6): stop-and-wait
+    // used to resubmit the CACHED head wire, so a chatting pair wrote 80 frames of which only 22 were
+    // distinct, while an idle pair's 80 cover frames were all distinct — a passive store could count
+    // repeated blobs and separate active from idle, the inference FR-012 exists to prevent.
     //
-    // Measured (Rounds=40, both sides sending every round vs. both idle):
-    //   busy: 80 writes, 22 DISTINCT frames   — stop-and-wait re-presents the CACHED head wire
-    //   idle: 80 writes, 80 DISTINCT frames   — every cover frame is freshly random
-    //
-    // The repetition is deliberate at the ratchet layer: `Engine` re-encrypts a head only when it is
-    // new or our ack advanced, "so the ratchet does not advance per retransmit". The retransmit goes
-    // out under a FRESH round token each time (tokens are non-recurrent, asserted above), so nothing
-    // is linkable by address — but the 256 bytes themselves are byte-identical.
-    //
-    // A passive store therefore has a distinguisher that the per-round budget and the size uniformity
-    // do not cover: COUNT REPEATED BLOBS. Duplicates ⇒ someone is retransmitting real content;
-    // no duplicates ⇒ idle. That is precisely the active-vs-idle inference FR-012 exists to prevent,
-    // and it is invisible to every count/size assertion above — including `RoundTransportSpec`'s
-    // "active and idle STORE-WRITE traces are indistinguishable", which compares only counts, sizes
-    // and token lengths.
-    //
-    // Recorded as an open §9 Q3 residual in design/continuous-pq-ratchet.md and ARCHITECTURE.md §6.
-    // No label is affected: `DEV, NO METADATA PRIVACY` already stands and Phase C is not reached, so
-    // no shipped promise is broken — but the claim "a real frame and a carrier frame are
-    // byte-indistinguishable" is not true of a RETRANSMITTED real frame across rounds.
+    // Closed by offline-delegation.md §4.1: every retransmit (head or ack-only) is RE-SEALED under a
+    // fresh nonce — same keys, same chain position, no ratchet step, new bytes. This now pins the
+    // guarantee, on both platforms: busy and idle alike, every written frame is distinct.
     val (ra, rb, delivered) = drive(Rounds, chatting = true)
     val (ia, ib, idleDelivered) = drive(Rounds, chatting = false)
     assert(delivered > 0, "the busy world must actually deliver")
@@ -248,9 +233,8 @@ class FrameUniformityCrossSpec extends AnyFunSuite:
       s"cover frames repeated: ${idle.distinct.size}/${idle.size}"
     )
     assert(
-      busy.distinct.size < busy.size,
-      "busy frames no longer repeat — if the retransmit path was changed to re-encrypt, DELETE this " +
-        "test and the Q3 residual it records, and tighten the claim in ARCHITECTURE.md \u00a76"
+      busy.distinct.size == busy.size,
+      s"a retransmit repeated its bytes: ${busy.distinct.size}/${busy.size} distinct"
     )
 
   // ===================================================== the invariant survives a rekey

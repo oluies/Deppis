@@ -18,7 +18,7 @@ import scala.collection.mutable
   * derivations the engine uses, so they need no Phase 2 API to compile.
   *
   * ==Expected-to-fail tests==
-  * The tests whose behaviour Phase 2 changes are wrapped in `pendingUntilFixed`: ScalaTest reports
+  * The tests whose behaviour Phase 2 has not changed YET are wrapped in `pendingUntilFixed`: ScalaTest reports
   * them PENDING while they fail and turns them into a FAILURE the moment they start passing, so the
   * wrapper must be removed by the PR that fixes them and cannot be forgotten. The silent-peer tests
   * pin behaviour that must hold both today and after Phase 2, so they run normally.
@@ -113,55 +113,88 @@ class OfflineDelegationCrossSpec extends AnyFunSuite:
   test(
     "§4.5: a long absence must not push the pair past MaxSkip (re-acks must not step the ratchet)"
   ):
-    pendingUntilFixed {
-      val p = Pair()
-      // Alice sends one message, bob receives and acks it. Capture the wire that carried it: the
-      // first frame alice writes under her alice→bob token.
-      val addrKey = KeySchedule.addrKey(handshake.Handshake.init(oob).pairKey)
-      def aToB(r: Long) =
-        PqTestKit.hex(
-          token.RetrievalToken.derive(
-            addrKey,
-            BuddyRole.Initiator.toString,
-            BuddyRole.Responder.toString,
-            r
-          )
+    val p = Pair()
+    // Alice sends one message, bob receives and acks it. Capture the wire that carried it: the
+    // first frame alice writes under her alice→bob token.
+    val addrKey = KeySchedule.addrKey(handshake.Handshake.init(oob).pairKey)
+    def aToB(r: Long) =
+      PqTestKit.hex(
+        token.RetrievalToken.derive(
+          addrKey,
+          BuddyRole.Initiator.toString,
+          BuddyRole.Responder.toString,
+          r
         )
-      p.alice.sendMessage(p.pid, "before"): Unit
-      var head: Array[Byte] = null
-      var r = 1L
-      while r <= 40 do
+      )
+    p.alice.sendMessage(p.pid, "before"): Unit
+    var head: Array[Byte] = null
+    var r = 1L
+    while r <= 40 do
+      p.round(r)
+      if head == null then p.be.store.get(aToB(r)).foreach(f => head = f.clone())
+      r += 1
+    assert(
+      p.toBob.contains("before"),
+      s"precondition: the first message is delivered: ${p.toBob}"
+    )
+    assert(head != null, "precondition: alice's content wire was captured")
+
+    // Alice disconnects abruptly. Her stale bundle keeps re-presenting that (already consumed)
+    // head for longer than MaxSkip rounds, while bob stays online and idle.
+    p.aliceUp = false
+    val bundle = SimulatedBundle(p, head)
+    val absence = DoubleRatchet.MaxSkip.toLong + 500L
+    for x <- r until r + absence do
+      bundle.slot(x)
+      p.round(x)
+    r += absence
+
+    // Alice comes back. Bob's next messages must still decrypt at alice: bob's sending chain may
+    // have advanced by at most one step per content message alice actually delivered, never once
+    // per copy he could not decrypt.
+    p.aliceUp = true
+    p.bob.sendMessage(p.pid, "after-1"): Unit
+    p.bob.sendMessage(p.pid, "after-2"): Unit
+    p.run(r until r + 80)
+    assert(
+      p.toAlice.containsSlice(Seq("after-1", "after-2")),
+      s"bob → alice must survive alice's absence, in order: ${p.toAlice}"
+    )
+
+  // ====================================================== §4.1 retained (MK, HK) wipe table
+
+  test("§4.1: at most two retained key pairs per buddy, wiped at the listed points"):
+    val p = Pair()
+    def held(e: Engine) = e.retainedKeyPairsForTest(p.pid)
+    var r = 1L
+    def step(n: Int): Unit =
+      for _ <- 0 until n do
         p.round(r)
-        if head == null then p.be.store.get(aToB(r)).foreach(f => head = f.clone())
+        assert(held(p.alice) <= 2 && held(p.bob) <= 2, s"round $r: more than two retained pairs")
         r += 1
-      assert(
-        p.toBob.contains("before"),
-        s"precondition: the first message is delivered: ${p.toBob}"
-      )
-      assert(head != null, "precondition: alice's content wire was captured")
-
-      // Alice disconnects abruptly. Her stale bundle keeps re-presenting that (already consumed)
-      // head for longer than MaxSkip rounds, while bob stays online and idle.
-      p.aliceUp = false
-      val bundle = SimulatedBundle(p, head)
-      val absence = DoubleRatchet.MaxSkip.toLong + 500L
-      for x <- r until r + absence do
-        bundle.slot(x)
-        p.round(x)
-      r += absence
-
-      // Alice comes back. Bob's next messages must still decrypt at alice: bob's sending chain may
-      // have advanced by at most one step per content message alice actually delivered, never once
-      // per copy he could not decrypt.
-      p.aliceUp = true
-      p.bob.sendMessage(p.pid, "after-1"): Unit
-      p.bob.sendMessage(p.pid, "after-2"): Unit
-      p.run(r until r + 80)
-      assert(
-        p.toAlice.containsSlice(Seq("after-1", "after-2")),
-        s"bob → alice must survive alice's absence, in order: ${p.toAlice}"
-      )
-    }
+    // Alice's head is retained while in flight…
+    p.alice.sendMessage(p.pid, "m1"): Unit
+    p.round(r); r += 1
+    assert(held(p.alice) == 1, "alice retains her in-flight head")
+    // …and wiped once bob's ack lands. Bob, having received content, retains his ack-only frame.
+    step(20)
+    assert(p.toBob.contains("m1"))
+    assert(held(p.alice) == 0, "the head's keys are wiped when it is acked")
+    assert(held(p.bob) == 1, "bob retains the ack-only frame for his current ack")
+    // A content frame from bob carries the ack, so his cached ack-only frame is wiped; and alice's
+    // own ack for it follows the same rules.
+    p.bob.sendMessage(p.pid, "b1"): Unit
+    step(20)
+    assert(p.toAlice.contains("b1"))
+    assert(held(p.bob) <= 1, "bob's ack-only frame went once a content frame carried the ack")
+    // A burst both ways keeps within the bound throughout (checked every round by `step`).
+    for i <- 0 until 5 do
+      p.alice.sendMessage(p.pid, s"a$i"): Unit
+      p.bob.sendMessage(p.pid, s"b$i"): Unit
+    step(120)
+    // Removal wipes everything.
+    p.alice.removeBuddy(p.pid): Unit
+    assert(held(p.alice) == 0, "removeBuddy wipes both retained pairs")
 
   // ======================================================= §4.4 rekey timeout across an absence
 
