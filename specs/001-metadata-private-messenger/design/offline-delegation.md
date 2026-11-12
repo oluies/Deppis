@@ -610,7 +610,22 @@ Each phase is reviewable on its own and keeps the labeling rule: provider routin
      The four absence tests now pass. `PqRekeyCrossSpec`'s "stranding is OBSERVABLE" now measures
      its window in the device's own ticks from the moment the peer vanished, and asserts that the
      whole pause allowance is spent before an attempt strands.
-   - **Step 3:** the `Engine.tick` split and the bundle builder (§3.1, §3.4).
+   - **Step 3 — landed:** the `Engine.tick` split and the bundle builder (§3.1, §3.3, §3.4).
+     `Engine.beginRound(roundId, digest) → RoundOps` makes every decision a live round makes;
+     `Engine.applyReceipt(RoundReceipt)` applies the write-dependent effects only if the live set
+     ran and was accepted, then processes the read. `tick` is now fetch → `beginRound` → submit /
+     signal / retrieve → `applyReceipt`, and every existing suite passes on it unchanged.
+     `RoundOps` carries the real signal and its decoy fallback, so a rejected write never announces
+     mail, exactly as before. `Engine.buildBundle(fromRound, horizon)` shares head opening and ack
+     caching with the live round. `DelegationBundleCrossSpec` covers the §3.4 bound (exactly one
+     step for the first build, none for rebuilds), slot shape and distinctness, token
+     non-recurrence across build → absence → resume (including bundles that never ran),
+     slot-ran receipts, and the §1 row-3 case end to end at engine level.
+
+     Two deviations from the list below. No separate `Engine.resume` was needed: building a bundle
+     leaves the engine in a state the next live round continues from, so a returning device just
+     resumes ticking. And `beginRound` takes the digest in plaintext for now; sealed digests are
+     Phase 4. **Phase 2 is complete.**
 
    The full Phase 2 list:
    - `DoubleRatchet` re-seal with the two retained `(MK, HK)` pairs and their wipe points (§4.1).

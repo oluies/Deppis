@@ -334,6 +334,11 @@ final class DoubleRatchet private (
     * received message). The engine must not call `encrypt` / `encryptPending` while this is false. */
   def canSend: Boolean = cks.isDefined && hks.isDefined
 
+  /** How many messages this side has sent on its CURRENT sending chain (`Ns`). PUBLIC — it travels
+    * in every frame header — and exposed for tests/diagnostics: it is how a test measures that an
+    * operation did or did not step the sending chain (offline-delegation.md §3.4). */
+  def sendIndex: Int = ns
+
   /** Our current ratchet public key — exposed for tests/diagnostics only (it is PUBLIC). */
   def sendingPublicKey: Array[Byte] = dhsPub.clone()
 
