@@ -545,11 +545,11 @@ class PqRekeyCrossSpec extends AnyFunSuite:
     p.lossy(0)
 
     assert(p.lost > 0, s"the network must actually have eaten LIVE frames, ate ${p.lost}")
-    // Duplicates are ubiquitous BY CONSTRUCTION — stop-and-wait re-presents the unacked head under
-    // every round's token — so this only records that the duplicate-handling path (the ratchet's
-    // cached-retransmit `None`, then ARQ's `isNewMessage` dedup) is genuinely exercised. It is NOT
-    // the evidence for the "duplicates" half of the claim; the exactly-once assertion below is.
-    assert(p.repeats > 0, s"ARQ must have re-presented frames byte-identically, saw ${p.repeats}")
+    // Stop-and-wait still re-presents the unacked head every round, but since offline-delegation.md
+    // §4.1 each re-presentation is RE-SEALED under a fresh nonce: the receiver sees a `Consumed`
+    // duplicate, never the same bytes twice. So `repeats` (byte-identical re-deliveries) must be 0.
+    // The evidence for the "duplicates" half of the claim is still the exactly-once assertion below.
+    assert(p.repeats == 0, s"no frame may be re-delivered byte-identically, saw ${p.repeats}")
 
     val sa = status(p.alice, p.pid)
     val sb = status(p.bob, p.pid)

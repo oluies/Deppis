@@ -233,6 +233,11 @@ final class Engine(
   // token). A fresh array per use so a transport can't retain/mutate it.
   private def voidNotifyLabel: Array[Byte] = RetrievalToken.derive(coverKey, "notify-void", "", 0L)
 
+  // How many consumed ack-only chain positions each pair remembers (offline-delegation.md §4.5 rule 2).
+  // Only the most recent matter: a peer re-presents its CURRENT cached ack, so a handful covers every
+  // duplicate that can still arrive; older ones fall back to a re-ack, which by rule 1 costs no step.
+  private val AckOnlyPositionsKept = 8
+
   private final class BuddyRuntime(val role: BuddyRole, contentRoot: Array[Byte]):
     // Stop-and-wait ARQ state (retry-safe-addressing.md, Stage 2). Addressing is now ROUND-DERIVED
     // (dirToken keyed by roundId, not a per-pair counter), so a reject/miss never recurs a token; the
@@ -242,13 +247,34 @@ final class Engine(
     var nextSendSeq: Long = 0L // sequence to assign the NEXT new outgoing (head) message
     var headSeq: Long =
       ArqFrame.NoSeq // the in-flight head's sequence, or NoSeq if nothing in flight
-    // The head's encrypted 256-byte wire, CACHED so a retransmit resubmits the SAME bytes under a fresh
-    // round token rather than re-`encrypt`ing (which would advance the ratchet every round and push an
-    // offline peer past MaxSkip). Re-encrypted only when the head changes or our ack (`highRecv`)
-    // advances — both bounded by message count, not rounds — so `Ns` cannot grow unboundedly.
-    var headWire: Array[Byte] = null
+    // The in-flight head's sealing material (offline-delegation.md §4.1). Each retransmit RE-SEALS it
+    // under a fresh nonce: new bytes every round (no byte-identical repeat for the store or a provider
+    // to count), the same chain position, and NO ratchet step — so an offline peer stays inside
+    // MaxSkip. Re-encrypted (one step) only when the head changes or our ack (`highRecv`) advances,
+    // both bounded by message count, not rounds. Retained pair #1 of the two §4.1 allows per buddy;
+    // wiped by `clearHead` (head acked, abandoned or replaced; buddy removed).
+    var headWire: DoubleRatchet.Retained = null
     var headWireAck: Long =
       ArqFrame.NoSeq // the highRecv baked into headWire (refresh the ack on change)
+    def clearHead(): Unit =
+      if headWire != null then headWire.wipe()
+      headWire = null
+    // The cached ACK-ONLY frame for the current `highRecv` (offline-delegation.md §4.5 rule 1): a
+    // re-ack is a re-seal of it, never a fresh encrypt, so re-acking a peer's duplicates costs NO
+    // chain step however many arrive. Retained pair #2; wiped by `clearAck` when `highRecv` advances,
+    // when a content/control frame carries the ack instead, and on buddy removal.
+    var ackWire: DoubleRatchet.Retained = null
+    var ackWireAck: Long = ArqFrame.NoSeq // the highRecv baked into ackWire
+    def clearAck(): Unit =
+      if ackWire != null then ackWire.wipe()
+      ackWire = null
+    // Chain positions of the ack-only frames we have consumed (the last few): a re-sealed duplicate
+    // of one is reported `Consumed` at the same position and must NOT make us owe an ack, or two
+    // peers would bounce re-sealed acks at each other forever (§4.5 rule 2).
+    val ackOnlySeen = mutable.ArrayDeque.empty[DoubleRatchet.Position]
+    def noteAckOnly(p: DoubleRatchet.Position): Unit =
+      ackOnlySeen.append(p)
+      while ackOnlySeen.size > AckOnlyPositionsKept do ackOnlySeen.removeHead(): Unit
     var peerAcked: Long = ArqFrame.NoSeq // highest sequence the PEER has acknowledged from us
     var highRecv: Long =
       ArqFrame.NoSeq // highest sequence we have received (dedup + our outgoing ack)
@@ -315,6 +341,13 @@ final class Engine(
     var lastAbort: String = ""
 
     /** Release every rekey secret + buffer for this pair (buddy removal / rejected pairing). */
+    /** Everything secret this runtime holds beyond the ratchet: rekey state and the two retained
+      * (MK, HK) pairs (offline-delegation.md §4.1). Called wherever the runtime is dropped. */
+    def wipeAll(): Unit =
+      wipeRekey()
+      clearHead()
+      clearAck()
+
     def wipeRekey(): Unit =
       rekey.foreach(_.wipe())
       rekey = None
@@ -564,7 +597,7 @@ final class Engine(
         rt.ctrl = rt.ctrl.filterNot(_.epoch == a.epoch)
         if headDropped then
           rt.headSeq = ArqFrame.NoSeq // an unacked, abandoned head: the next head takes a fresh seq
-          rt.headWire = null
+          rt.clearHead()
           rt.headIsCtrl = false
         rt.rekey = None
         noteAbort(rt, reason)
@@ -802,8 +835,16 @@ final class Engine(
     * increasing `msgSeq`, so a gap costs the peer's dedup nothing. */
   private def releaseCtrlHeadSlot(rt: BuddyRuntime): Unit =
     rt.headSeq = ArqFrame.NoSeq
-    rt.headWire = null
+    rt.clearHead()
     rt.headIsCtrl = false
+
+  /** Test seam (offline-delegation.md §4.1): how many retained (MK, HK) pairs this buddy holds right
+    * now — 0, 1 or 2 (the in-flight head's, the cached ack-only frame's). A count, never key
+    * material; 0 for an unknown or removed pair. Lets the wipe table be checked from outside. */
+  private[engine] def retainedKeyPairsForTest(pairId: String): Int =
+    runtime
+      .get(pairId)
+      .fold(0)(rt => Seq(rt.headWire, rt.ackWire).count(r => r != null && r.isLive))
 
   /** Per-pair, non-secret rekey diagnostics (tests + engine observability). */
   def rekeyStatus(pairId: String): Option[RekeyStatus] =
@@ -1164,7 +1205,9 @@ final class Engine(
                   // Mismatch is terminal (relationship now Removed): drop the buddy's runtime + outbox so
                   // no seeded ratchet lingers past the rejected pairing (parallels removeBuddy's cleanup).
                   book = nb
-                  runtime.remove(pairId).foreach(_.wipeRekey()) // release rekey secrets + buffers
+                  runtime
+                    .remove(pairId)
+                    .foreach(_.wipeAll()) // rekey secrets + buffers + retained (MK, HK) pairs
                   outbox.remove(pairId)
                   Right(ConfirmResult())
               case Left(reason) => Left(EngineError("confirm_failed", reason))
@@ -1266,7 +1309,9 @@ final class Engine(
       book.confirm(pairId, matched = false) match
         case Right(nb) =>
           book = nb
-          runtime.remove(pairId).foreach(_.wipeRekey()) // release rekey secrets + buffers
+          runtime
+            .remove(pairId)
+            .foreach(_.wipeAll()) // rekey secrets + buffers + retained (MK, HK) pairs
           outbox.remove(pairId)
           wipe(expectedInitTag)
           pendingResponderTag.remove(pairId)
@@ -1304,7 +1349,9 @@ final class Engine(
       case Right(nb) =>
         book = nb
         outbox.remove(pairId)
-        runtime.remove(pairId).foreach(_.wipeRekey()) // release rekey secrets + buffers
+        runtime
+          .remove(pairId)
+          .foreach(_.wipeAll()) // rekey secrets + buffers + retained (MK, HK) pairs
         pendingPq.remove(pairId).foreach(_.wipe())
         pendingResponderTag.remove(pairId).foreach(wipe)
         completedInitiatorTag.remove(pairId).foreach(wipe)
@@ -1431,12 +1478,15 @@ final class Engine(
                 rel: BuddyRelationship,
                 wire: Array[Byte],
                 carriedAck: Boolean
-            ): Unit =
-              if t.submit(dirToken(rel.addrKey, rt.role, peerRole(rt.role), roundId), wire) then
+            ): Boolean =
+              val accepted =
+                t.submit(dirToken(rel.addrKey, rt.role, peerRole(rt.role), roundId), wire)
+              if accepted then
                 if carriedAck then rt.ackOwed = false // this frame really did carry our ack
                 realSubmitted = true
                 if rel.peerNotifyLabel.nonEmpty then
                   realSignal = Some((rel.peerNotifyLabel, rel.addrKey))
+              accepted
             txTarget match
               case Some((pid, rt, rel)) =>
                 if rt.headSeq == ArqFrame.NoSeq then
@@ -1461,26 +1511,34 @@ final class Engine(
                     if contentPending then rt.ctrlHeadsOverContent += 1
                   rt.headSeq = rt.nextSendSeq
                   rt.nextSendSeq += 1
-                  rt.headWire = null
+                  rt.clearHead()
                   if !rt.headIsCtrl then rt.stepsSinceFold += 1 // a content step toward the cadence
-                // (Re)encrypt the head wire only when it's new or our ack advanced; otherwise resubmit
-                // the cached bytes so the ratchet does not advance per retransmit. A CONTROL head is
-                // encrypted EXACTLY ONCE and never refreshed: an EPOCH_COMMIT's anchor is only valid
-                // at the ratchet position it was built at, so re-encrypting one later (at a moved
-                // root) would hand the peer a stale anchor — the refresh is a latency nicety, the
-                // anchor is correctness.
+                // (Re)encrypt the head only when it's new or our ack advanced; otherwise RE-SEAL the
+                // retained one (fresh nonce, same chain position) so the ratchet does not advance per
+                // retransmit and no two retransmits are byte-identical (offline-delegation.md §4.1).
+                // A CONTROL head is encrypted EXACTLY ONCE and never re-encrypted: an EPOCH_COMMIT's
+                // anchor is only valid at the ratchet position it was built at, so re-encrypting one
+                // later (at a moved root) would hand the peer a stale anchor — the refresh is a latency
+                // nicety, the anchor is correctness. Re-sealing keeps that position, so it is safe.
                 val payload: Option[Array[Byte]] =
                   if rt.headWire != null && (rt.headIsCtrl || rt.headWireAck == rt.highRecv) then
-                    None // cached bytes stand
+                    None // the retained head stands
                   else if rt.headIsCtrl then ctrlHeadBytes(rt)
                   else outbox.get(pid).flatMap(_.headOption)
                 payload.foreach { p =>
-                  rt.headWire = rt.ratchet.encrypt(ArqFrame.encode(rt.highRecv, rt.headSeq, p))
+                  rt.clearHead() // the superseded head's keys go before the new ones are taken
+                  rt.headWire =
+                    rt.ratchet.encryptRetained(ArqFrame.encode(rt.highRecv, rt.headSeq, p))._2
                   rt.headWireAck = rt.highRecv
                 }
                 // `ctrlHeadBytes` can abort the attempt (and drop this head) rather than emit bytes.
                 if rt.headWire != null then
-                  submitWire(rt, rel, rt.headWire, carriedAck = rt.headWireAck == rt.highRecv)
+                  val carried = rt.headWireAck == rt.highRecv
+                  // A content/control frame that carries our current ack makes the cached ack-only
+                  // frame redundant: wipe it (§4.1 wipe table).
+                  if submitWire(rt, rel, DoubleRatchet.reseal(rt.headWire), carriedAck = carried) &&
+                    carried
+                  then rt.clearAck()
                 else
                   coverCounter += 1
                   t.submit(
@@ -1490,15 +1548,17 @@ final class Engine(
               case None =>
                 ackTarget match
                   case Some((_, rt, rel)) =>
-                    // Encrypted FRESH every time, so it always carries the current ack.
-                    submitWire(
-                      rt,
-                      rel,
-                      rt.ratchet.encrypt(
-                        ArqFrame.encode(rt.highRecv, ArqFrame.NoSeq, emptyPayload)
-                      ),
-                      carriedAck = true
-                    )
+                    // One ack-only frame per `highRecv` value, RE-SEALED for every re-ack
+                    // (offline-delegation.md §4.5 rule 1): re-acking a peer's duplicates — however
+                    // many arrive while it is away — costs no chain step, so the pair stays inside
+                    // MaxSkip. A new frame (one step) only when there is a newer ack to carry.
+                    if rt.ackWire == null || rt.ackWireAck != rt.highRecv then
+                      rt.clearAck()
+                      rt.ackWire = rt.ratchet
+                        .encryptRetained(ArqFrame.encode(rt.highRecv, ArqFrame.NoSeq, emptyPayload))
+                        ._2
+                      rt.ackWireAck = rt.highRecv
+                    submitWire(rt, rel, DoubleRatchet.reseal(rt.ackWire), carriedAck = true): Unit
                   case None =>
                     coverCounter += 1
                     t.submit(
@@ -1569,19 +1629,27 @@ final class Engine(
                   // Run the frame through the DH double ratchet: it trial-decrypts the encrypted header,
                   // performs a DH step + skipped-key handling as needed (PCS), and returns the inner
                   // block — or None for a carrier / a CACHED content retransmit we already consumed.
-                  rt.ratchet.decrypt(wire) match
-                    case None =>
-                      // A frame WAS present at THIS pair's read token but didn't decrypt. Invariant: only
-                      // this pair's writer can produce a frame here — cover writes use cover-derived
-                      // tokens, ack-only frames are encrypted fresh (always decode), and a cross-pair
-                      // frame is under a different addrKey's token — so a None here is a cached CONTENT
-                      // retransmit whose ratchet key we consumed on first delivery. We therefore owe a
-                      // (re-)ack so the peer stops retransmitting. Gate on `highRecv != NoSeq` so the
-                      // re-ack is keyed to "we have delivered content from this buddy" (the retransmit
-                      // case) rather than to any decrypt failure: a None before any delivery (which the
-                      // invariant says shouldn't occur) does not spuriously activate an idle engine.
+                  rt.ratchet.decryptDetailed(wire) match
+                    case DoubleRatchet.DecryptResult.Consumed(position) =>
+                      // A re-sealed / re-presented DUPLICATE of a frame we already consumed
+                      // (offline-delegation.md §4.5). Only this pair's writer can produce a frame at
+                      // this token (covers use cover-derived tokens; a cross-pair frame is under
+                      // another addrKey's token), so it is the peer retransmitting because it has not
+                      // seen our ack: owe one — UNLESS the duplicate is of an ack-only frame we have
+                      // already consumed (rule 2), which never needs an ack and would otherwise make
+                      // two peers bounce re-sealed acks forever. Paying the ack is a RE-SEAL of the
+                      // cached ack-only frame (rule 1), so no number of duplicates steps our ratchet.
+                      // Gate on `highRecv != NoSeq` as before: owe an ack only once we have delivered
+                      // content from this buddy.
+                      if rt.highRecv != ArqFrame.NoSeq && !rt.ackOnlySeen.contains(position) then
+                        rt.ackOwed = true
+                    case DoubleRatchet.DecryptResult.Undecryptable =>
+                      // A frame at this pair's token whose header matches no live header key — e.g. a
+                      // duplicate from a chain whose header key has been retired. Treated as before:
+                      // owe a (re-)ack once content has been delivered. By rule 1 that costs a re-seal,
+                      // not a step.
                       if rt.highRecv != ArqFrame.NoSeq then rt.ackOwed = true
-                    case Some(inner) =>
+                    case DoubleRatchet.DecryptResult.Delivered(inner, position) =>
                       // ARQ inner block: [ackSeq][msgSeq][padded message].
                       // 1) Consume the PEER's ack: it reports the peer's highest received sequence FROM
                       //    US, so once it covers our in-flight head, that head is delivered+acked — drop
@@ -1593,12 +1661,15 @@ final class Engine(
                         if rt.headIsCtrl then rt.ctrl = rt.ctrl.drop(1)
                         else outbox.get(pid).filter(_.nonEmpty).foreach(q => dropHead(pid, q))
                         rt.headSeq = ArqFrame.NoSeq
-                        rt.headWire = null
+                        rt.clearHead()
                         rt.headIsCtrl = false
                       // 2) De-duplicate + deliver by sequence (a retransmit re-presents an already-seen
                       //    msgSeq; an ack-only frame carries NoSeq). Owe an ack ONLY for a content frame
                       //    (msgSeq != NoSeq) — never for an ack-only, so acks don't ping-pong.
                       val msgSeq = ArqFrame.msgSeqOf(inner)
+                      // Remember where a consumed ACK-ONLY frame sat, so its re-sealed duplicates
+                      // are recognised and never make us owe an ack (§4.5 rule 2).
+                      if msgSeq == ArqFrame.NoSeq then rt.noteAckOnly(position)
                       if msgSeq != ArqFrame.NoSeq then
                         rt.ackOwed = true // received content ⇒ owe the peer an ack
                         if ArqFrame.isNewMessage(msgSeq, rt.highRecv) then
@@ -1614,6 +1685,7 @@ final class Engine(
                             // would wedge its stop-and-wait retransmit forever. The rekey itself
                             // fails closed inside `onControl`.
                             rt.highRecv = msgSeq
+                            rt.clearAck() // the cached ack-only frame carries an older ack now
                             onControl(rt, body, roundId)
                           else
                             Frame
@@ -1621,6 +1693,7 @@ final class Engine(
                               .toOption
                               .foreach { p =>
                                 rt.highRecv = msgSeq // advance only on successful delivery
+                                rt.clearAck() // the cached ack-only frame is now stale
                                 rt.stepsSinceFold += 1 // a content step toward the rekey cadence
                                 emit(
                                   EngineEvent.MessageReceived(pid, new String(p, UTF_8), roundId)

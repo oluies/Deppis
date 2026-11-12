@@ -39,8 +39,8 @@ object PqTestKit:
           .foreach(_.foreach(b => out(b >> 3) = (out(b >> 3) | (1 << (b & 7))).toByte))
         out
 
-  /** A network that EATS LIVE FRAMES, and counts the byte-identical re-presentations that ARQ makes
-    * in response. Single-sourced here because both the example-based `PqRekeyCrossSpec` and the
+  /** A network that EATS LIVE FRAMES, and counts any byte-identical re-delivery (there should be
+    * none). Single-sourced here because both the example-based `PqRekeyCrossSpec` and the
     * property-based `PqRekeyModelSpec` need exactly this adversary and must not drift apart.
     *
     * ==Loss: swallow a live `retrieve`, never a store entry==
@@ -61,14 +61,12 @@ object PqTestKit:
     * overclaim by exactly the margin that made the `store.remove` metric untrustworthy.
     *
     * ==Duplication: measured, not injected==
-    * `repeats` counts retrieves that returned bytes this transport had already returned before. Such
-    * duplicates are UBIQUITOUS BY CONSTRUCTION and prove nothing on their own: stop-and-wait
-    * re-presents the unacked head under every round's token until the ack lands, so the cached wire
-    * (`Engine.rt.headWire`) is delivered byte-identically several times even on a perfectly clean
-    * network. The counter exists to show the duplicate-handling path is genuinely exercised — the
-    * ratchet's cached-retransmit `None` and ARQ's `isNewMessage` sequence dedup — and a test must
-    * earn the "duplicates" half of its name from an EXACTLY-ONCE DELIVERY assertion, not from
-    * `repeats > 0`.
+    * `repeats` counts retrieves that returned bytes this transport had already returned before.
+    * Stop-and-wait still re-presents the unacked head under every round's token until the ack lands,
+    * but since offline-delegation.md §4.1 each re-presentation is RE-SEALED under a fresh nonce, so
+    * the receiver sees new bytes (decrypting to a `Consumed` duplicate), never the same bytes twice:
+    * `repeats` must stay 0, and a non-zero value means a retransmit path stopped re-sealing. A test
+    * must still earn the "duplicates" half of its name from an EXACTLY-ONCE DELIVERY assertion.
     *
     * The adversary may not forge or reorder: every frame is AEAD-sealed under keys the network does
     * not hold (a tampered frame is just a dropped one), and round-derived addressing plus
@@ -86,7 +84,8 @@ object PqTestKit:
     /** Retrieves that returned a frame (post-drop). */
     var delivered: Int = 0
 
-    /** Retrieves that returned bytes already returned earlier — ARQ re-presentation, not an attack. */
+    /** Retrieves that returned bytes already returned earlier. Must be 0: every retransmit is
+      * re-sealed (offline-delegation.md §4.1). */
     var repeats: Int = 0
 
     private val seenFrames = mutable.Set.empty[String]

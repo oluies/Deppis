@@ -190,18 +190,15 @@ The metadata-privacy guarantee rests on **uniformity**: in *every* round, each c
 **exactly one store write and one store read**, whether or not it has real traffic. A real frame and
 a carrier frame are byte-indistinguishable (random-looking, same size, encrypted).
 
-> **Known gap — a RETRANSMITTED real frame is not indistinguishable across rounds.** Stop-and-wait
-> ARQ re-presents an unacked head by resubmitting the **cached wire bytes** (re-encrypting would
-> advance the ratchet per retransmit), under a fresh, non-recurrent token each round. The token
-> reveals nothing, but the 256 bytes are byte-identical, while cover frames are freshly random every
-> round. Measured over 40 rounds: a chatting pair writes 80 frames of which only **22 are distinct**;
-> an idle pair writes 80 frames, **all 80 distinct**. A passive store can therefore separate active
-> from idle by counting repeated blobs — the exact inference this section exists to prevent.
->
-> Pinned by `FrameUniformityCrossSpec` ("RECORDED GAP") and tracked as a §9 Q3 residual in
-> `design/continuous-pq-ratchet.md`. It affects no shipped claim — `DEV, NO METADATA PRIVACY` stands
-> and Phase C is not reached — but the sentence above is **not** true of a retransmitted frame, and
-> must not be quoted without this caveat.
+> **Closed gap — retransmits are re-sealed.** Stop-and-wait ARQ re-presents an unacked head every
+> round under a fresh, non-recurrent token. It used to resubmit the **cached wire bytes**, so a
+> chatting pair wrote 80 frames of which only 22 were distinct while an idle pair's 80 were all
+> distinct, and a passive store could separate active from idle by counting repeated blobs. Since
+> `design/offline-delegation.md` §4.1, every retransmit — head or ack-only — is **re-sealed** under a
+> fresh nonce with the same keys and chain position: new bytes every round, no ratchet step.
+> `FrameUniformityCrossSpec` now asserts that no written frame repeats, busy or idle. This removes
+> one distinguisher; it is not a metadata-privacy claim on its own — `DEV, NO METADATA PRIVACY`
+> stands and Phase C is not reached.
 
 ```mermaid
 flowchart LR

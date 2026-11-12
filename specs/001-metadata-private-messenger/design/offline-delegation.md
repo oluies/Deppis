@@ -597,7 +597,18 @@ Each phase is reviewable on its own and keeps the labeling rule: provider routin
        order after A returns.
      - Across disconnect → reconnect, every `(round, label)` digest is fetched exactly once and
        the device makes exactly one write per round.
-2. **Engine side (protocol-core).** Makes the protocol-core tests from Phase 1 pass.
+2. **Engine side (protocol-core).** Makes the protocol-core tests from Phase 1 pass. Landing in
+   three PRs:
+   - **Step 1 — landed:** re-seal, the decrypt-result change, cached re-acks and duplicate-ack
+     suppression (§4.1, §4.5). The MaxSkip-across-absence test now passes, and so does the §4.1
+     wipe-table test (via the `retainedKeyPairsForTest` seam). As a side effect, retransmits no
+     longer repeat byte for byte, which closes the distinguisher recorded in
+     `continuous-pq-ratchet.md` §9 Q3 and `ARCHITECTURE.md` §6.
+   - **Step 2:** the bounded rekey timeout (§4.4), with the four absence tests and the update to
+     `PqRekeyCrossSpec`'s "stranding is OBSERVABLE".
+   - **Step 3:** the `Engine.tick` split and the bundle builder (§3.1, §3.4).
+
+   The full Phase 2 list:
    - `DoubleRatchet` re-seal with the two retained `(MK, HK)` pairs and their wipe points (§4.1).
    - The `DoubleRatchet` decrypt-result change that distinguishes "position already consumed"
      from a carrier without mutating state (§4.5).

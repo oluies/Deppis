@@ -23,10 +23,70 @@ import scala.collection.mutable
   *
   * Pure cross-platform Scala: compiles to JVM (JCA primitives) and Scala.js (`@noble`) identically;
   * the property tests run on both. Mutable by design (a ratchet IS evolving state); every retired key
-  * — `RK`, chain keys, message keys, header keys, skipped keys, DH privates — is wiped. */
+  * — `RK`, chain keys, message keys, header keys, skipped keys, DH privates — is wiped.
+  *
+  * ONE deliberate exception (offline-delegation.md §4.1): [[DoubleRatchet.encryptRetained]] hands the
+  * caller a [[DoubleRatchet.Retained]] holding a sent frame's message key and header key, so the SAME
+  * message can be re-sealed under a fresh nonce ([[DoubleRatchet.reseal]]) without advancing any
+  * chain. The ratchet itself still wipes its own copies; the caller owns the retained ones and must
+  * `wipe()` them at the points the design lists (the engine holds at most two per buddy). */
 object DoubleRatchet:
   import aead.Aead
   import x25519.X25519
+
+  /** A sent frame's sealing material — message key, header key, header plaintext and inner block —
+    * kept so the same message can be re-sealed under a fresh nonce ([[reseal]]) with NO chain step.
+    * Every re-seal is byte-distinct (fresh random nonce) but carries the same chain position, so the
+    * receiver decrypts the first copy and reports every later one as [[DecryptResult.Consumed]].
+    *
+    * Owned by the caller, which MUST call [[wipe]] when the frame is superseded or acked
+    * (offline-delegation.md §4.1 wipe table). After `wipe` the handle is dead: [[reseal]] refuses it. */
+  final class Retained private[DoubleRatchet] (
+      private[DoubleRatchet] val mk: Array[Byte],
+      private[DoubleRatchet] val hk: Array[Byte],
+      private[DoubleRatchet] val header: Array[Byte],
+      private[DoubleRatchet] val inner: Array[Byte]
+  ):
+    private var live = true
+
+    /** False once [[wipe]] has run. */
+    def isLive: Boolean = live
+
+    /** Zero the message key, header key, header and inner block in place. Idempotent. */
+    def wipe(): Unit =
+      if live then
+        DoubleRatchet.wipe(mk)
+        DoubleRatchet.wipe(hk)
+        DoubleRatchet.wipe(header)
+        DoubleRatchet.wipe(inner)
+        live = false
+
+  /** Re-seal a retained frame under a FRESH random nonce: same keys, same header, same inner block,
+    * same chain position — new bytes. Touches no ratchet state. The shared-nonce layout is unchanged
+    * (`nonce ‖ AEAD(HK, header) ‖ AEAD(MK, inner)`), and with random 96-bit nonces re-sealing a key
+    * even 10⁴ times stays far inside the birthday bound. */
+  def reseal(r: Retained): Array[Byte] =
+    require(r.isLive, "reseal of a wiped Retained")
+    val nonce = random.Rand.bytes(Nonce)
+    nonce ++ Aead.seal(r.hk, nonce, r.header) ++ Aead.seal(r.mk, nonce, r.inner)
+
+  /** A frame's place in the peer's sending chains: the peer ratchet public key in its header and the
+    * message number. PUBLIC-equivalent metadata inside the engine (it is the decrypted header), used
+    * only to recognise a re-sealed duplicate of a frame already consumed. */
+  final case class Position(dhPub: Vector[Byte], n: Int)
+
+  /** The outcome of [[DoubleRatchet.decryptDetailed]]. */
+  enum DecryptResult:
+    /** Decrypted and consumed: the ratchet advanced past `position`. */
+    case Delivered(inner: Array[Byte], position: Position)
+
+    /** The header authenticates, but its message key is already consumed (or evicted): a re-sealed
+      * or re-presented duplicate. NO state change. */
+    case Consumed(position: Position)
+
+    /** Matches no header key, a jump beyond `MaxSkip`, a rejected peer key, or a tampered body. NO
+      * state change — indistinguishable from a carrier, exactly as before. */
+    case Undecryptable
 
   // Wire budget inside the immovable 256-byte store frame (dh-ratchet.md §6):
   //   nonce(12) ‖ AEAD(HK, header)(56) ‖ AEAD(MK, inner)(188)
@@ -311,6 +371,25 @@ final class DoubleRatchet private (
     commitSend()
     wire
 
+  /** Encrypt + advance exactly ONE chain step, like [[encrypt]], and also return a [[Retained]]
+    * handle so the same message can later be re-sealed ([[DoubleRatchet.reseal]]) with no further
+    * step. The returned wire is a normal frame. The caller owns the handle and must wipe it. */
+  def encryptRetained(inner: Array[Byte]): (Array[Byte], Retained) =
+    require(inner.length == InnerSize, s"inner ${inner.length} != $InnerSize")
+    val ck = cks.getOrElse(
+      throw new IllegalStateException("no sending chain yet (responder must receive first)")
+    )
+    val headerKey = hks.getOrElse(throw new IllegalStateException("no sending header key yet"))
+    val retained = new Retained(
+      mk = messageKey(ck),
+      hk = headerKey.clone(),
+      header = dhsPub ++ enc4(pn) ++ enc4(ns),
+      inner = inner.clone()
+    )
+    val wire = reseal(retained)
+    commitSend()
+    (wire, retained)
+
   // ---- Receive ---------------------------------------------------------------------------------
 
   /** Decrypt a 256-byte wire frame to its inner block, advancing the ratchet (DH step + skipped-key
@@ -318,60 +397,91 @@ final class DoubleRatchet private (
     * header that matches neither header key (a carrier or a frame for someone else), or a jump beyond
     * `MaxSkip`. So an undecryptable frame is indistinguishable from a carrier (dh-ratchet.md §6/§9). */
   def decrypt(wire: Array[Byte]): Option[Array[Byte]] =
-    if wire.length != WireSize then None
+    decryptDetailed(wire) match
+      case DecryptResult.Delivered(inner, _) => Some(inner)
+      case _ => None
+
+  /** As [[decrypt]], but distinguishes a re-sealed / re-presented DUPLICATE of a frame already
+    * consumed ([[DecryptResult.Consumed]], which carries its chain position) from everything else
+    * undecryptable (offline-delegation.md §4.5). Neither non-delivering outcome mutates ratchet
+    * state — the no-mutation-on-undecryptable invariant (dh-ratchet.md §6/§9) is unchanged.
+    *
+    * `Consumed` is reported when the header authenticates under the current receiving header key
+    * with `N < Nr` (already passed in this chain), or under an OLDER stashed epoch's header key
+    * whose message key for `N` is no longer stashed (consumed or evicted). */
+  def decryptDetailed(wire: Array[Byte]): DecryptResult =
+    if wire.length != WireSize then DecryptResult.Undecryptable
     else
       val nonce = wire.slice(0, Nonce)
       val sealedHeader = wire.slice(HeaderOffset, HeaderOffset + SealedHeader)
       val sealedMsg = wire.slice(MsgOffset, WireSize)
-      trySkipped(nonce, sealedHeader, sealedMsg).orElse:
-        decryptHeader(nonce, sealedHeader) match
-          case None => None // matches no header key ⇒ carrier / not ours: no state change
-          case Some((dhPub, headerPn, headerN, isDhStep)) =>
-            // Bound-check BEFORE any mutation so an over-large jump aborts cleanly as a carrier.
-            val ok =
-              if isDhStep then withinSkip(nr, headerPn) && headerN >= 0 && headerN <= MaxSkip
-              else withinSkip(nr, headerN)
-            if !ok then None
-            else
-              // ATOMIC receive: the sealed header and sealed message are authenticated under
-              // INDEPENDENT keys, so a valid header with a tampered body would otherwise advance the
-              // ratchet (DH step, skips, wipes) and only THEN fail the message AEAD — letting an active
-              // attacker consume a ratchet position with a single bit flip. So we first derive this
-              // frame's message key on a SCRATCH copy of the state (no instance mutation) and open the
-              // body; only on success do we replay the real mutations. A failure leaves the ratchet
-              // untouched (the no-mutation-on-undecryptable invariant, dh-ratchet.md §6/§9).
-              // A DH-step peek runs the ECDH against the header's ratchet key, which is PUBLIC and
-              // attacker-supplied; a low-order / non-canonical peer key makes X25519.sharedSecret
-              // throw `PeerKeyRejected` uniformly on both platforms. Treat that like any other
-              // undecryptable frame — drop it, no state mutation (peekMessageKey mutates nothing). We
-              // catch EXACTLY `PeerKeyRejected` (not any IllegalArgumentException) so an unrelated
-              // IllegalArgumentException from a genuine bug — e.g. corrupted key material reaching the
-              // KDF inside peekMessageKey — is NOT silently swallowed as a carrier. The branch is
-              // governed by the public peer key, not by any secret, so no secret-dependent timing is
-              // introduced (dh-ratchet.md §6/§9).
-              val mkOpt =
-                try Some(peekMessageKey(dhPub, headerN, isDhStep))
-                catch case _: x25519.PeerKeyRejected => None
-              mkOpt match
-                case None => None // rejected peer ratchet key ⇒ carrier / not ours: no state change
-                case Some(mk) =>
-                  Aead.open(mk, nonce, sealedMsg) match
-                    case None =>
-                      wipe(mk)
-                      None
-                    case Some(inner) =>
-                      wipe(mk)
-                      if isDhStep then
-                        skipMessageKeys(
-                          headerPn
-                        ) // finish the previous chain (stash, under the OLD HKr)
-                        dhRatchet(dhPub)
-                      skipMessageKeys(headerN) // skip up to this frame in the current chain
-                      val ck = ckr.get
-                      ckr = Some(nextCk(ck))
-                      wipe(ck)
-                      nr += 1
-                      Some(inner)
+      trySkipped(nonce, sealedHeader, sealedMsg) match
+        case Left(delivered) => delivered
+        case Right(olderEpochMatch) =>
+          decryptMain(nonce, sealedHeader, sealedMsg) match
+            case DecryptResult.Undecryptable =>
+              olderEpochMatch.fold(DecryptResult.Undecryptable)(DecryptResult.Consumed(_))
+            case other => other
+
+  private def decryptMain(
+      nonce: Array[Byte],
+      sealedHeader: Array[Byte],
+      sealedMsg: Array[Byte]
+  ): DecryptResult =
+    decryptHeader(nonce, sealedHeader) match
+      // matches no header key ⇒ carrier / not ours: no state change
+      case None => DecryptResult.Undecryptable
+      case Some((dhPub, headerPn, headerN, isDhStep)) =>
+        val position = Position(dhPub.toVector, headerN)
+        // A position this chain has already passed: a duplicate. Public counters only.
+        if !isDhStep && headerN < nr then DecryptResult.Consumed(position)
+        else
+          // Bound-check BEFORE any mutation so an over-large jump aborts cleanly as a carrier.
+          val ok =
+            if isDhStep then withinSkip(nr, headerPn) && headerN >= 0 && headerN <= MaxSkip
+            else withinSkip(nr, headerN)
+          if !ok then DecryptResult.Undecryptable
+          else
+            // ATOMIC receive: the sealed header and sealed message are authenticated under
+            // INDEPENDENT keys, so a valid header with a tampered body would otherwise advance the
+            // ratchet (DH step, skips, wipes) and only THEN fail the message AEAD — letting an active
+            // attacker consume a ratchet position with a single bit flip. So we first derive this
+            // frame's message key on a SCRATCH copy of the state (no instance mutation) and open the
+            // body; only on success do we replay the real mutations. A failure leaves the ratchet
+            // untouched (the no-mutation-on-undecryptable invariant, dh-ratchet.md §6/§9).
+            // A DH-step peek runs the ECDH against the header's ratchet key, which is PUBLIC and
+            // attacker-supplied; a low-order / non-canonical peer key makes X25519.sharedSecret
+            // throw `PeerKeyRejected` uniformly on both platforms. Treat that like any other
+            // undecryptable frame — drop it, no state mutation (peekMessageKey mutates nothing). We
+            // catch EXACTLY `PeerKeyRejected` (not any IllegalArgumentException) so an unrelated
+            // IllegalArgumentException from a genuine bug — e.g. corrupted key material reaching the
+            // KDF inside peekMessageKey — is NOT silently swallowed as a carrier. The branch is
+            // governed by the public peer key, not by any secret, so no secret-dependent timing is
+            // introduced (dh-ratchet.md §6/§9).
+            val mkOpt =
+              try Some(peekMessageKey(dhPub, headerN, isDhStep))
+              catch case _: x25519.PeerKeyRejected => None
+            mkOpt match
+              // rejected peer ratchet key ⇒ carrier / not ours: no state change
+              case None => DecryptResult.Undecryptable
+              case Some(mk) =>
+                Aead.open(mk, nonce, sealedMsg) match
+                  case None =>
+                    wipe(mk)
+                    DecryptResult.Undecryptable
+                  case Some(inner) =>
+                    wipe(mk)
+                    if isDhStep then
+                      skipMessageKeys(
+                        headerPn
+                      ) // finish the previous chain (stash, under the OLD HKr)
+                      dhRatchet(dhPub)
+                    skipMessageKeys(headerN) // skip up to this frame in the current chain
+                    val ck = ckr.get
+                    ckr = Some(nextCk(ck))
+                    wipe(ck)
+                    nr += 1
+                    DecryptResult.Delivered(inner, position)
 
   /** Derive THIS frame's message key without mutating instance state — used to verify the message
     * AEAD before committing the ratchet mutations (see `decrypt`). Walks a scratch chain key forward;
@@ -406,23 +516,36 @@ final class DoubleRatchet private (
       nonce: Array[Byte],
       sealedHeader: Array[Byte],
       sealedMsg: Array[Byte]
-  ): Option[Array[Byte]] =
-    skippedEpochs.iterator
-      .flatMap(ep =>
-        Aead.open(ep.hk, nonce, sealedHeader).map(h => (ep, dec4(h, DhBytes + CtrBytes)))
-      )
-      .collectFirst { case (ep, n) if ep.keys.contains(n) => (ep, n) }
-      .flatMap { case (ep, n) =>
+  ): Either[DecryptResult, Option[Position]] =
+    // `Left` = delivered from the stash. `Right(Some(p))` = the header authenticated under an OLDER
+    // epoch's header key but no message key for its N is stashed any more: a duplicate (consumed or
+    // evicted). The stash bucket for the CURRENT receiving chain shares its header key with `hkr`,
+    // so a missing key there may be a frame still AHEAD of `nr` — that case is left to the main path,
+    // which decides it with `N < Nr`. The comparison is between our own keys, never attacker input.
+    val opened = skippedEpochs.iterator
+      .flatMap(ep => Aead.open(ep.hk, nonce, sealedHeader).map(h => (ep, h)))
+      .toVector
+    opened.collectFirst {
+      case (ep, h) if ep.keys.contains(dec4(h, DhBytes + CtrBytes)) => (ep, h)
+    } match
+      case Some((ep, h)) =>
+        val n = dec4(h, DhBytes + CtrBytes)
         Aead.open(ep.keys(n), nonce, sealedMsg) match
-          case None => None // tampered body ⇒ leave the stash intact (no position consumed)
+          // tampered body ⇒ leave the stash intact (no position consumed)
+          case None => Right(None)
           case Some(inner) =>
             wipe(ep.keys.remove(n).get)
             skippedCount -= 1
             if ep.keys.isEmpty then // epoch drained: wipe its header key and drop it
               wipe(ep.hk)
               skippedEpochs -= ep
-            Some(inner)
-      }
+            Left(DecryptResult.Delivered(inner, Position(h.slice(0, DhBytes).toVector, n)))
+      case None =>
+        val current = hkr.getOrElse(Array.emptyByteArray)
+        Right(opened.collectFirst {
+          case (ep, h) if !java.util.Arrays.equals(ep.hk, current) =>
+            Position(h.slice(0, DhBytes).toVector, dec4(h, DhBytes + CtrBytes))
+        })
 
   /** Trial-decrypt the header: current HKr ⇒ (…, isDhStep=false); else next HKr ⇒ DH step. */
   private def decryptHeader(
