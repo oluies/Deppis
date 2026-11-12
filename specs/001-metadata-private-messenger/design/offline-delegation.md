@@ -653,9 +653,23 @@ Each phase is reviewable on its own and keeps the labeling rule: provider routin
      `PqRekey.PauseAllowanceRounds` is derived from them. `ProviderSpec` carries the two T037
      end-to-end tests (a control run with bundle slots disabled confirms delivery depends on the
      bundle) and the provider's rules. Labeled `DEV, NO METADATA PRIVACY`.
-   - **Routing — next:** a networked provider front (a gRPC contract in `contracts/`) and a
-     client-side `ProviderRoundTransport`, so devices reach the backend only through their
-     provider.
+   - **Routing — landed:** contract `contracts/provider.proto` (`ProviderService`: Register,
+     UploadBundle, GetDigest, SubmitLive, CollectReceipt, CollectAll), the server front
+     `transport.ProviderServiceImpl`, and the device-side `transport.GrpcProviderClient`. Both
+     sit behind a new `provider.ProviderApi` seam, so `ProviderSession` drives an engine through
+     an in-process or a networked provider unchanged. The design called the client
+     `ProviderRoundTransport`; it is not a `RoundTransport`, because a routed device builds rounds
+     with `beginRound` / `applyReceipt` instead of `tick`, so it got the plainer name. `Register`
+     issues a session secret every later call must present, so one client cannot act in another
+     user's name (integrity, not privacy). `ProviderServiceSpec` runs T037 with devices that have
+     ONLY a gRPC route to the provider, over the dev backend and over the real Rust `obsd` as the
+     provider's backend; the `obsd` case runs in CI's integration job under its
+     canceled/ignored/pending-zero guard and by name.
+
+     Follow-ups, not in this phase: a wall-clock round driver that opens and closes provider
+     rounds with a real cutoff (today the owner of the `Provider` drives the clock, as tests do);
+     moving the existing demo and TLS server wiring onto provider routing; a persistent
+     `ProviderStore`.
 
    The full Phase 3 list:
    - An untrusted `ProviderBuffer`: atomic bundle replace, the per-round arbiter with the cutoff,

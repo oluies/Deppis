@@ -3,7 +3,8 @@ package provider
 import engine.{Delegation, Engine, RoundReceipt}
 
 /** The device side of provider routing (`design/offline-delegation.md` §3): drives one device's
-  * [[engine.Engine]] through its [[Provider]] instead of a direct backend transport.
+  * [[engine.Engine]] through its provider — in-process [[Provider]] or networked, via
+  * [[ProviderApi]] — instead of a direct backend transport.
   *
   * While the device is online, each round it calls [[beforeCutoff]] (after the provider's phase A)
   * and [[afterCutoff]] (after the cutoff). It refreshes its standing bundle on the fixed,
@@ -20,7 +21,7 @@ import engine.{Delegation, Engine, RoundReceipt}
 final class ProviderSession(
     val user: String,
     engine: Engine,
-    provider: Provider,
+    provider: ProviderApi,
     clientLabel: Array[Byte],
     val refreshEveryRounds: Int = Delegation.RefreshEveryRounds,
     val horizonRounds: Int = Delegation.HorizonRounds,
