@@ -84,8 +84,26 @@ object PqRekey:
     * costs the doc's requirement nothing: the 2464-byte keypair secret this bound exists for is
     * wiped the instant `decaps` returns — strictly BEFORE the initiator's `/i` tag goes out, i.e.
     * strictly before the point of no return — so every round in which that secret is live is still
-    * inside the timeout's reach. */
+    * inside the timeout's reach.
+    *
+    * MEASURED IN MUTUALLY LIVE ROUNDS, not wall-clock rounds (offline-delegation.md §4.4): a round
+    * counts only if this device ticked it AND a frame from the peer decrypted within the last
+    * [[LivenessWindowRounds]]. An absence on either side therefore PAUSES an attempt instead of
+    * timing it out — for at most [[PauseAllowanceRounds]] rounds, after which rounds count again, so
+    * a peer that is gone for good still ends the attempt within `TimeoutRounds + PauseAllowanceRounds`
+    * of this device's own ticks. */
   val TimeoutRounds: Long = 2000L
+
+  /** How recently (in rounds) a frame from the peer must have decrypted for a round to count as
+    * mutually live (offline-delegation.md §4.4). Covers a round trip under one-round read latency. */
+  val LivenessWindowRounds: Long = 4L
+
+  /** The pause allowance P (offline-delegation.md §4.4): how many of this device's own rounds an
+    * attempt may spend paused, waiting for a silent peer, before rounds count toward
+    * [[TimeoutRounds]] again. P = H + F: the delegation horizon H = 5,760 rounds (one day at 15 s)
+    * plus the bundle refresh period F = 240 rounds, so an absence the provider can cover never times
+    * out an attempt, while the KEM secret a silent peer strands stays resident for a bounded time. */
+  val PauseAllowanceRounds: Long = 5760L + 240L
 
 /** Engine → caller events (engine-api.md). No event ever carries key material. */
 sealed trait EngineEvent
@@ -279,6 +297,10 @@ final class Engine(
     var highRecv: Long =
       ArqFrame.NoSeq // highest sequence we have received (dedup + our outgoing ack)
     var ackOwed: Boolean = false // we were signaled by/received from the peer ⇒ owe it an ack
+    // The last round in which a frame from this peer DECRYPTED (`Delivered`) — the liveness signal
+    // the rekey timeout's mutually-live clock reads (offline-delegation.md §4.4). Duplicates
+    // (`Consumed`) do not refresh it. `Long.MinValue` = never.
+    var lastFrameRound: Long = Long.MinValue
     // The CONTENT ratchet: the full DH double ratchet with header encryption (post-compromise
     // security). The initiator can send immediately; the responder's sending chain opens only once it
     // has received the initiator's first frame (initiator-sends-first; see DoubleRatchet/dh-ratchet.md
@@ -395,6 +417,11 @@ final class Engine(
     /** Set once this attempt has outlived `PqRekey.TimeoutRounds` while past its point of no return
       * — i.e. it is being held for a peer that may never answer (see `maybeTimeoutRekey`). */
     var stranded: Boolean = false
+
+    /** Mutually live rounds counted toward `PqRekey.TimeoutRounds`, and pause rounds spent waiting
+      * for a silent peer (offline-delegation.md §4.4). Public counters, never key material. */
+    var liveRounds: Long = 0L
+    var pausedRounds: Long = 0L
     def wipe(): Unit =
       if kemSecret != null then Engine.this.wipe(kemSecret)
       kemSecret = null
@@ -603,10 +630,21 @@ final class Engine(
         noteAbort(rt, reason)
       case None => noteAbort(rt, reason)
 
-  /** Bounded attempt lifetime (§4.4) — but never past the point of no return (see `safeToAbort`). */
+  /** Bounded attempt lifetime (§4.4) — but never past the point of no return (see `safeToAbort`).
+    *
+    * Called once per tick, so it only ever sees rounds this device actually ran. The clock is
+    * paused-but-bounded (offline-delegation.md §4.4): the round counts toward `TimeoutRounds` if a
+    * frame from the peer decrypted within `LivenessWindowRounds`, or once the attempt has spent its
+    * `PauseAllowanceRounds`; otherwise it is spent from that allowance. Only `Delivered` frames
+    * refresh liveness — a peer's re-sealed duplicates never decrypt, so a peer that silently gave up
+    * still runs the clock down. The branches are on public counters only (Constitution II). */
   private def maybeTimeoutRekey(rt: BuddyRuntime, roundId: Long): Unit =
     rt.rekey.foreach { a =>
-      val overdue = roundId - a.startRound > PqRekey.TimeoutRounds
+      val peerRecentlyLive = rt.lastFrameRound != Long.MinValue &&
+        roundId - rt.lastFrameRound <= PqRekey.LivenessWindowRounds
+      if peerRecentlyLive || a.pausedRounds >= PqRekey.PauseAllowanceRounds then a.liveRounds += 1
+      else a.pausedRounds += 1
+      val overdue = a.liveRounds > PqRekey.TimeoutRounds
       if safeToAbort(rt, a) then
         if overdue then abortRekey(rt, "pq_rekey_timeout")
       else if overdue then
@@ -1650,6 +1688,7 @@ final class Engine(
                       // not a step.
                       if rt.highRecv != ArqFrame.NoSeq then rt.ackOwed = true
                     case DoubleRatchet.DecryptResult.Delivered(inner, position) =>
+                      rt.lastFrameRound = roundId // the peer is demonstrably live (§4.4 clock)
                       // ARQ inner block: [ackSeq][msgSeq][padded message].
                       // 1) Consume the PEER's ack: it reports the peer's highest received sequence FROM
                       //    US, so once it covers our in-flight head, that head is delivered+acked — drop

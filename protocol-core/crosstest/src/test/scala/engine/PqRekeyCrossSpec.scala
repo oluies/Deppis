@@ -438,21 +438,26 @@ class PqRekeyCrossSpec extends AnyFunSuite:
     val (mid, driveEnd) = driveUntilAt(p, p.alice, from = 200)(s => s.inProgress && !s.abortSafe)
     assert(mid.strandedAttemptAgeRounds == 0, "not stranded yet — it is merely past the line")
 
-    // Derive the round arithmetic from the ATTEMPT, not from literals: the stall fires strictly
-    // when `roundId - startRound > TimeoutRounds`, so these two rounds straddle that boundary
-    // exactly, whatever `TimeoutRounds` is set to and wherever the drive happened to start.
-    val insideAt = mid.attemptStartRound + PqRekey.TimeoutRounds // age == bound ⇒ NOT yet overdue
-    val strandedAt = insideAt + 1 // age > bound ⇒ overdue
+    // Bob vanishes: tick ONLY alice, round after round. The rekey clock counts mutually live rounds
+    // in ALICE'S OWN TICKS (offline-delegation.md §4.4), so the window is measured from the round
+    // bob vanished, not from the attempt's start round — rounds nobody ticked (this suite's drives
+    // skip some) never count. Once bob's frames stop decrypting alice spends the whole pause
+    // allowance, then counts again, and strands once the count exceeds `TimeoutRounds`.
+    val vanished = driveEnd
+    val latest = vanished + PqRekey.PauseAllowanceRounds + PqRekey.TimeoutRounds + 1
+    var round = vanished + 1
+    while round <= latest && status(p.alice, p.pid).strandedAttemptAgeRounds == 0 do
+      p.alice.tick(round): Unit
+      p.alice.drainEvents(): Unit
+      round += 1
+    val strandedAt = round - 1
+    // Not before the pause allowance is spent: an absence up to that long must never strand an
+    // attempt. (Not stranding by `latest` fails the `lastAbort` check below.)
     assert(
-      insideAt > driveEnd,
-      s"precondition: the drive (ended $driveEnd) must finish before the timeout could fire at " +
-        s"$insideAt — lower PqRekey.TimeoutRounds than the drive length and this test needs rework"
+      strandedAt > vanished + PqRekey.PauseAllowanceRounds,
+      s"stranded at $strandedAt, before the pause allowance ran out " +
+        s"(${vanished + PqRekey.PauseAllowanceRounds}) — an absence would strand an attempt too"
     )
-
-    // Bob vanishes: tick ONLY alice.
-    p.alice.tick(insideAt): Unit
-    assert(status(p.alice, p.pid).strandedAttemptAgeRounds == 0, "still inside the timeout")
-    p.alice.tick(strandedAt): Unit
 
     val s = status(p.alice, p.pid)
     assert(s.lastAbort == "pq_rekey_stranded", s"stranding must be reported: $s")
