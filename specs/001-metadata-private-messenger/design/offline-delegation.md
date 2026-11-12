@@ -572,11 +572,25 @@ Each phase is reviewable on its own and keeps the labeling rule: provider routin
 
 1. **T037 — failing tests first**, split by where the behavior lives so each later phase is
    verified by its own tests:
-   - **protocol-core** (`protocol-core/shared/src/test/scala/engine/`, next to
-     `RoundTransportSpec`), driving engines through a simulated provider and bundle:
+   - **protocol-core** — **landed** in
+     `protocol-core/crosstest/src/test/scala/engine/OfflineDelegationCrossSpec.scala`. It is in
+     `crosstest/`, not `shared/`, because the rekey scenarios need ML-KEM and every engine-level
+     rekey test already lives there; it runs on both the JVM and Scala.js. An absent device stops
+     ticking, and a simulated stale bundle replays its head on the wire.
      - the five rekey-timeout variants: four across an absence, one with a silent peer (§4.4);
-     - the MaxSkip-across-absence test (§4.5);
-     - the §3.4 ratchet-step bound.
+     - the MaxSkip-across-absence test (§4.5).
+
+     The four absence tests and the MaxSkip test fail today for the predicted reasons
+     (`pq_rekey_timeout` / `pq_rekey_stranded` during an absence, and nothing delivered once a
+     peer's chain has run past `MaxSkip`; a 300-round control absence delivers fine). They are
+     wrapped in `pendingUntilFixed`, so CI stays green and the wrapper must come off in the
+     Phase 2 PR that makes them pass. The silent-peer tests pass today and must keep passing.
+     The §3.4 ratchet-step bound is a property of the bundle builder, so it lands with the builder
+     in Phase 2.
+
+     Phase 2 must also update the existing `PqRekeyCrossSpec` test "stranding is OBSERVABLE",
+     which pins a stranding report at exactly `TimeoutRounds + 1` rounds of silence; under §4.4 the
+     report moves to the end of the pause allowance.
    - **End to end** (`server/provider/src/test/scala/`, created with T038):
      - A queues a message to B while B is offline; A **disconnects abruptly** (no
        announcement); B returns; the message arrives, then a second queued message arrives in
