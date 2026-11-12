@@ -17,7 +17,7 @@ moves attestation and key registration behind the provider (§4.2, §4.3), gates
 both sides (§4.4), and places the engine tests in protocol-core (§7). Revision 5 (roborev jobs
 2367, 2369) makes the client label self-certifying so the provider can't register its own keys
 (§4.3), bounds the rekey pause so a silent peer still times out (§4.4), fixes one response key
-(§4.6), and recomputes sizes for the sealed formats (§3.3).
+(§4.6), and recomputes sizes for the sealed formats (§3.3). Revision 6 (roborev job 2370) delivers the signed registration to both enclaves, makes failure responses well-formed seals under a throwaway key, and requires registration state to survive restarts or the sealing key to rotate (§4.3, §4.6).
 
 ## 1. What already works, and the one case that doesn't
 
@@ -176,9 +176,10 @@ device does not tick past rounds; those rounds were silent for every user of tha
   | `sealedRead` | token 32 + label tag 32 | 112 B |
   | **per slot** | | **≈ 540 B** |
 
-  Each cadence point (every F rounds) adds an attestation fetch (≈ 80 B) and a registration
-  request (≈ 160 B, §4.3), so a bundle carries H / F ≈ 24 of each, about 6 KB. At the 15 s round
-  interval (`schedule.Latency`), H = 5,760 (one day) is therefore about **3.1 MB per refresh**.
+  Each cadence point (every F rounds) adds, **for each of the two enclaves** (PING and the
+  store), an attestation fetch (≈ 80 B) and a registration request (≈ 160 B, §4.3): about 480 B per
+  cadence point, H / F ≈ 24 of them per bundle, about 12 KB. At the 15 s round interval
+  (`schedule.Latency`), H = 5,760 (one day) is therefore about **3.1 MB per refresh**.
 
   If the seals must be post-quantum like the rest of the stack (hybrid X25519 + ML-KEM-768
   HPKE, about 1,120 B of encapsulation per field), each slot grows to about 3.9 KB and a one-day
@@ -304,7 +305,11 @@ depends on it.
 it would learn when mail arrives and from how many buddies.
 
 **Change:** PING returns every digest sealed to a **device key** the device registers. The same
-registered key seals read responses (§4.6), so there is one registration flow, not two.
+key seals the store's read responses (§4.6). PING and the store are separate enclaves with separate
+attested keys, so the device sends **the same signed registration to both**, each sealed to that
+enclave's key, and each enclave verifies it independently with the rules below. There is one
+registration *format* and one device key, delivered twice. No enclave-to-enclave channel is needed,
+and neither enclave trusts the other's view of the key.
 
 **Who may register a key for a label.** Sealing a registration to the enclave keeps it secret but
 proves nothing about who sent it, and the label is not a secret: the provider knows it (§6) and so
@@ -327,7 +332,19 @@ what this section hides. The fix is to make the label **self-certifying**:
   same way, so there is no trust-on-first-use window and no direct enrolment channel to the
   backend: no one but the identity key's holder can produce a registration the enclave accepts.
 - **Replay and rollback.** The counter stops the provider replaying an old registration to roll the
-  key back to one it might later learn.
+  key back to one it might later learn. That only works while the enclave remembers the counter,
+  and the provider can keep an old sealed registration for as long as the enclave's sealing key can
+  still open it (an epoch of at least H + F rounds, plus H for retired keys, §4.2). So each enclave
+  must do one of two things:
+  - keep its per-label `(counter, device key)` state **durably and rollback-protected** across
+    restarts (sealed storage anchored to a monotonic counter the host can't reset), or
+  - if it restarts without that state, **generate a fresh sealing key and never open anything
+    sealed to an older one**, so no registration from before the restart can be replayed.
+
+  The second option is the fallback, and it costs availability. Bundled requests sealed to the old
+  key fail for the rest of their bundle: signals are dropped silently, writes are lost (the sender
+  retransmits once it is live again), reads come back as misses. The label has no registered key
+  until the device's next cadence registration. That is listed as a residual in §6.
 - **Dummies.** A bundle-carried dummy registration is marked as a dummy **inside** the seal; the
   enclave opens it and applies nothing. A dummy can never replace a key, and outside the seal it
   looks like a real registration.
@@ -337,8 +354,8 @@ what this section hides. The fix is to make the label **self-certifying**:
 **Cadence and rotation:**
 
 - **Cadence.** Registration and rotation requests run on the same fixed cadence as attestation
-  fetches (§4.2), and a bundle carries an identically shaped dummy request for each cadence point.
-  The backend never sees a device-timed request.
+  fetches (§4.2), one to each enclave, and a bundle carries an identically shaped dummy for each
+  enclave at each cadence point. The backend never sees a device-timed request.
 - **Rotation.** PING seals each round's digest (and the store each read response) to whichever key
   is registered at that moment; neither keeps anything old. The constraint is on the **device**: it
   keeps each retired private device key for H rounds after rotating, so it can still open receipts
@@ -347,9 +364,11 @@ what this section hides. The fix is to make the label **self-certifying**:
   shows the same mail.
 - The provider gets an opaque blob of fixed size every round and returns it in the receipt.
 
-Test (Phase 4): a registration or rotation forged by the provider, or by a buddy who knows the
-label, is rejected, and its response is indistinguishable from an accepted one; a replayed older
-registration is rejected; a dummy registration changes nothing.
+Tests (Phase 4), run against **both** PING and the store: a registration or rotation forged by the
+provider, or by a buddy who knows the label, is rejected, and its response is indistinguishable
+from an accepted one; a replayed older registration is rejected; a dummy registration changes
+nothing; after an enclave restart, replaying a registration from before the restart is rejected
+(whichever of the two restart rules the enclave uses).
 
 ### 4.4 Rekeys and absences
 
@@ -468,16 +487,22 @@ itself matches. So:
   where the oblivious-access guarantees already apply. The provider sees fixed-size ciphertext,
   fresh each time.
 - **Responses are sealed to the device's registered key.** The sealed read names the device's
-  `labelTag`; the store looks up the device key registered for that label (§4.3: the same key, the
-  same authenticated registration, the same rotation and device-side retention rules) and answers
+  `labelTag`; the store looks up the device key registered **with the store** for that label (§4.3:
+  the device sends the store its own copy of the signed registration, verified by the store
+  itself, with the same rotation and device-side retention rules) and answers
   **every** read — hit or miss — with a response of the same fixed size, sealed under that key and
   freshly randomized, so it never matches the bytes that were submitted. Per-request response keys
   were considered and rejected: they would need a pre-generated key per bundle slot, and they add
   nothing once registration is authenticated.
 - **Uniform failures.** If the enclave can't open a request (retired enclave key, malformed) or no
-  key is registered for the label, it has nothing to seal a response to. It returns **random bytes
-  of the fixed response size**. The device treats any response it can't open as a miss, so a
-  failure and a miss look the same to the provider and behave the same on the device.
+  key is registered for the label, it has nothing to seal a response to. Random bytes would not do:
+  a real X25519-based seal starts with an encoded public key, which always has its top bit clear
+  and lies on the curve, and uniform random bytes fail those checks about half the time (ML-KEM
+  ciphertexts have structure too). Instead the enclave **generates a throwaway key pair for that
+  request and seals a well-formed miss to it**, then discards the private key. The response has
+  exactly the distribution of a real sealed miss; the device can't open it and treats it as a miss.
+  So a failure and a miss look the same to the provider and to the backend host, and behave the same
+  on the device.
 
 With this, nothing the provider handles for A's write in round r matches anything it handles for
 B's read in round r + 1. In dev builds the store has no enclave key, so this phase lands behind the
@@ -516,6 +541,11 @@ may claim these properties.
   anything that links presence to buddies.
 - **Provider downtime** — every user of that provider goes silent at once. That reveals provider
   availability, not any one user's presence.
+- **Enclave restart without durable state** (§4.3 fallback) — the enclave rotates its sealing key,
+  so bundled requests sealed to the old key fail until each device refreshes: delegated signals are
+  dropped, writes are lost until the sender retransmits live, reads miss, and labels have no
+  registered key until the next cadence registration. This affects availability for every user at
+  once, not any one user's privacy.
 - **One message per buddy while away.** Stop-and-wait advances only on an ack the provider can't
   read, so a bundle retransmits each buddy's current head only. Messages queued behind it go out
   on return. See open question 1.
@@ -579,11 +609,16 @@ Each phase is reviewable on its own and keeps the labeling rule: provider routin
    - Choose and bind the sealing construction, with library known-answer tests on JVM and Scala.js.
    - Signals sealed to the PING enclave key every round, with the key epoch and silent-drop rules
      (§4.2).
-   - The identity key and self-certifying label, signed and counter-protected device-key
-     registration with in-seal dummies, rotation, and sealed digests (§4.3), in both the Scala dev
-     PING and the Rust sidecar, with the forged / replayed / dummy registration tests.
-   - Store requests sealed to the store enclave and fixed-size responses sealed to the device
-     (§4.6), in both the Scala dev store and the Rust `obsd`.
+   - The identity key and self-certifying label, and signed, counter-protected device-key
+     registration with in-seal dummies and rotation (§4.3), delivered to **both** enclaves and
+     verified by each: the Scala dev PING and the Rust sidecar, and the Scala dev store and the Rust
+     `obsd`. Restart handling per §4.3 (durable rollback-protected state, or rotate the sealing key
+     on restart). The forged / replayed / dummy / restart-replay registration tests run against
+     both enclaves.
+   - Sealed digests (§4.3).
+   - Store requests sealed to the store enclave and fixed-size responses sealed to the device,
+     with throwaway-key sealed misses on failure (§4.6), in both the Scala dev store and the Rust
+     `obsd`. Test: failure responses pass the same encoding checks as real sealed misses.
    - Attestation fetches and key registrations relayed through the provider on the fixed cadence,
      with bundle-carried dummies during absences (§4.2, §4.3).
    - Test: for a provider serving both A and B, the bytes it handles during a real A → B delivery
