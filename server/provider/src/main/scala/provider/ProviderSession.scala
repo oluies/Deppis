@@ -35,11 +35,18 @@ final class ProviderSession(
   private var submitted: Option[(Long, Boolean)] = None
 
   /** Online in `roundId`, after the provider's phase A: build the live set from the phase-A digest
-    * and hand it in before the cutoff. */
-  def beforeCutoff(roundId: Long): Unit =
-    val digest = provider.digestFor(user, roundId).getOrElse(Array.emptyByteArray)
-    val ops = engine.beginRound(roundId, digest)
-    submitted = Some(roundId -> provider.submitLive(user, ops))
+    * and hand it in before the cutoff. Returns whether it was handed in and accepted. Without the
+    * round's digest (the provider has not opened the round yet, or the call failed) nothing is built
+    * or handed in — a live set built on no digest would read every buddy as idle — and the caller
+    * may try again before the cutoff. */
+  def beforeCutoff(roundId: Long): Boolean =
+    provider.digestFor(user, roundId) match
+      case None => false
+      case Some(digest) =>
+        val ops = engine.beginRound(roundId, digest)
+        val accepted = provider.submitLive(user, ops)
+        submitted = Some(roundId -> accepted)
+        accepted
 
   /** Online in `roundId`, after the cutoff: apply the receipt — or, if the live set was refused
     * (late), a slot-ran receipt, so nothing of the live set is applied — then refresh the bundle on
