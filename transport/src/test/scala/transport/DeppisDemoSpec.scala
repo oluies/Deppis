@@ -10,6 +10,7 @@ class DeppisDemoSpec extends AnyFunSuite with ObsdHarness:
 
   test("DeppisDemo.run delivers Alice's message to Bob through obsd"):
     val notifyKey = DeppisDemo.devNotifyKey // single source — obsd + demo must agree
-    withObsd(notifyKey) { channel =>
+    // Provider routing writes one frame per user every round; give the store room (as the demo does).
+    withObsd(notifyKey, capacity = 4096) { channel =>
       assert(DeppisDemo.run(channel, notifyKey), "the demo should deliver the message end-to-end")
     }

@@ -13,15 +13,16 @@ import io.grpc.netty.shaded.io.netty.handler.ssl.{
   SslContextBuilder,
   SslProvider
 }
-import io.grpc.{ManagedChannel, Server}
+import io.grpc.{ManagedChannel, Server, ServerServiceDefinition}
 import metadatamessenger.messaging.v1.messaging.RoundServiceGrpc
+import metadatamessenger.provider.v1.provider.ProviderServiceGrpc
 import store.ObliviousStore
-import transport.RoundServiceImpl
+import transport.{ProviderServiceImpl, RoundServiceImpl}
 import java.security.cert.X509Certificate
 import scala.concurrent.ExecutionContext
 
-/** A **networked** gRPC host for the round service, secured with **TLS 1.3** (T020, contract
-  * `messaging.proto`). This is the real-port, real-handshake bind — distinct from the in-process
+/** A **networked** gRPC host for the round service (T020, contract `messaging.proto`) or the service
+  * provider's device front (T038, contract `provider.proto`), secured with **TLS 1.3**. This is the real-port, real-handshake bind — distinct from the in-process
   * service tests (`RoundServiceSpec` et al.) which use `InProcessServerBuilder` and no transport
   * security at all.
   *
@@ -78,11 +79,24 @@ object TlsRoundServer:
   /** Bind the `RoundService` (over `store`) on `port` (0 ⇒ ephemeral) with TLS 1.3 and a fresh dev
     * self-signed cert, then start it. */
   def bind(store: ObliviousStore, port: Int = 0)(using ec: ExecutionContext): TlsRoundServer =
+    bindService(RoundServiceGrpc.bindService(new RoundServiceImpl(store), ec), port)
+
+  /** Bind the service provider's device-facing `ProviderService` (contract `provider.proto`) on
+    * `port` (0 ⇒ ephemeral) with the same TLS 1.3 / hybrid-only key agreement and a fresh dev
+    * self-signed cert, then start it. Devices reach their provider here and nothing else; the
+    * provider's own backend connection is separate. The provider stays labeled DEV
+    * (`Provider.label`): TLS protects the hop, not what the provider itself can see. */
+  def bindProvider(provider: _root_.provider.Provider, port: Int = 0)(using
+      ec: ExecutionContext
+  ): TlsRoundServer =
+    bindService(ProviderServiceGrpc.bindService(new ProviderServiceImpl(provider), ec), port)
+
+  private def bindService(service: ServerServiceDefinition, port: Int): TlsRoundServer =
     val (kmf, cert) = DevCert.selfSignedManaged()
     val server = NettyServerBuilder
       .forPort(port)
       .sslContext(serverSsl(kmf))
-      .addService(RoundServiceGrpc.bindService(new RoundServiceImpl(store), ec))
+      .addService(service)
       .build()
       .start()
     new TlsRoundServer(server, cert)
