@@ -1,0 +1,111 @@
+syntax = "proto3";
+package metadatamessenger.provider.v1;
+
+// The untrusted service provider's DEVICE-FACING contract (design/offline-delegation.md §3, T038).
+//
+// A device never talks to the backend (store, notify) itself: every round it fetches its phase-A
+// digest here, hands in its live operations before the cutoff, and collects the receipt; while it
+// is away the provider runs its standing bundle instead. The provider holds no keys and makes no
+// decisions — it never interprets a token, frame, signal, digest or read result.
+//
+// LABELING (Constitution IV): DEV, NO METADATA PRIVACY. Until Phase 4 (§4.2, §4.3, §4.6) the write,
+// read and signal travel in the clear here, and digests and read responses come back in the clear,
+// so a provider serving both ends of a conversation can link them. No build may claim metadata
+// privacy over this contract before then.
+//
+// SESSIONS: `Register` returns a random session secret that every other call must present. It stops
+// one client acting in another user's name (submitting its live sets, replacing its bundle) — an
+// integrity / denial-of-service concern, not a privacy one. A user name can be registered once.
+service ProviderService {
+  rpc Register(RegisterRequest) returns (RegisterResponse);
+  rpc UploadBundle(UploadBundleRequest) returns (UploadBundleResponse);
+  rpc GetDigest(GetDigestRequest) returns (GetDigestResponse);
+  rpc SubmitLive(SubmitLiveRequest) returns (SubmitLiveResponse);
+  rpc CollectReceipt(CollectReceiptRequest) returns (CollectReceiptResponse);
+  rpc CollectAll(CollectAllRequest) returns (CollectAllResponse);
+}
+
+// A notify signal: the fixed-width label tag and the round-rotated bit.
+message Signal {
+  bytes label = 1;
+  uint32 bit = 2;
+}
+
+// One round's operations for one device (engine.RoundOps): exactly one write, one signal (the real
+// one if the write is accepted, else the decoy fallback) and one read. Fixed size per field.
+message RoundOps {
+  int64 round_id = 1;
+  bytes write_token = 2;
+  bytes frame = 3;
+  Signal signal = 4;
+  Signal fallback_signal = 5;
+  bytes read_token = 6;
+}
+
+// What ran for a round, with that round's phase-A digest.
+message Receipt {
+  int64 round_id = 1;
+  bool ran_live = 2;        // the device's live set ran (false: a bundle slot ran instead)
+  bool write_accepted = 3;
+  bool has_retrieved = 4;   // the read returned a frame
+  bytes retrieved = 5;
+  bytes digest = 6;
+}
+
+message RegisterRequest {
+  string user = 1;
+  bytes client_label = 2;
+}
+message RegisterResponse {
+  bool ok = 1;
+  bytes session = 2;        // present every later call with this; empty when !ok
+  string error = 3;
+}
+
+message UploadBundleRequest {
+  string user = 1;
+  bytes session = 2;
+  int64 from_round = 3;
+  repeated RoundOps slots = 4;
+}
+message UploadBundleResponse {
+  bool ok = 1;
+  string error = 2;
+}
+
+message GetDigestRequest {
+  string user = 1;
+  bytes session = 2;
+  int64 round_id = 3;
+}
+message GetDigestResponse {
+  bool ok = 1;              // false: no such round open, or not authorised
+  bytes digest = 2;
+}
+
+message SubmitLiveRequest {
+  string user = 1;
+  bytes session = 2;
+  RoundOps ops = 3;
+}
+message SubmitLiveResponse {
+  bool accepted = 1;        // false: refused (past the cutoff, duplicate, not open, not authorised)
+}
+
+message CollectReceiptRequest {
+  string user = 1;
+  bytes session = 2;
+  int64 round_id = 3;
+}
+message CollectReceiptResponse {
+  bool found = 1;
+  Receipt receipt = 2;
+}
+
+message CollectAllRequest {
+  string user = 1;
+  bytes session = 2;
+}
+message CollectAllResponse {
+  repeated Receipt receipts = 1;
+}

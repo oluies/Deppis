@@ -37,7 +37,7 @@ final class Provider(
     backend: RoundTransport,
     store: ProviderStore = InMemoryProviderStore(),
     val maxHorizon: Int = Delegation.HorizonRounds
-):
+) extends ProviderApi:
   require(maxHorizon > 0, "maxHorizon must be positive")
 
   /** Always DEV until Phase 4 seals what the provider relays (see the class doc). */
