@@ -2,6 +2,7 @@ package engine
 
 import org.scalatest.funsuite.AnyFunSuite
 import privacy.Privacy
+import java.nio.charset.StandardCharsets.UTF_8
 
 class EngineSpec extends AnyFunSuite:
 
@@ -102,6 +103,39 @@ class EngineSpec extends AnyFunSuite:
     val j = ujson.read(resp)
     assert(j("result")("safetyNumber").str.split(" ").length == 6)
     assert(!resp.contains("pairKey")) // key material never crosses the boundary
+
+  test("handle(addBuddy) takes the peer's notify label, and the engine signals THAT label"):
+    // Without `peerNotifyLabel` on the JSON boundary a JSON-driven engine could never signal its
+    // peer, and a provider-routed peer never receives. Check the effect, not the parsing: after a
+    // real send, the round's one signal goes to the peer's label, not to this client's decoy.
+    val signalled = scala.collection.mutable.ArrayBuffer.empty[Vector[Byte]]
+    val t = new RoundTransport:
+      def submit(token: Array[Byte], frame: Array[Byte]) = true
+      def retrieve(token: Array[Byte]) = None
+      def fetchDigest(roundId: Long, clientLabel: Array[Byte]) = new Array[Byte](64)
+      override def signal(roundId: Long, label: Array[Byte], bit: Int): Unit =
+        signalled += label.toVector
+    val codec = EngineCodec(Engine(Some(t), clientLabel = "me".getBytes(UTF_8)))
+    val peer = "the-peers-label".getBytes(UTF_8)
+    val b64 = java.util.Base64.getEncoder.encodeToString(peer)
+    val pairId = ujson
+      .read(
+        codec.handle(
+          s"""{"apiVersion":"1","command":"addBuddy","args":{"sharedSecret":"abc","role":"initiator","peerNotifyLabel":"$b64"}}"""
+        )
+      )("result")("pairId")
+      .str
+    codec.handle(
+      s"""{"apiVersion":"1","command":"confirmBuddy","args":{"pairId":"$pairId","matched":true}}"""
+    )
+    codec.handle(
+      s"""{"apiVersion":"1","command":"sendMessage","args":{"pairId":"$pairId","plaintext":"hi"}}"""
+    )
+    codec.handle("""{"apiVersion":"1","command":"tick","args":{"roundId":1}}""")
+    assert(
+      signalled == Seq(NotifyDigest.labelTag(peer).toVector),
+      "the real frame signals the peer"
+    )
 
   test("handle refuses an apiVersion mismatch before any state change"):
     val e = Engine()

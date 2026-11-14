@@ -15,6 +15,8 @@
 ///   * a future Scala.js engine binding (T019) — the real protocol/crypto.
 library;
 
+import 'dart:typed_data';
+
 /// API version this client speaks. The engine refuses calls on mismatch.
 const String engineApiVersion = '1';
 
@@ -131,9 +133,14 @@ abstract interface class ProtocolEngine {
   PrivacyStatus get privacyStatus;
   Stream<EngineEvent> get events;
 
+  /// [peerNotifyLabel] is the buddy's notify label, exchanged out of band at
+  /// pairing (like the shared secret). The engine signals it whenever it sends
+  /// the buddy a real frame; without it the buddy never learns it has mail, and
+  /// a provider-routed buddy never receives. Opaque bytes — not key material.
   Future<AddBuddyResult> addBuddy({
     required String sharedSecret,
     required BuddyRole role,
+    Uint8List? peerNotifyLabel,
   });
   Future<void> confirmBuddy({required String pairId, required bool matched});
   Future<void> removeBuddy({required String pairId});
