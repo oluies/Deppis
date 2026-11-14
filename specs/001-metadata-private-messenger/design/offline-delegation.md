@@ -678,8 +678,24 @@ Each phase is reviewable on its own and keeps the labeling rule: provider routin
        `ProviderSession.beforeCutoff` now refuses to build a live set without the round's
        digest, instead of reading every buddy as idle. `RoundDriverSpec` runs T037 on a
        simulated clock and checks the real timer.
-     - Moving the existing demo and TLS server wiring onto provider routing.
-     - A persistent `ProviderStore`.
+     - **Demo and TLS wiring — landed.** `TlsRoundServer.bindProvider` serves `ProviderService`
+       over the same TLS 1.3 / hybrid-only key agreement as the round service, and
+       `DeppisDemo` is provider-routed: the devices have no backend transport, reach the
+       provider over TLS, and the provider alone talks to the Rust `obsd`. The demo shows a
+       message delivered with both ends offline at different times. `DeppisDemoSpec` now runs
+       in CI's integration job. Not moved: the browser path (gRPC-web via Envoy), which needs a
+       Scala.js provider client.
+     - **Persistent `ProviderStore` — landed.** `provider.JdbcProviderStore`: one JDBC store
+       written against Postgres SQL — embedded H2 in a file (PostgreSQL mode, pure Java) by
+       default, a Postgres server in deployment (`plan.md`: "Postgres or embedded KV"). Every
+       operation is one transaction under one lock (right for one provider process; a replicated
+       provider over one database would need row locks). It also persists registrations — the
+       notify label and the SHA-256 of the gRPC session secret, never the secret — so after a
+       restart a provider still knows its users, still runs their stored bundles, and their
+       sessions still authenticate. A round open at the moment of a restart is lost: its live
+       sets never run and the devices treat it as slot-ran. `ProviderStoreSpec` runs one contract
+       against in-memory, H2 and Postgres (Postgres required in CI via a service container and
+       `REQUIRE_POSTGRES`), plus restart tests.
 
    The full Phase 3 list:
    - An untrusted `ProviderBuffer`: atomic bundle replace, the per-round arbiter with the cutoff,

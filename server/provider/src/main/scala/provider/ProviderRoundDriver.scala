@@ -58,11 +58,8 @@ final class ProviderRoundDriver(provider: Provider, val schedule: RoundSchedule 
     val exec: ScheduledExecutorService = Executors.newSingleThreadScheduledExecutor { r =>
       val t = Thread(r, "provider-round-driver"); t.setDaemon(true); t
     }
-    exec.scheduleAtFixedRate(
-      () =>
-        try step(clock())
-        catch case NonFatal(_) => System.err.println("[provider] round driver step failed"), 0L,
-      tickMillis,
-      TimeUnit.MILLISECONDS
-    ): Unit
+    val tick: Runnable = () =>
+      try step(clock())
+      catch case NonFatal(_) => System.err.println("[provider] round driver step failed")
+    exec.scheduleAtFixedRate(tick, 0L, tickMillis, TimeUnit.MILLISECONDS): Unit
     () => exec.shutdownNow(): Unit

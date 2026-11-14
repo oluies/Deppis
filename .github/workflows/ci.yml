@@ -32,6 +32,20 @@ jobs:
     env:
       # Cross-stack PQ TLS interop must actually run here, not cancel. See PqTlsInteropSpec.
       REQUIRE_PQ_INTEROP: "1"
+      # The provider store's Postgres run (ProviderStoreSpec) must run here, not cancel: it uses the
+      # service container below, and REQUIRE_POSTGRES turns "no database" into a failure.
+      REQUIRE_POSTGRES: "1"
+      PROVIDER_PG_URL: "jdbc:postgresql://localhost:5432/postgres?user=postgres&password=postgres"
+    services:
+      postgres:
+        image: postgres:18.7 # pinned, like every other toolchain here (Constitution XI)
+        env:
+          POSTGRES_PASSWORD: postgres # a throwaway CI database, not a secret
+        ports:
+          - "5432:5432"
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s --health-timeout 5s --health-retries 30
     steps:
       - uses: actions/checkout@v7
       - name: Install libsodium (crypto FFM tests)
@@ -195,7 +209,15 @@ jobs:
           ver="$(sed -n 's/^version = "\(.*\)"/\1/p' .scalafmt.conf)"
           [ -n "$ver" ] || { echo "::error::could not read the version field from .scalafmt.conf"; exit 1; }
           echo "scalafmt $ver (from .scalafmt.conf)"
-          cs launch "scalafmt:$ver" -- --test
+          # `--test` exits 0 when it cannot PARSE a file: it prints `error: ParseError=N` and simply
+          # skips that file, so an unparseable file is never format-checked and the gate stays green
+          # (it did, for provider/ProviderRoundDriver.scala). Fail on the parse error explicitly.
+          set -o pipefail
+          cs launch "scalafmt:$ver" -- --test 2>&1 | tee /tmp/scalafmt.out
+          if grep -q "ParseError" /tmp/scalafmt.out; then
+            echo "::error::scalafmt could not parse some files (see above) — they were not checked"
+            exit 1
+          fi
 
   rust:
     name: Rust — fmt + clippy + test

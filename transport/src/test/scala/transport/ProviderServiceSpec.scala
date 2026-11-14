@@ -78,6 +78,48 @@ class ProviderServiceSpec extends AnyFunSuite with ObsdHarness:
       assert(got.found && got.receipt.exists(_.ranLive), "alice's own live set ran")
     }
 
+  test("sessions survive a provider restart on a persistent store, and still register once"):
+    val path = java.nio.file.Files.createTempDirectory("provider-svc").resolve("store")
+    def serve(store: _root_.provider.JdbcProviderStore)(
+        body: (
+            _root_.provider.Provider,
+            ppb.ProviderServiceGrpc.ProviderServiceBlockingStub
+        ) => Unit
+    ): Unit =
+      val p = _root_.provider.Provider(devBackend(), store, maxHorizon = Horizon)
+      val name = InProcessServerBuilder.generateName()
+      val server = InProcessServerBuilder
+        .forName(name)
+        .directExecutor()
+        .addService(ppb.ProviderServiceGrpc.bindService(ProviderServiceImpl(p), global))
+        .build()
+        .start()
+      val channel = InProcessChannelBuilder.forName(name).directExecutor().build()
+      try body(p, ppb.ProviderServiceGrpc.blockingStub(channel))
+      finally
+        channel.shutdownNow()
+        server.shutdownNow(): Unit
+        store.close()
+
+    var session = ByteString.EMPTY
+    serve(_root_.provider.JdbcProviderStore.embedded(path)) { (_, stub) =>
+      val reg = stub.register(ppb.RegisterRequest("alice", ByteString.copyFrom(aLabel)))
+      assert(reg.ok)
+      session = reg.session
+    }
+    // A new provider process over the same store: the old session still authenticates.
+    serve(_root_.provider.JdbcProviderStore.embedded(path)) { (p, stub) =>
+      p.openRound(1).toOption.get
+      assert(stub.getDigest(ppb.GetDigestRequest("alice", session, 1)).ok, "the session survived")
+      assert(
+        !stub
+          .getDigest(ppb.GetDigestRequest("alice", ByteString.copyFrom(new Array[Byte](32)), 1))
+          .ok
+      )
+      val again = stub.register(ppb.RegisterRequest("alice", ByteString.copyFrom(aLabel)))
+      assert(!again.ok, "the name is still taken after the restart")
+    }
+
   // ======================================================= T037 end to end, devices over gRPC only
 
   /** Alice and Bob, each with ONLY a gRPC route to the provider. Bob goes offline, Alice queues two

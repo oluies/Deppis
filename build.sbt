@@ -272,7 +272,12 @@ lazy val server = (project in file("server"))
       .map(d => baseDirectory.value / d / "src" / "test" / "scala"),
     // ujson (OpenBaoClient) — made a direct dependency rather than relying on a transitive pull
     // through protocol-core/crypto, so the server keeps compiling if those drop upickle.
-    libraryDependencies ++= testDeps :+ ("com.lihaoyi" %% "upickle" % V.upickle)
+    libraryDependencies ++= testDeps ++ Seq(
+      "com.lihaoyi" %% "upickle" % V.upickle,
+      // provider.JdbcProviderStore: embedded H2 (PostgreSQL mode) by default, Postgres in deployment.
+      "com.h2database" % "h2" % V.h2,
+      "org.postgresql" % "postgresql" % V.postgresJdbc
+    )
   )
 
 // transport: gRPC contracts compiled by ScalaPB + the round service/client over them. Generated

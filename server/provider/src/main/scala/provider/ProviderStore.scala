@@ -5,17 +5,26 @@ import engine.{RoundOps, RoundReceipt}
 import scala.collection.mutable
 
 /** What the untrusted service provider keeps per user (`design/offline-delegation.md` §5): the
-  * standing bundle's unexecuted slots and the receipts not yet collected. Nothing else. Keyed by
-  * USER, not device (open question 4: multi-device should share one per-user schedule).
+  * user's registration, the standing bundle's unexecuted slots and the receipts not yet collected.
+  * Nothing else. Keyed by USER, not device (open question 4: multi-device should share one per-user
+  * schedule).
   *
   * Every value is opaque to the provider by construction — tokens are PRF outputs, frames are
   * ciphertext, and from Phase 4 the write, read and signal are sealed to the enclaves and the
   * digest and read response to the device. Until then the dev build stores them in the clear,
   * which is one reason provider routing is labeled `DEV, NO METADATA PRIVACY`.
   *
-  * An interface so a Postgres or embedded-KV store can replace [[InMemoryProviderStore]] (`plan.md`);
-  * implementations must make [[replaceBundle]] atomic and respect the bounds callers rely on. */
+  * Implementations: [[InMemoryProviderStore]] (dev, lost on restart) and [[JdbcProviderStore]]
+  * (embedded H2 or Postgres, survives a restart). They must make every operation atomic and respect
+  * the bounds callers rely on. */
 trait ProviderStore:
+  /** Record `user`'s registration: its notify label and, when the gRPC front issued one, the
+    * SHA-256 of its session secret (never the secret). Replaces an existing record. */
+  def putUser(user: StoredUser): Unit
+
+  /** Every registered user, in registration order. */
+  def users: Vector[StoredUser]
+
   /** Replace `user`'s standing bundle with `slots` (one per round, ascending), ATOMICALLY: a
     * concurrent reader sees either the whole old bundle or the whole new one. */
   def replaceBundle(user: String, slots: Vector[RoundOps]): Unit
@@ -46,10 +55,23 @@ trait ProviderStore:
 /** A round's receipt as the provider keeps it, with that round's phase-A digest (§3.1). */
 final case class StoredReceipt(receipt: RoundReceipt, digest: Array[Byte])
 
+/** A registered user: its notify label and, if the gRPC front issued a session, the SHA-256 of that
+  * session secret. */
+final case class StoredUser(
+    user: String,
+    clientLabel: Array[Byte],
+    sessionHash: Option[Array[Byte]]
+)
+
 /** The in-memory [[ProviderStore]] (dev). Every operation is atomic under one lock. */
 final class InMemoryProviderStore extends ProviderStore:
+  private val registered = mutable.LinkedHashMap.empty[String, StoredUser]
   private val bundles = mutable.Map.empty[String, mutable.TreeMap[Long, RoundOps]]
   private val receipts = mutable.Map.empty[String, mutable.TreeMap[Long, StoredReceipt]]
+
+  def putUser(user: StoredUser): Unit = synchronized { registered(user.user) = user }
+
+  def users: Vector[StoredUser] = synchronized(registered.values.toVector)
 
   def replaceBundle(user: String, slots: Vector[RoundOps]): Unit = synchronized {
     bundles(user) = mutable.TreeMap.from(slots.map(s => s.roundId -> s))

@@ -46,20 +46,49 @@ final class Provider(
   def metadataPrivate: Boolean = privacyStatus.metadataPrivate
   def label: String = privacyStatus.label
 
-  private val labels = mutable.LinkedHashMap.empty[String, Array[Byte]] // user -> client label
+  // user -> client label / session-secret hash, reloaded from the store so registrations survive a
+  // restart of the provider when the store does (JdbcProviderStore).
+  private val labels = mutable.LinkedHashMap.empty[String, Array[Byte]]
+  private val sessionHashes = mutable.Map.empty[String, Array[Byte]]
+  store.users.foreach { u =>
+    labels(u.user) = u.clientLabel
+    u.sessionHash.foreach(h => sessionHashes(u.user) = h)
+  }
   private var open: Option[Long] = None // the round between phase A and the cutoff
   private var lastClosed: Long = Long.MinValue
   private val digests = mutable.Map.empty[String, Array[Byte]] // this open round's phase-A digests
   private val live = mutable.Map.empty[String, RoundOps] // live sets received for the open round
 
   /** Register `user` with its notify `clientLabel`. Idempotent; the label is fixed once set. */
-  def register(user: String, clientLabel: Array[Byte]): Either[String, Unit] = synchronized {
-    labels.get(user) match
-      case Some(l) if !l.sameElements(clientLabel) => Left("user already registered with a label")
-      case _ =>
-        labels(user) = clientLabel.clone()
-        Right(())
+  def register(user: String, clientLabel: Array[Byte]): Either[String, Unit] =
+    register(user, clientLabel, sessionHash = None)
+
+  /** Register `user`, optionally with the SHA-256 of the session secret the gRPC front issued it, and
+    * persist the registration. A user name longer than [[Provider.MaxUserLength]] is refused. */
+  def register(
+      user: String,
+      clientLabel: Array[Byte],
+      sessionHash: Option[Array[Byte]]
+  ): Either[String, Unit] = synchronized {
+    if user.isEmpty || user.length > Provider.MaxUserLength then Left("bad user name")
+    else
+      labels.get(user) match
+        case Some(l) if !l.sameElements(clientLabel) => Left("user already registered with a label")
+        case _ =>
+          labels(user) = clientLabel.clone()
+          sessionHash.foreach(h => sessionHashes(user) = h.clone())
+          store.putUser(
+            StoredUser(user, clientLabel.clone(), sessionHashes.get(user).map(_.clone()))
+          )
+          Right(())
   }
+
+  /** Whether `user` is registered (in this process or, with a persistent store, before a restart). */
+  def isRegistered(user: String): Boolean = synchronized(labels.contains(user))
+
+  /** The SHA-256 of `user`'s session secret, if the gRPC front issued one. */
+  def sessionHashOf(user: String): Option[Array[Byte]] =
+    synchronized(sessionHashes.get(user).map(_.clone()))
 
   /** Replace `user`'s standing bundle (§3.3), atomically. Refused if the bundle is longer than
     * `maxHorizon`, not one slot per consecutive round, or starts at or before a closed round. */
@@ -145,3 +174,7 @@ final class Provider(
   /** Observability + tests: `user`'s unexecuted slots and kept receipts. */
   def slotCount(user: String): Int = synchronized(store.slotCount(user))
   def receiptCount(user: String): Int = synchronized(store.receiptCount(user))
+
+object Provider:
+  /** Longest accepted user name — bounded so every store can index it. */
+  val MaxUserLength: Int = 256
