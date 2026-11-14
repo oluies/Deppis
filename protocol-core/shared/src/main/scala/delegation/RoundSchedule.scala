@@ -1,4 +1,4 @@
-package provider
+package delegation
 
 /** The public, network-wide round schedule (`design/offline-delegation.md` §3.2): round `r` opens at
   * `epochMillis + r × intervalMillis` (phase A) and its cutoff falls `cutoffMillis` later (phase B).

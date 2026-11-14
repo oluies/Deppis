@@ -1,5 +1,7 @@
 package provider
 
+import delegation.RoundSchedule
+
 import java.util.concurrent.{Executors, ScheduledExecutorService, TimeUnit}
 import scala.util.control.NonFatal
 
