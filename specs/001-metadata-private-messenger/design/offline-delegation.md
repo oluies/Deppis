@@ -666,10 +666,20 @@ Each phase is reviewable on its own and keeps the labeling rule: provider routin
      provider's backend; the `obsd` case runs in CI's integration job under its
      canceled/ignored/pending-zero guard and by name.
 
-     Follow-ups, not in this phase: a wall-clock round driver that opens and closes provider
-     rounds with a real cutoff (today the owner of the `Provider` drives the clock, as tests do);
-     moving the existing demo and TLS server wiring onto provider routing; a persistent
-     `ProviderStore`.
+     Follow-ups after the phase:
+     - **Wall-clock round driver — landed.** `provider.RoundSchedule` is the public, network-wide
+       schedule (round `r` opens at `epoch + r × interval`; its cutoff is `cutoffMillis` later;
+       defaults 15 s / 10 s). `provider.ProviderRoundDriver` opens and closes the provider's
+       rounds on it, enforcing the cutoff to within one tick; a round whose cutoff has already
+       passed is skipped, not replayed in a burst (the §6 provider-downtime residual, counted in
+       `skippedRounds`). `provider.DeviceRoundDriver` hands a device's live set in once its
+       provider has opened the round (retrying until then, never after `cutoff − margin`) and
+       applies the receipt after the cutoff, finishing any round it slept through.
+       `ProviderSession.beforeCutoff` now refuses to build a live set without the round's
+       digest, instead of reading every buddy as idle. `RoundDriverSpec` runs T037 on a
+       simulated clock and checks the real timer.
+     - Moving the existing demo and TLS server wiring onto provider routing.
+     - A persistent `ProviderStore`.
 
    The full Phase 3 list:
    - An untrusted `ProviderBuffer`: atomic bundle replace, the per-round arbiter with the cutoff,
