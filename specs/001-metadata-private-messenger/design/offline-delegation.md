@@ -683,8 +683,15 @@ Each phase is reviewable on its own and keeps the labeling rule: provider routin
        `DeppisDemo` is provider-routed: the devices have no backend transport, reach the
        provider over TLS, and the provider alone talks to the Rust `obsd`. The demo shows a
        message delivered with both ends offline at different times. `DeppisDemoSpec` now runs
-       in CI's integration job. Not moved: the browser path (gRPC-web via Envoy), which needs a
-       Scala.js provider client.
+       in CI's integration job.
+     - **Browser client — Scala.js and server sides landed.** The device-side logic moved into
+       `protocol-core` as the shared, asynchronous `delegation.DeviceSession` and
+       `delegation.DeviceClock` (with `delegation.RoundSchedule`); the JVM's `ProviderSession` and
+       `DeviceRoundDriver` are now synchronous wrappers over them. `engine.ProviderSessionJs`
+       exports the same session to JavaScript over a host-implemented, Promise-based
+       `JsProviderApi`, and `GrpcWebBackendServer` serves `ProviderService` with a running round
+       clock behind Envoy. `DeviceClock` now refuses margins that leave no submit window.
+       Remaining: the Dart/Flutter host over gRPC-web (`grpc-web-transport.md`).
      - **Persistent `ProviderStore` — landed.** `provider.JdbcProviderStore`: one JDBC store
        written against Postgres SQL — embedded H2 in a file (PostgreSQL mode, pure Java) by
        default, a Postgres server in deployment (`plan.md`: "Postgres or embedded KV"). Every

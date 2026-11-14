@@ -1,7 +1,7 @@
 package provider
 
 import crypto.Crypto
-import engine.{BuddyRole, DelegationBundle, Engine, EngineEvent, RoundOps, RoundTransport}
+import engine.{BuddyRole, DelegationBundle, Engine, EngineEvent, RoundTransport}
 import org.scalatest.funsuite.AnyFunSuite
 import ping.DevNotificationServer
 

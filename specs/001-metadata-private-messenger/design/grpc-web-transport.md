@@ -6,7 +6,53 @@ both proven in CI; this is the network glue that backs `JsTransport` in a browse
 **Relates to**: T032b (the `JsTransport` host-staging contract), T020 (the gRPC server), the
 `contracts/*.proto` services.
 
-## The path
+## Provider-routed browser path (current)
+
+> **Supersedes the Web-Worker plan below for provider routing** (`offline-delegation.md` §3). The
+> engine's round is now split into `beginRound` / `applyReceipt` (Option B, built for the provider),
+> so a browser drives it with ordinary async calls: no Web Worker, no `SharedArrayBuffer`, no
+> cross-origin-isolation headers. The direct store/notify path below remains for reference.
+
+```
+Flutter web (browser tab)
+  └─ ProtocolEngine (Scala.js, provider-routed: `new ProtocolEngine(undefined, label)`)
+       └─ ProviderSession (Scala.js: the shared delegation.DeviceSession + DeviceClock)
+            └─ JsProviderApi (host, async)  ── gRPC-web ──► Envoy ──► ProviderService
+                                                                     (GrpcWebBackendServer: provider
+                                                                      + its wall-clock round driver)
+```
+
+The session logic is NOT reimplemented for the browser: `engine.ProviderSessionJs` wraps the same
+`delegation.DeviceSession` and `delegation.DeviceClock` the JVM runs (`provider.ProviderSession` and
+`provider.DeviceRoundDriver` are thin synchronous wrappers over them), so the JVM suites — in
+process, over gRPC and over the Rust `obsd` — test the code the browser runs.
+
+**What the host implements** — one Promise-returning method per `provider.proto` RPC, moving opaque
+bytes, and adding the session secret `Register` returned to every later call itself:
+
+| `JsProviderApi` | `ProviderService` RPC | resolves to |
+|---|---|---|
+| `register(user, clientLabel)` | `Register` | `true` iff `ok` (keep `session`) |
+| `uploadBundle(user, fromRound, slots)` | `UploadBundle` | `true` iff `ok` |
+| `getDigest(user, roundId)` | `GetDigest` | `digest`, or `null` when `!ok` |
+| `submitLive(user, ops)` | `SubmitLive` | `accepted` |
+| `collectReceipt(user, roundId)` | `CollectReceipt` | the receipt, or `null` when `!found` |
+| `collectAll(user)` | `CollectAll` | the number of receipts |
+
+`RoundOps` and receipts cross as plain JS objects shaped like the proto messages
+(`{ roundId, writeToken, frame, signal: { label, bit }, fallbackSignal: { label, bit }, readToken }`;
+`{ roundId, ranLive, writeAccepted, retrieved }`). A rejected Promise is treated as a refusal (the
+round's bundle slot runs) and never escapes into a round. The app then calls
+`session.start(firstRound)` once and `session.step(Date.now())` on a timer while in the foreground.
+
+**Status.** Scala.js side and server side are done and tested: `ProviderSessionJsSpec` drives the
+exported API through Promise-based host calls under Node; `DeviceSessionCrossSpec` runs the shared
+session on both platforms; `GrpcWebBackendServerSpec` reaches `ProviderService` on the Envoy
+upstream over h2c. **Not done:** the Dart/Flutter host that implements `JsProviderApi` over gRPC-web,
+and a browser → Envoy → provider run in the `deploy/grpc-web/` harness. Labeled
+`DEV, NO METADATA PRIVACY` like everything provider-routed until Phase 4.
+
+## The path (direct store/notify, superseded for provider routing)
 
 ```
 Flutter web (browser tab)

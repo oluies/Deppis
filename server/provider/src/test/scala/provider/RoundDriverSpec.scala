@@ -1,5 +1,7 @@
 package provider
 
+import delegation.RoundSchedule
+
 import crypto.Crypto
 import engine.{BuddyRole, Engine, EngineEvent, RoundTransport}
 import org.scalatest.funsuite.AnyFunSuite
