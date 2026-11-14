@@ -257,10 +257,11 @@ jobs:
           # ProviderServiceSpec drives the networked service provider with obsd as ITS backend
           # (device → gRPC → provider → gRPC → obsd, design/offline-delegation.md §3). Like every obsd
           # test it cancels without the binary, so this is the only job where it can actually run.
+          # DeppisDemoSpec runs the runnable demo (now provider-routed over TLS) for the same reason.
           OBSD_BIN="$(pwd)/oblivious-sidecar/target/debug/obsd" \
           PINGD_BIN="$(pwd)/oblivious-sidecar/target/debug/pingd" \
           sbt -batch -no-colors \
-            "transport/testOnly transport.SidecarIntegrationSpec transport.ProviderServiceSpec" \
+            "transport/testOnly transport.SidecarIntegrationSpec transport.ProviderServiceSpec transport.DeppisDemoSpec" \
             2>&1 | tee /tmp/split.out
           # ASSERT ON THE SUMMARY COUNTERS, not on one substring. A cancelled test is not a passing
           # test — but neither is an IGNORED one, and an earlier revision of this guard could not see
@@ -300,6 +301,7 @@ jobs:
             "the \`both\` role DOES warn when it falls back to the dev notify key"
             "pingd DOES warn when it falls back to the dev notify key"
             "T037 over gRPC with the real Rust obsd as the provider's backend"
+            "DeppisDemo.run delivers Alice's message to Bob through obsd"
           )
           missing=0
           for name in "${required[@]}"; do

@@ -13,28 +13,37 @@ network observer — or the relay operator — cannot tell an active conversatio
 ## Run the prototype
 
 The headless prototype shows the whole path working end to end: two independent engines pair out of
-band, then a message is delivered metadata-privately through the **real Rust `obsd` sidecar**.
+band and are routed through an untrusted **service provider** ([`design/offline-delegation.md`](specs/001-metadata-private-messenger/design/offline-delegation.md)),
+which alone talks to the **real Rust `obsd` sidecar**. The devices reach the provider over TLS 1.3.
 
 ```bash
 scripts/run-demo.sh
 ```
 
-The script builds `obsd` and runs the demo. Expected output:
+The script builds `obsd` and runs the demo. Expected output (abbreviated):
 
 ```
-spawning obsd (real Rust sidecar) on 127.0.0.1:<port> …
-backend=Dev  metadataPrivate=false  label="DEV, NO METADATA PRIVACY"
+== Deppis metadata-private messenger — headless demo (provider-routed) ==
+provider: label="DEV, NO METADATA PRIVACY" metadataPrivate=false
+devices ↔ provider: TLS 1.3 on port <port>;  provider ↔ obsd: gRPC
 [alice] paired with bob — safetyNumber 92349 49678 63182 72023 82353 36590
 [bob  ] paired with alice — safetyNumber 92349 49678 63182 72023 82353 36590
 ✓ safety numbers match → out-of-band verification succeeds
-[alice] round 1: wrote REAL  frame (256B, indistinguishable)
-[bob  ] round 1: notified — mail waiting (sender identity NOT revealed)
-[bob  ] round 1: retrieved from bffcbbd5…: "see you at dusk"
-✓ delivered end-to-end through the real obsd sidecar
+[round]   1: alice=live   bob=live    → backend saw 2 writes
+[bob  ] goes offline — no warning; his standing bundle keeps his rounds going
+[alice] queued: "see you at dusk" (bob is offline)
+[round]   4: alice=live   bob=bundle  → backend saw 2 writes
+[alice] goes offline too — now BOTH run from bundles; the backend still sees 2 writes
+[round]  11: alice=bundle bob=bundle  → backend saw 2 writes
+[bob  ] comes back online (alice is still away)
+[bob  ] round 16: received "see you at dusk" — from alice's bundle, while she was offline
+✓ delivered with BOTH ends offline at different times: "see you at dusk"
 ```
 
-Every round each client writes exactly one 256-byte frame (real or cover) and reads once, so active
-and idle rounds are indistinguishable (FR-012).
+Every round the provider runs exactly one write and one read per user — the device's own live
+operations when it is online, its precomputed standing bundle when it is not — so the backend sees
+the same traffic whether a device is active, idle or offline (FR-012). The provider itself still
+sees everything in the clear until the design's Phase 4 sealing lands, hence the DEV label.
 
 **Requirements:** `cargo` (Rust) and `sbt` with **JDK 22+** (the crypto layer uses the finalized
 Foreign Function & Memory API — JEP 454, GA in JDK 22 — to call libsodium). The demo prints the
@@ -48,7 +57,7 @@ Foreign Function & Memory API — JEP 454, GA in JDK 22 — to call libsodium). 
 | `crypto` | Scala 3 JVM + FFM | Wrappers over libsodium, with KATs; plus the audited `org.signal:libsignal-client` ratchet as the JVM **cross-check reference** (not the content path) |
 | `server` | JVM Scala | PING/PONG/provider/attestation fronts; dev store + notify; DCAP attestation + OpenBao key release |
 | `oblivious-sidecar` | Rust | Oblivious primitives + PONG store + sealed-notification aggregation (`obsd` — the real privacy core) |
-| `transport` | Scala + gRPC (ScalaPB) | gRPC contracts + the client engine's `RoundTransport` over the sidecar; the `DeppisDemo` launcher |
+| `transport` | Scala + gRPC (ScalaPB) | gRPC contracts, the client engine's `RoundTransport` over the sidecar, the service provider's TLS front + device client; the `DeppisDemo` launcher |
 | `anonymity` | Scala | `AnonymityLayer` + Groove mixnet stub |
 | `clients/flutter` | Flutter/Dart | Presentation only; drives the Scala.js engine |
 

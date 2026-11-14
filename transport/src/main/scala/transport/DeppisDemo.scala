@@ -7,19 +7,23 @@ import java.util.concurrent.TimeUnit
 import metadatamessenger.store.v1.{store as spb}
 import metadatamessenger.notify.v1.{notify as npb}
 import engine.{BuddyRole, Engine, EngineEvent}
+import metadatamessenger.provider.v1.provider as ppb
+import scala.concurrent.ExecutionContext
 import ping.DevNotificationServer
 import crypto.Crypto
 
 /** Headless runnable demo (the "core" prototype). Two independent client engines — Alice and Bob —
-  * pair out of band, then Alice sends Bob a message that is delivered through the **real Rust `obsd`
-  * sidecar**, the same path the cross-process tests exercise (`TwoPartyE2ESpec`,
-  * `EngineBackendE2ESpec`). Every round each client writes exactly one frame (real or cover) and
-  * reads exactly once, so an observer cannot tell an active round from an idle one (FR-012).
+  * pair out of band, then Alice sends Bob a message delivered through the **real Rust `obsd`
+  * sidecar**, with both devices routed through an untrusted SERVICE PROVIDER
+  * (`design/offline-delegation.md`): devices talk only to the provider over TLS 1.3, and the
+  * provider runs one write and one read per user per round against obsd — the device's live set
+  * when it is online, its standing bundle when it is not — so an observer of the backend cannot
+  * tell an active round from an idle one, or an online device from an offline one (FR-012).
   *
   * THIS IS A DEV BUILD: the dev store/notify provide NO access-pattern privacy and the run is NOT
-  * attested, so it reports the `DEV, NO METADATA PRIVACY` label (Constitution IV). The demo also
-  * plays the PING aggregation front (sealing Bob's notify bit when Alice sends a real frame) — that
-  * bridge is not yet a standalone process; it is clearly marked below.
+  * attested, and the provider relays plaintext until Phase 4, so it reports the
+  * `DEV, NO METADATA PRIVACY` label (Constitution IV). The provider also seals notify tokens with
+  * the dev key obsd opens them with; that is clearly marked below.
   *
   * Run: build obsd first (`cargo build --bin obsd` in `oblivious-sidecar/`), then
   *   `sbt "transport/runMain transport.DeppisDemo"`
@@ -27,6 +31,10 @@ import crypto.Crypto
 object DeppisDemo:
 
   private def log(who: String, msg: String): Unit = println(f"  [$who%-5s] $msg")
+
+  // Small horizon and refresh cadence so the demo is short; production uses engine.Delegation.
+  private val Horizon = 60
+  private val Refresh = 10
 
   /** The dev notify key obsd opens tokens with AND the PING-front stand-in seals with — one source
     * so the two never silently diverge. A fresh array per call (never shared mutable state). */
@@ -65,92 +73,114 @@ object DeppisDemo:
 
   /** Drive the whole flow against an already-connected `obsd` channel. Returns `true` iff Alice's
     * message reached Bob. Pure of process management / `sys.exit`, so the integration suite can run
-    * it against the test `ObsdHarness`. */
+    * it against the test `ObsdHarness`.
+    *
+    * PROVIDER-ROUTED (`design/offline-delegation.md` §3): the two devices never touch obsd. Each
+    * reaches its service provider over TLS 1.3 (`ProviderService`), and the provider alone talks to
+    * obsd. The demo plays the provider's round clock, so the run is fast and deterministic. The
+    * story is the case delegation exists for: Bob goes offline, Alice queues a message and then
+    * disconnects too, Bob comes back — and the message reaches him from Alice's standing bundle
+    * while she is still away. */
   def run(channel: ManagedChannel, notifyKey: Array[Byte]): Boolean =
     val storeStub = spb.ObliviousStoreGrpc.blockingStub(channel)
     val notifyStub = npb.NotificationServiceGrpc.blockingStub(channel)
-
     val aliceLabel = "alice-client".getBytes
     val bobLabel = "bob-client".getBytes
-    // DEV PING-front stand-in: seals notify tokens with the key obsd opens with (the REAL front seals
-    // server-side INSIDE the attested enclave, so a client never holds the key). The engine drives one
-    // signal per round through this — real to the peer, or a decoy — so notify volume is uniform.
+    // The PROVIDER's backend connection to obsd. DEV: the provider seals notify tokens with the key
+    // obsd opens with; Phase 4 moves sealing onto the device (design §4.2).
     val sealer = DevNotificationServer(notifyKey)
-    val seal: (Long, Int, Array[Byte]) => Array[Byte] = (r, b, l) => sealer.issueToken(r, b, l)
-    def front(): GrpcRoundTransport =
-      new GrpcRoundTransport(
-        new EnclaveObliviousStore(storeStub, attested = false),
-        new EnclaveNotificationClient(notifyStub, attested = false),
-        notifySealer = Some(seal)
-      )
-    val alice = Engine(Some(front()), clientLabel = aliceLabel)
-    val bob = Engine(Some(front()), clientLabel = bobLabel)
-
-    println("\n== Deppis metadata-private messenger — headless demo ==")
-    val ps = alice.privacyStatus
-    println(
-      s"""  backend=${ps.backend}  metadataPrivate=${ps.metadataPrivate}  label="${ps.label}"\n"""
+    val backend = new GrpcRoundTransport(
+      new EnclaveObliviousStore(storeStub, attested = false),
+      new EnclaveNotificationClient(notifyStub, attested = false),
+      notifySealer = Some((r, b, l) => sealer.issueToken(r, b, l))
     )
+    val provider = _root_.provider.Provider(backend, maxHorizon = Horizon)
+    given ExecutionContext = ExecutionContext.global
+    val server = round.TlsRoundServer.bindProvider(provider)
+    val channels = Seq(server.trustingChannel(), server.trustingChannel())
+    try
+      def route(ch: ManagedChannel) = GrpcProviderClient(ppb.ProviderServiceGrpc.blockingStub(ch))
+      // No transport of their own: the provider is each device's only backend connection.
+      val alice = Engine(clientLabel = aliceLabel)
+      val bob = Engine(clientLabel = bobLabel)
 
-    // 1) Out-of-band pairing: same shared secret, opposite roles; safety numbers compared by hand.
-    val secret = "meet-me-at-the-old-bridge".getBytes
-    // Each side learns the OTHER's notify label at pairing, so its engine can fire the peer's
-    // "mail waiting" when it sends a real frame.
-    val a = alice.addBuddy(secret, BuddyRole.Initiator, peerNotifyLabel = bobLabel).toOption.get
-    alice.confirmBuddy(a.pairId, matched = true); alice.drainEvents()
-    val b = bob.addBuddy(secret, BuddyRole.Responder, peerNotifyLabel = aliceLabel).toOption.get
-    bob.confirmBuddy(b.pairId, matched = true); bob.drainEvents()
-    log("alice", s"paired with bob — safetyNumber ${a.safetyNumber}")
-    log("bob", s"paired with alice — safetyNumber ${b.safetyNumber}")
-    if a.safetyNumber != b.safetyNumber then
-      println("  ✗ safety numbers differ — pairing would be rejected")
-      return false
-    println("  ✓ safety numbers match → out-of-band verification succeeds\n")
-
-    // 2) Alice queues a message.
-    val message = "see you at dusk"
-    alice.sendMessage(a.pairId, message)
-    log("alice", s"""queued message: "$message"""")
-    println("\n  driving rounds — each client writes one frame (real or cover) and reads once:\n")
-
-    // 3) Run rounds until delivered or the budget is spent. Bob also writes a cover frame each round
-    //    (uniform traffic, FR-012) — we narrate the Alice→Bob direction.
-    var delivered = false
-    var round = 1L
-    val maxRounds = 5L
-    while !delivered && round <= maxRounds do
-      // The engine drives notify itself now: each tick emits exactly one signal through the transport —
-      // real to Bob when a real frame went out, else a decoy — so notify volume is uniform every round
-      // (active-vs-idle indistinguishable at the notify layer, FR-012), not just on real rounds.
-      val ad = alice.tick(round).toOption.get
-      val aliceReal = !ad.carrier
-      log(
-        "alice",
-        f"round $round: wrote ${
-            if aliceReal then "REAL  frame" else "cover frame"
-          } (256B, indistinguishable)"
+      println("\n== Deppis metadata-private messenger — headless demo (provider-routed) ==")
+      println(
+        s"""  provider: label="${provider.label}" metadataPrivate=${provider.metadataPrivate}"""
       )
+      println(s"  devices ↔ provider: TLS 1.3 on port ${server.port};  provider ↔ obsd: gRPC\n")
 
-      bob.tick(round)
-      val evs = bob.drainEvents()
-      val gotNotify = evs.exists(_.isInstanceOf[EngineEvent.Notified])
-      val gotMsg = evs.collectFirst { case m: EngineEvent.MessageReceived => m }
-      if gotNotify then
-        log("bob", f"round $round: notified — mail waiting (sender identity NOT revealed)")
-      gotMsg match
-        case Some(EngineEvent.MessageReceived(pid, txt, _)) =>
-          log("bob", s"""round $round: retrieved from $pid: "$txt"""")
-          delivered = true
-        case _ =>
-          if !gotNotify then log("bob", f"round $round: read a cover frame — nothing for me")
-      round += 1
+      // 1) Out-of-band pairing: same shared secret, opposite roles; safety numbers compared by hand.
+      val secret = "meet-me-at-the-old-bridge".getBytes
+      val a = alice.addBuddy(secret, BuddyRole.Initiator, peerNotifyLabel = bobLabel).toOption.get
+      alice.confirmBuddy(a.pairId, matched = true); alice.drainEvents()
+      val b = bob.addBuddy(secret, BuddyRole.Responder, peerNotifyLabel = aliceLabel).toOption.get
+      bob.confirmBuddy(b.pairId, matched = true); bob.drainEvents()
+      log("alice", s"paired with bob — safetyNumber ${a.safetyNumber}")
+      log("bob", s"paired with alice — safetyNumber ${b.safetyNumber}")
+      if a.safetyNumber != b.safetyNumber then
+        println("  ✗ safety numbers differ — pairing would be rejected")
+        return false
+      println("  ✓ safety numbers match → out-of-band verification succeeds\n")
 
-    println()
-    if delivered then
-      println(s"""  ✓ delivered end-to-end through the real obsd sidecar: "$message"""")
-    else println("  ✗ not delivered within the round budget")
-    println(s"""  privacy label throughout: "${alice.privacyStatus.label}"\n""")
-    delivered
+      val sa = _root_.provider.ProviderSession(
+        "alice",
+        alice,
+        route(channels(0)),
+        aliceLabel,
+        Refresh,
+        Horizon
+      )
+      val sb =
+        _root_.provider.ProviderSession("bob", bob, route(channels(1)), bobLabel, Refresh, Horizon)
+      var aliceUp = true
+      var bobUp = true
+      var delivered: Option[(Long, String)] = None
+      // One round: the provider opens it, online devices hand in their live sets, the cutoff runs
+      // exactly one operation set per user (live, else the standing-bundle slot), then online
+      // devices apply their receipts.
+      def round(r: Long): Unit =
+        provider.openRound(r).toOption.get
+        if aliceUp then sa.beforeCutoff(r): Unit
+        if bobUp then sb.beforeCutoff(r): Unit
+        val ran = provider.closeRound(r).toOption.get // users whose operations ran this round
+        if aliceUp then sa.afterCutoff(r)
+        if bobUp then sb.afterCutoff(r)
+        alice.drainEvents(): Unit
+        bob.drainEvents().collectFirst { case EngineEvent.MessageReceived(_, t, _) => t }.foreach {
+          t => delivered = delivered.orElse(Some(r -> t))
+        }
+        def who(up: Boolean) = if up then "live  " else "bundle"
+        log("round", f"$r%3d: alice=${who(aliceUp)} bob=${who(bobUp)}  → backend saw $ran writes")
+
+      val message = "see you at dusk"
+      for r <- 1L to 3L do round(r)
+      bobUp = false
+      log("bob", "goes offline — no warning; his standing bundle keeps his rounds going")
+      alice.sendMessage(a.pairId, message)
+      log("alice", s"""queued: "$message" (bob is offline)""")
+      for r <- 4L to 10L do round(r) // alice refreshes her bundle at round 10, message included
+      aliceUp = false
+      log("alice", "goes offline too — now BOTH run from bundles; the backend still sees 2 writes")
+      for r <- 11L to 15L do round(r)
+      bobUp = true
+      log("bob", "comes back online (alice is still away)")
+      sb.collectAway(): Unit
+      var r = 16L
+      while delivered.isEmpty && r <= 30L do
+        round(r)
+        r += 1
+      println()
+      delivered match
+        case Some((at, txt)) =>
+          log("bob", s"""round $at: received "$txt" — from alice's bundle, while she was offline""")
+          println(s"""\n  ✓ delivered with BOTH ends offline at different times: "$txt"""")
+        case None => println("  ✗ not delivered within the round budget")
+      println(s"""  privacy label throughout: "${provider.label}"\n""")
+      delivered.exists(_._2 == message)
+    finally
+      channels.foreach(_.shutdownNow(): Unit)
+      server.stop()
 
   // ---- obsd process management (mirrors the test ObsdHarness, packaged for a runnable artifact) ----
 
@@ -178,7 +208,9 @@ object DeppisDemo:
     val pb = new ProcessBuilder(bin.getAbsolutePath)
     pb.environment().put("OBSD_ADDR", s"127.0.0.1:$port")
     pb.environment().put("OBSD_NOTIFY_KEY", hex(notifyKey))
-    pb.environment().put("OBSD_CAPACITY", "64")
+    // Under provider routing every user writes one frame every round and cover writes are never
+    // read, so they accumulate: give the store room for the whole demo.
+    pb.environment().put("OBSD_CAPACITY", "4096")
     pb.redirectOutput(ProcessBuilder.Redirect.DISCARD) // keep demo output readable
     pb.redirectError(ProcessBuilder.Redirect.INHERIT) // but surface obsd errors
     pb.start()

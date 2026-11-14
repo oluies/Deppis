@@ -3,8 +3,10 @@
 # Deppis headless prototype launcher.
 #
 # Builds the Rust `obsd` oblivious sidecar, then runs the two-party metadata-private
-# delivery demo (`transport.DeppisDemo`) through it: two engines pair out of band and
-# a message is delivered through the real sidecar with uniform per-round cover traffic.
+# delivery demo (`transport.DeppisDemo`) through it. Both devices are routed through an
+# untrusted service provider (TLS 1.3), which alone talks to the sidecar, one write and
+# one read per user per round: Bob goes offline, Alice queues a message and goes offline
+# too, and the message still reaches Bob from Alice's standing bundle when he returns.
 #
 # THIS IS A DEV BUILD — NO METADATA PRIVACY (Constitution IV). The dev store/notify
 # provide no access-pattern privacy and the run is unattested; the demo prints the
