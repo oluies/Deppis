@@ -4,6 +4,11 @@ object V {
   val scalatest = "3.3.0-alpha.2"
   val scalatestPlus = "3.3.0.0-alpha.2"
   val upickle = "4.4.3"
+  // The service provider's persistent store (design/offline-delegation.md §5): ONE JDBC store, written
+  // against Postgres SQL. H2 (pure Java, no native library) runs it embedded, in PostgreSQL mode, as
+  // the default single-node store; the Postgres driver serves a real deployment with the same code.
+  val h2 = "2.5.252"
+  val postgresJdbc = "42.7.14"
   // ScalaPB runtime, and the grpc-java version `transport` puts on the classpath beside it
   // (grpc-netty-shaded + grpc-inprocess). Both were formerly read from `scalapb.compiler.Version`,
   // but ScalaPB's compilerplugin is no longer on the sbt 2.0 metabuild classpath (codegen runs
