@@ -1,4 +1,4 @@
-import 'protocol_engine.dart';
+import 'engine_setup.dart';
 // Picks the platform implementation at compile time: the Scala.js bundle binding on web, the
 // in-memory DevEngine everywhere else (and in `flutter test`, which runs on the Dart VM).
 import 'engine_factory_io.dart'
@@ -11,4 +11,7 @@ import 'engine_factory_io.dart'
 ///
 /// Async because native platforms load the engine bundle from an asset (web resolves synchronously,
 /// so its implementation simply returns an already-completed future).
-Future<ProtocolEngine> createEngine() => createPlatformEngine();
+///
+/// On web, an app built with `--dart-define=PROVIDER_URL=https://host:port` gets a PROVIDER-ROUTED
+/// engine and the [EngineSetup.routing] that drives it (design/offline-delegation.md §3).
+Future<EngineSetup> createEngine() => createPlatformEngine();

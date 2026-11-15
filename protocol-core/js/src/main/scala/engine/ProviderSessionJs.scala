@@ -158,6 +158,11 @@ final class ProviderSessionJs(
   @JSExport def start(firstRound: Double): js.Promise[Unit] =
     session.start(ProviderJs.round(firstRound)).toJSPromise
 
+  /** Register and upload the first bundle from the round AFTER the one in progress at `nowMillis`
+    * (e.g. `Date.now()`), using this session's schedule — so a host never does round arithmetic. */
+  @JSExport def startAt(nowMillis: Double): js.Promise[Unit] =
+    session.start(clock.schedule.roundAt(nowMillis.toLong) + 1).toJSPromise
+
   /** Advance this device to `nowMillis` (e.g. `Date.now()`); a no-op while a step is in flight. */
   @JSExport def step(nowMillis: Double): js.Promise[Unit] = clock.step(nowMillis.toLong).toJSPromise
 

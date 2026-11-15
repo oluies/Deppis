@@ -96,6 +96,9 @@ class DevEngine implements ProtocolEngine {
   }
 
   @override
+  Future<void> pollEvents() async {} // nothing is ever buffered here
+
+  @override
   Future<void> tick({required int roundId}) async {
     // "Some buddy has mail" — which buddy is intentionally not revealed.
     _emit(Notified(roundId));

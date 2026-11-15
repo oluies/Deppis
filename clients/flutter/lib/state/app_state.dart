@@ -10,12 +10,16 @@ import '../engine/protocol_engine.dart';
 ///
 /// Holds NO key material — only what the engine has already decrypted/derived.
 class AppState extends ChangeNotifier {
-  AppState(this.engine) {
+  AppState(this.engine, {this.notifyLabel}) {
     _privacy = engine.privacyStatus;
     _sub = engine.events.listen(_onEvent);
   }
 
   final ProtocolEngine engine;
+
+  /// This device's notify label when provider-routed — the user gives it to
+  /// each buddy at pairing, like the shared secret. Null when not routed.
+  final Uint8List? notifyLabel;
   late final StreamSubscription<EngineEvent> _sub;
 
   final List<Buddy> _buddies = [];

@@ -53,10 +53,14 @@ upstream over h2c. **Flutter host, part 1 (done):** `clients/flutter/lib/provide
 `GrpcOrGrpcWebClientChannel`, HTTP/2 natively), on stubs generated from the same `provider.proto`
 (`scripts/gen-dart-provider.sh`, output committed under `lib/generated/`); tested against a real
 in-process Dart gRPC server. The engine API's `addBuddy` now takes the buddy's `peerNotifyLabel`
-(without it no signal ever reaches a provider-routed buddy). **Not done:** the web bridge (a Dart
-`JsProviderApi` over `ProviderClient`, the `ProviderSession` binding, `index.html` exposing it), the
-round timer tied to the app lifecycle, notify-label exchange in the pairing UI, and a browser →
-Envoy → provider run in the `deploy/grpc-web/` harness. Labeled
+(without it no signal ever reaches a provider-routed buddy). **Flutter host, part 2 (done):** the web
+bridge (`lib/provider/routing_web.dart`: a Dart `JsProviderApi` over `ProviderClient`, the
+`ProviderSession` binding, a provider-routed `ProtocolEngine(null, label)`; `index.html` exposes
+`ProviderSession`), `ProviderRouting` stepping the session on a timer and pausing / resuming with the
+app lifecycle, notify-label display and entry in the pairing screen, enabled by
+`--dart-define=PROVIDER_URL=…`. Tested on the Dart VM (routing, lifecycle, pairing); CI compiles the
+web target with routing on. **Not done:** a live browser → Envoy → provider run in the
+`deploy/grpc-web/` harness, and provider routing on native (flutter_js) builds. Labeled
 `DEV, NO METADATA PRIVACY` like everything provider-routed until Phase 4.
 
 ## The path (direct store/notify, superseded for provider routing)

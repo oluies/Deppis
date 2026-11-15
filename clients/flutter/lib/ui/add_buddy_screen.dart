@@ -1,3 +1,6 @@
+import 'dart:convert';
+
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../engine/protocol_engine.dart';
@@ -20,6 +23,7 @@ class AddBuddyScreen extends StatefulWidget {
 class _AddBuddyScreenState extends State<AddBuddyScreen> {
   final _name = TextEditingController();
   final _secret = TextEditingController();
+  final _peerLabel = TextEditingController();
   BuddyRole _role = BuddyRole.initiator;
   AddBuddyResult? _pending;
   bool _busy = false;
@@ -29,6 +33,7 @@ class _AddBuddyScreenState extends State<AddBuddyScreen> {
   void dispose() {
     _name.dispose();
     _secret.dispose();
+    _peerLabel.dispose();
     super.dispose();
   }
 
@@ -37,9 +42,20 @@ class _AddBuddyScreenState extends State<AddBuddyScreen> {
       _busy = true;
       _error = null;
     });
+    final Uint8List? peer;
     try {
-      final r = await widget.state.engine
-          .addBuddy(sharedSecret: _secret.text, role: _role);
+      final text = _peerLabel.text.trim();
+      peer = text.isEmpty ? null : base64Decode(text);
+    } on FormatException {
+      setState(() {
+        _busy = false;
+        _error = 'That buddy label is not valid.';
+      });
+      return;
+    }
+    try {
+      final r = await widget.state.engine.addBuddy(
+          sharedSecret: _secret.text, role: _role, peerNotifyLabel: peer);
       setState(() => _pending = r);
     } catch (_) {
       // Engine errors never carry secret-dependent detail (Constitution II).
@@ -91,6 +107,24 @@ class _AddBuddyScreenState extends State<AddBuddyScreen> {
           ),
         ),
         const SizedBox(height: 12),
+        if (widget.state.notifyLabel != null) ...[
+          // Routed: each side gives the other its notify label out of band, with the
+          // secret. Without the buddy's label, the buddy never learns it has mail.
+          SelectableText(
+            'Your label (give it to your buddy): '
+            '${base64Encode(widget.state.notifyLabel!)}',
+            key: const Key('myNotifyLabel'),
+          ),
+          const SizedBox(height: 8),
+          TextField(
+            key: const Key('peerLabelField'),
+            controller: _peerLabel,
+            decoration: const InputDecoration(
+              labelText: "Buddy's label (from your buddy, out of band)",
+            ),
+          ),
+          const SizedBox(height: 12),
+        ],
         SegmentedButton<BuddyRole>(
           segments: const [
             ButtonSegment(value: BuddyRole.initiator, label: Text('Initiator')),

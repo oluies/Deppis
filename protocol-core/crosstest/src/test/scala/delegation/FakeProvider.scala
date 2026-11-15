@@ -41,6 +41,10 @@ final class FakeProvider extends ProviderPort:
     mine.foreach(receipts.remove)
     Future.successful(mine.size)
 
+  /** The rounds `user`'s current bundle covers (observability for tests). */
+  def bundleRounds(user: String): Vector[Long] =
+    bundles.get(user).fold(Vector.empty)(_.keys.toVector.sorted)
+
   def openRound(r: Long): Unit =
     open = Some(r)
     live.clear()
