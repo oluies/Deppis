@@ -31,7 +31,9 @@ final class EngineJs(
     // With no transport but a label, the engine is PROVIDER-ROUTED (design/offline-delegation.md
     // §3): it has no backend of its own and is driven by a `ProviderSession` instead of `tick`,
     // but it still needs its notify label for the digests the provider fetches for it.
-    new Engine(transport.toOption.map(t => new JsRoundTransport(t)), label)
+    // `null` is treated like `undefined`: a host that must pass the label positionally (Dart's
+    // js_interop cannot leave an earlier argument undefined) passes `null` for "no transport".
+    new Engine(transport.toOption.filter(_ != null).map(t => new JsRoundTransport(t)), label)
 
   /** The engine itself, for [[ProviderSessionJs]]; never crosses the JS boundary. */
   private[engine] def underlying: Engine = engine

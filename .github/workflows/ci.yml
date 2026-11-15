@@ -436,6 +436,11 @@ jobs:
       - run: flutter pub get
       - run: flutter analyze
       - run: flutter test
+      # `flutter test` runs on the Dart VM, so the web-only JS-interop code (engine_factory_web,
+      # provider/routing_web) is never compiled by it. Compile the web target, provider routing on,
+      # so an interop mistake fails here. (Icon tree-shaking is irrelevant to that and skipped.)
+      - name: Compile for web, provider routing on
+        run: flutter build web --no-tree-shake-icons --dart-define=PROVIDER_URL=http://localhost:8080
 
   hygiene:
     name: Hygiene — pinned deps + secret scan (T007)

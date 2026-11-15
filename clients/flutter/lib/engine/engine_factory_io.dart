@@ -6,6 +6,7 @@ import 'package:flutter/services.dart' show rootBundle;
 import 'package:flutter_js/flutter_js.dart';
 
 import 'dev_engine.dart';
+import 'engine_setup.dart';
 import 'protocol_engine.dart';
 import 'scalajs_engine.dart';
 
@@ -24,7 +25,11 @@ import 'scalajs_engine.dart';
 /// On ANY failure (asset missing, runtime unavailable on the Dart VM under `flutter test`, malformed
 /// bundle) this degrades to the clearly-labeled [DevEngine] — the engine never silently runs without
 /// its real backing, and the reason is logged.
-Future<ProtocolEngine> createPlatformEngine() async {
+/// Native platforms: the engine only. Provider routing through the `flutter_js` runtime is not wired
+/// yet (it needs its own bridge for the async host calls), so there is no [EngineSetup.routing] here.
+Future<EngineSetup> createPlatformEngine() async => EngineSetup(await _createNativeEngine());
+
+Future<ProtocolEngine> _createNativeEngine() async {
   try {
     final bundle = await rootBundle.loadString(
       'assets/protocol-engine.bundle.js',

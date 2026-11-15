@@ -62,6 +62,11 @@ class ProviderSessionJsSpec extends AsyncFunSuite:
       )
       .asInstanceOf[JsProviderApi]
 
+  test("a null transport is no transport, as a Dart host passes it"):
+    val e = EngineJs(null.asInstanceOf[JsTransport], Uint8.toJs("x".getBytes("UTF-8")))
+    // With a (null) transport the engine would tick through it; without one, tick is local-only.
+    assert(e.underlying.tick(1L).isRight, "no transport: a local tick, not a call on null")
+
   test("a provider-routed ProtocolEngine keeps its label and starts with no transport"):
     val e = EngineJs(js.undefined, Uint8.toJs("alice".getBytes("UTF-8")))
     assert(e.underlying.privacyStatus.metadataPrivate == false)
@@ -130,6 +135,32 @@ class ProviderSessionJsSpec extends AsyncFunSuite:
       _ = aliceUp = true
       _ <- runUntil(120)
     yield assert(toBob == Seq("m1", "m2"), s"m2 follows in order, each once: $toBob")
+
+  test("startAt starts from the round after the one in progress, on the session's schedule"):
+    val p = FakeProvider()
+    val label = Uint8.toJs("erin".getBytes("UTF-8"))
+    val s = ProviderSessionJs(
+      EngineJs(js.undefined, label),
+      hostApi(p),
+      "erin",
+      label,
+      20,
+      120,
+      0.0,
+      1000.0,
+      600.0,
+      50.0,
+      50.0,
+      100.0
+    )
+    s.startAt(5_500.0).toFuture.map { _ =>
+      val rounds = p.bundleRounds("erin")
+      assert(
+        rounds.headOption.contains(6L),
+        s"5.5 s is in round 5, so the bundle starts at 6: $rounds"
+      )
+      assert(rounds.size == 120, "a full horizon")
+    }
 
   test("margins that leave no submit window are refused at construction"):
     val label = Uint8.toJs("dave".getBytes("UTF-8"))

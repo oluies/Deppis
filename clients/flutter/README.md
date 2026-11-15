@@ -95,7 +95,27 @@ the same esbuild invocation with `--minify` dropped; the script never emits it.
 (The bundling is a deployment build step — not part of `flutter test`/CI, which
 exercise the adapter via the fake handle and the engine via the Node e2e.)
 
-### Enabling real delivery (notify-before-retrieval) on web
+### Real delivery on web: provider routing (current)
+
+Build with the provider's gRPC-web address (Envoy in front of `GrpcWebBackendServer`):
+
+```bash
+flutter build web --dart-define=PROVIDER_URL=https://mm.example:8080
+```
+
+The app then creates a **provider-routed** engine (`new ProtocolEngine(null, label)`), drives it
+with the bundle's `ProviderSession` (the shared Scala session logic, see
+`specs/.../design/grpc-web-transport.md`), and reaches the provider through
+`lib/provider/provider_client.dart` (Dart `grpc`, gRPC-web in the browser, stubs generated from
+`provider.proto` by `scripts/gen-dart-provider.sh`). `lib/provider/provider_routing.dart` steps the
+session on a timer while the app is in the foreground and stops when it is hidden: the provider then
+runs the device's standing bundle, so messages keep flowing while the device is away. Each device
+shows its own notify label on the add-buddy screen; the buddy enters it, together with the shared
+secret, when pairing. Without `PROVIDER_URL` nothing changes. Still labeled
+`DEV, NO METADATA PRIVACY` (the provider sees everything in the clear until Phase 4).
+
+### The direct transport (superseded by provider routing)
+
 
 By default `new ProtocolEngine()` is **local-only** (no delivery). To make the
 "mail waiting" indicator (FR-004) and incoming messages fire on web, construct it

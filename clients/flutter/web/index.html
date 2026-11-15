@@ -38,7 +38,10 @@
   <script src="protocol-engine.js"></script>
   <!-- Guard so a 404'd/absent bundle is SILENT: `__mm` is undefined, we leave globalThis.ProtocolEngine
        unset, and createEngine() takes the clean DevEngine path (no ReferenceError, no try/catch). -->
-  <script>if (typeof __mm !== 'undefined') window.ProtocolEngine = __mm.ProtocolEngine;</script>
+  <!-- ProviderSession drives a provider-routed engine (design/offline-delegation.md §3); the app
+       uses it only when built with `--dart-define=PROVIDER_URL=…` (engine_factory_web.dart). -->
+  <script>if (typeof __mm !== 'undefined') { window.ProtocolEngine = __mm.ProtocolEngine;
+    window.ProviderSession = __mm.ProviderSession; }</script>
 </head>
 <body>
   <!--

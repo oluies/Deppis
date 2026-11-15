@@ -145,6 +145,10 @@ abstract interface class ProtocolEngine {
   Future<void> confirmBuddy({required String pairId, required bool matched});
   Future<void> removeBuddy({required String pairId});
   Future<void> sendMessage({required String pairId, required String plaintext});
+
+  /// Surface any events the engine has buffered without a UI call — e.g. a
+  /// message a provider-routed session received during a background round.
+  Future<void> pollEvents();
   Future<void> tick({required int roundId});
 
   Future<void> dispose();

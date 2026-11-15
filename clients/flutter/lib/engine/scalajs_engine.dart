@@ -107,6 +107,13 @@ class ScalaJsEngine implements ProtocolEngine {
   }
 
   @override
+  Future<void> pollEvents() async {
+    // Every engine response carries the events buffered since the last call (engine-api.md), so
+    // any cheap, side-effect-free command collects them; `privacyStatus` is that command.
+    _call('privacyStatus', const {});
+  }
+
+  @override
   Future<void> tick({required int roundId}) async {
     _call('tick', {'roundId': roundId});
   }

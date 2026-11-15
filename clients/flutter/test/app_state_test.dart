@@ -53,6 +53,11 @@ class FakeEngine implements ProtocolEngine {
   }) async =>
       commands.add('sendMessage:$pairId');
 
+  int polls = 0;
+
+  @override
+  Future<void> pollEvents() async => polls++;
+
   @override
   Future<void> tick({required int roundId}) async =>
       commands.add('tick:$roundId');

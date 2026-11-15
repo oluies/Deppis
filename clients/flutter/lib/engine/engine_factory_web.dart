@@ -3,7 +3,9 @@ import 'dart:js_interop_unsafe';
 
 import 'package:flutter/foundation.dart';
 
+import '../provider/routing_web.dart';
 import 'dev_engine.dart';
+import 'engine_setup.dart';
 import 'protocol_engine.dart';
 import 'scalajs_engine.dart';
 
@@ -22,7 +24,22 @@ extension type _JsProtocolEngine._(JSObject _) implements JSObject {
 /// Construction is guarded: an incompatible or malformed bundle (which would throw on the first
 /// `handle` call in the [ScalaJsEngine] constructor) degrades to the clearly-labeled [DevEngine]
 /// rather than crashing the app at startup — the bundle-presence check alone is not enough.
-Future<ProtocolEngine> createPlatformEngine() async {
+/// The provider to route through, from `--dart-define=PROVIDER_URL=https://host:port` (Envoy's
+/// gRPC-web listener). Empty: no routing — the app behaves exactly as before.
+const _providerUrl = String.fromEnvironment('PROVIDER_URL');
+
+Future<EngineSetup> createPlatformEngine() async {
+  if (_providerUrl.isNotEmpty && globalContext.has('ProviderSession')) {
+    try {
+      return routedSetup(Uri.parse(_providerUrl));
+    } catch (e) {
+      debugPrint('provider routing unavailable ($e); running the engine without it.');
+    }
+  }
+  return EngineSetup(await _createLocalEngine());
+}
+
+Future<ProtocolEngine> _createLocalEngine() async {
   if (!globalContext.has('ProtocolEngine')) {
     debugPrint('ProtocolEngine bundle not loaded; using DevEngine (no metadata privacy).');
     return DevEngine();
