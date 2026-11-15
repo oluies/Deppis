@@ -102,8 +102,8 @@ void main() {
 
     test('a malformed event surfaces as an error; the rest of the batch is still delivered',
         () async {
-      // The engine once emitted round ids as JSON strings; reading them `as num` threw and the
-      // whole batch — messages included — was lost. One bad event must not cost the others.
+      // The engine once emitted round ids the client could not read; the translation threw and
+      // the whole batch — messages included — was lost. One bad event must not cost the others.
       final engine = ScalaJsEngine((request) {
         final req = jsonDecode(request) as Map<String, dynamic>;
         if (req['command'] == 'privacyStatus' && FakeHandle.started) {
@@ -112,7 +112,7 @@ void main() {
             'result': {'event': 'privacyStatus', 'backend': 'dev', 'metadataPrivate': false,
               'label': devNoPrivacyLabel},
             'events': [
-              {'event': 'notified', 'roundId': '7'}, // malformed: a string
+              {'event': 'notified', 'roundId': true}, // malformed: neither number nor string
               {'event': 'messageReceived', 'pairId': 'p', 'plaintext': 'hi', 'receivedAt': 7},
             ],
           });
@@ -127,6 +127,31 @@ void main() {
       FakeHandle.started = false;
       expect(got.whereType<EngineError>().single.code, 'bad_event');
       expect(got.whereType<MessageReceived>().single.plaintext, 'hi');
+    });
+
+    test('a round id above 2^53 arrives as a decimal string and is read exactly', () async {
+      final engine = ScalaJsEngine((request) {
+        final req = jsonDecode(request) as Map<String, dynamic>;
+        if (req['command'] == 'privacyStatus' && FakeHandle.started) {
+          return jsonEncode({
+            'apiVersion': '1',
+            'result': {'event': 'privacyStatus', 'backend': 'dev', 'metadataPrivate': false,
+              'label': devNoPrivacyLabel},
+            'events': [
+              {'event': 'notified', 'roundId': '9007199254740993'},
+            ],
+          });
+        }
+        return FakeHandle().call(request);
+      });
+      FakeHandle.started = true;
+      final got = <EngineEvent>[];
+      engine.events.listen(got.add);
+      await engine.pollEvents();
+      await _flush();
+      FakeHandle.started = false;
+      expect(got.whereType<EngineError>(), isEmpty);
+      expect(got.whereType<Notified>().single.roundId, 9007199254740993);
     });
 
     test('an engine error envelope throws EngineException and emits EngineError', () async {

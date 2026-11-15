@@ -45,3 +45,39 @@ class EngineCodecEventsCrossSpec extends AnyFunSuite:
         e("receivedAt").isInstanceOf[ujson.Num],
         s"messageReceived.receivedAt must be a number: $e"
       )
+
+  test("a round id above 2^53 is a lossless string, and handle still answers with the events"):
+    val be = FakeBackend()
+    val aLabel = "alice".getBytes("UTF-8")
+    val bLabel = "bob".getBytes("UTF-8")
+    val oob = "codec-events-wide-oob".getBytes("UTF-8")
+    val alice = Engine(Some(be.transport()), clientLabel = aLabel)
+    val bob = Engine(Some(be.transport()), clientLabel = bLabel)
+    val bobJson = EngineCodec(bob)
+    val pid = alice.addBuddy(oob, BuddyRole.Initiator, peerNotifyLabel = bLabel).toOption.get.pairId
+    alice.confirmBuddy(pid, matched = true).toOption.get
+    bob.addBuddy(oob, BuddyRole.Responder, peerNotifyLabel = aLabel).toOption.get: Unit
+    bob.confirmBuddy(pid, matched = true).toOption.get
+    alice.drainEvents(); bob.drainEvents()
+    alice.sendMessage(pid, "wide"): Unit
+
+    val base = (1L << 53) + 1 // 9007199254740993: not representable as a double
+    val events = (0L until 6L).flatMap { i =>
+      val r = base + i
+      alice.tick(r): Unit
+      val resp = ujson.read(
+        bobJson.handle(s"""{"apiVersion":"1","command":"tick","args":{"roundId":"$r"}}""")
+      )
+      assert(!resp.obj.contains("error"), s"tick at $r must not fail: $resp")
+      resp("events").arr.toSeq
+    }
+    val notified = events.filter(_("event").str == "notified")
+    assert(
+      events.filter(_("event").str == "messageReceived").map(_("plaintext").str) == Seq("wide"),
+      s"the message arrives: $events"
+    )
+    assert(notified.nonEmpty, "and was notified first")
+    for e <- notified do
+      val id = e("roundId")
+      assert(id.isInstanceOf[ujson.Str], s"a round id above 2^53 is a string: $e")
+      assert(id.str.toLong >= base, s"and exact: $e")

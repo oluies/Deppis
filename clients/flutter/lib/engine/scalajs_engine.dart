@@ -138,6 +138,14 @@ class ScalaJsEngine implements ProtocolEngine {
         label: j['label'] as String,
       );
 
+  /// An engine integer: a JSON number, or — outside ±2^53, where a double is inexact — a decimal
+  /// string (engine-api.md). Anything else throws, which the caller maps to `bad_event`.
+  static int _wideInt(Object? v) => switch (v) {
+        num n => n.toInt(),
+        String s => int.parse(s),
+        _ => throw FormatException('not an engine integer: ${v.runtimeType}'),
+      };
+
   /// Translate an engine event object into a typed [EngineEvent]. Unknown events are ignored
   /// (forward-compat) rather than throwing.
   EngineEvent? _translate(Map<String, dynamic> ev) {
@@ -148,10 +156,10 @@ class ScalaJsEngine implements ProtocolEngine {
         return MessageReceived(
           ev['pairId'] as String,
           ev['plaintext'] as String,
-          DateTime.fromMillisecondsSinceEpoch((ev['receivedAt'] as num).toInt()),
+          DateTime.fromMillisecondsSinceEpoch(_wideInt(ev['receivedAt'])),
         );
       case 'notified':
-        return Notified((ev['roundId'] as num).toInt());
+        return Notified(_wideInt(ev['roundId']));
       case 'privacyStatus':
         return PrivacyStatusChanged(_parsePrivacy(ev));
       default:

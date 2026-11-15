@@ -64,9 +64,10 @@ container build -t "$IMAGE" -f Dockerfile.server . >/dev/null
 
 container network create "$NET" >/dev/null 2>&1 || true
 echo "[run] starting messenger-server (h2c gRPC ObliviousStore :9090) ..."
+# `${SCHED[@]+...}` below: an empty array under `set -u` is "unbound" on bash < 4.4 (macOS /bin/bash 3.2).
 SCHED=()
 [ "$MODE" != "--browser" ] || SCHED=(-e "ROUND_INTERVAL_MS=$INTERVAL_MS" -e "ROUND_CUTOFF_MS=$CUTOFF_MS")
-container run -d --name messenger-server --network "$NET" "${SCHED[@]}" "$IMAGE" >/dev/null
+container run -d --name messenger-server --network "$NET" ${SCHED[@]+"${SCHED[@]}"} "$IMAGE" >/dev/null
 # Wait until the server announces itself — and, for the browser run, that it is the build that
 # serves the provider (an old image would serve only the store and the run would time out later).
 want="ObliviousStore"
