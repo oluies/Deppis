@@ -67,6 +67,10 @@ final class EngineCodec(engine: Engine):
           res <- engine.addBuddy(
             str(args, "sharedSecret").getBytes(UTF_8),
             role,
+            // The PEER's notify label (base64), exchanged out of band at pairing: without it this
+            // engine can never signal the peer's "mail waiting", so a provider-routed peer — which
+            // reads only where its digest points — would never receive (offline-delegation.md §3).
+            peerNotifyLabel = optBytes(args, "peerNotifyLabel").getOrElse(Array.emptyByteArray),
             initiatorKemPublicKey = optBytes(args, "initiatorKemPublicKey"),
             initiatePqPrekey = bool(args, "pqPrekey"),
             pqRequired = bool(args, "pqRequired")

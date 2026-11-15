@@ -40,6 +40,13 @@ dependencies:
   # (Constitution XI). Imported ONLY by engine_factory_io.dart; web + `flutter test` never load it.
   flutter_js: 0.8.7
 
+  # The service provider's gRPC contract (provider.proto; design/offline-delegation.md §3): the
+  # generated stubs in lib/generated/ (scripts/gen-dart-provider.sh) and the client in lib/provider/.
+  # `grpc` speaks gRPC-web in a browser (to Envoy) and HTTP/2 natively. Pinned (Constitution XI).
+  grpc: 5.2.0
+  protobuf: 6.1.0
+  fixnum: 1.1.1 # Int64 round ids in the generated messages; the version protobuf already resolves
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

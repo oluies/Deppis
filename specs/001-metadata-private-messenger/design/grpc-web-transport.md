@@ -48,8 +48,15 @@ round's bundle slot runs) and never escapes into a round. The app then calls
 **Status.** Scala.js side and server side are done and tested: `ProviderSessionJsSpec` drives the
 exported API through Promise-based host calls under Node; `DeviceSessionCrossSpec` runs the shared
 session on both platforms; `GrpcWebBackendServerSpec` reaches `ProviderService` on the Envoy
-upstream over h2c. **Not done:** the Dart/Flutter host that implements `JsProviderApi` over gRPC-web,
-and a browser → Envoy → provider run in the `deploy/grpc-web/` harness. Labeled
+upstream over h2c. **Flutter host, part 1 (done):** `clients/flutter/lib/provider/provider_client.dart`
+— the Dart `ProviderClient` over the official `grpc` package (gRPC-web in a browser via
+`GrpcOrGrpcWebClientChannel`, HTTP/2 natively), on stubs generated from the same `provider.proto`
+(`scripts/gen-dart-provider.sh`, output committed under `lib/generated/`); tested against a real
+in-process Dart gRPC server. The engine API's `addBuddy` now takes the buddy's `peerNotifyLabel`
+(without it no signal ever reaches a provider-routed buddy). **Not done:** the web bridge (a Dart
+`JsProviderApi` over `ProviderClient`, the `ProviderSession` binding, `index.html` exposing it), the
+round timer tied to the app lifecycle, notify-label exchange in the pairing UI, and a browser →
+Envoy → provider run in the `deploy/grpc-web/` harness. Labeled
 `DEV, NO METADATA PRIVACY` like everything provider-routed until Phase 4.
 
 ## The path (direct store/notify, superseded for provider routing)

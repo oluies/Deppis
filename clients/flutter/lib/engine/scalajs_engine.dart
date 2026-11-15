@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'protocol_engine.dart';
 
@@ -76,8 +77,13 @@ class ScalaJsEngine implements ProtocolEngine {
   Future<AddBuddyResult> addBuddy({
     required String sharedSecret,
     required BuddyRole role,
+    Uint8List? peerNotifyLabel,
   }) async {
-    final resp = _call('addBuddy', {'sharedSecret': sharedSecret, 'role': role.name});
+    final resp = _call('addBuddy', {
+      'sharedSecret': sharedSecret,
+      'role': role.name,
+      if (peerNotifyLabel != null) 'peerNotifyLabel': base64Encode(peerNotifyLabel),
+    });
     final r = resp['result'] as Map<String, dynamic>;
     return AddBuddyResult(
       pairId: r['pairId'] as String,

@@ -38,7 +38,7 @@ private[transport] object ProviderProto:
       roundId = r.receipt.roundId,
       ranLive = r.receipt.ranLive,
       writeAccepted = r.receipt.writeAccepted,
-      hasRetrieved = r.receipt.retrieved.isDefined,
+      retrievedPresent = r.receipt.retrieved.isDefined,
       retrieved = r.receipt.retrieved.fold(ByteString.EMPTY)(bs),
       digest = bs(r.digest)
     )
@@ -48,7 +48,7 @@ private[transport] object ProviderProto:
         r.roundId,
         r.ranLive,
         r.writeAccepted,
-        Option.when(r.hasRetrieved)(r.retrieved.toByteArray)
+        Option.when(r.retrievedPresent)(r.retrieved.toByteArray)
       ),
       r.digest.toByteArray
     )

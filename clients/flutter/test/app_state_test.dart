@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:metadata_messenger/engine/protocol_engine.dart';
@@ -28,6 +29,7 @@ class FakeEngine implements ProtocolEngine {
   Future<AddBuddyResult> addBuddy({
     required String sharedSecret,
     required BuddyRole role,
+    Uint8List? peerNotifyLabel,
   }) async {
     commands.add('addBuddy');
     return const AddBuddyResult(pairId: 'p', safetyNumber: '00000');

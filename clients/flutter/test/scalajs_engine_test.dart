@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:metadata_messenger/engine/protocol_engine.dart';
@@ -9,12 +10,14 @@ import 'package:metadata_messenger/engine/scalajs_engine.dart';
 /// is exercised in pure Dart without needing the real bundle (which is covered separately by the
 /// Node `engine-contract.cjs` e2e). It keeps just enough state to be realistic.
 class FakeHandle {
+  final requests = <Map<String, dynamic>>[]; // every decoded request, in order
   final _pending = <String, String>{}; // pairId -> safetyNumber
   final _confirmed = <String>{};
   int _seq = 0;
 
   String call(String request) {
     final req = jsonDecode(request) as Map<String, dynamic>;
+    requests.add(req);
     if (req['apiVersion'] != '1') return _error('api_version', 'unsupported apiVersion');
     final args = (req['args'] as Map<String, dynamic>?) ?? const {};
     switch (req['command'] as String) {
@@ -83,6 +86,17 @@ void main() {
       final r = await engine.addBuddy(sharedSecret: 'abc', role: BuddyRole.initiator);
       expect(r.pairId, 'pair-0');
       expect(r.safetyNumber.split(' ').length, 6);
+    });
+
+    test('addBuddy sends the peer notify label as base64, and omits it when absent', () async {
+      final handle = FakeHandle();
+      final engine = ScalaJsEngine(handle.call);
+      final label = Uint8List.fromList(utf8.encode('the-peers-label'));
+      await engine.addBuddy(sharedSecret: 'abc', role: BuddyRole.initiator, peerNotifyLabel: label);
+      await engine.addBuddy(sharedSecret: 'def', role: BuddyRole.responder);
+      final adds = handle.requests.where((r) => r['command'] == 'addBuddy').toList();
+      expect((adds[0]['args'] as Map)['peerNotifyLabel'], base64Encode(label));
+      expect((adds[1]['args'] as Map).containsKey('peerNotifyLabel'), isFalse);
     });
 
     test('an engine error envelope throws EngineException and emits EngineError', () async {

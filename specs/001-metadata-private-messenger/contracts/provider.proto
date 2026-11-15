@@ -47,7 +47,9 @@ message Receipt {
   int64 round_id = 1;
   bool ran_live = 2;        // the device's live set ran (false: a bundle slot ran instead)
   bool write_accepted = 3;
-  bool has_retrieved = 4;   // the read returned a frame
+  // The read returned a frame. (Not `has_retrieved`: generated Dart gives every field a
+  // `hasX()` accessor, so that name collides with `retrieved`'s and gets mangled.)
+  bool retrieved_present = 4;
   bytes retrieved = 5;
   bytes digest = 6;
 }

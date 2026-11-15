@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:typed_data';
 
 import 'protocol_engine.dart';
 
@@ -51,6 +52,7 @@ class DevEngine implements ProtocolEngine {
   Future<AddBuddyResult> addBuddy({
     required String sharedSecret,
     required BuddyRole role,
+    Uint8List? peerNotifyLabel, // ignored: the stand-in delivers nothing
   }) async {
     if (sharedSecret.trim().isEmpty) {
       // Constant message — never varies on the secret value (Constitution II).
