@@ -27,7 +27,7 @@ object GrpcWebBackendServer:
   def main(args: Array[String]): Unit =
     given ec: ExecutionContext = ExecutionContext.global
     val port = sys.env.getOrElse("PORT", "9090").toInt
-    val running = start(port)
+    val running = start(port, scheduleFromEnv())
     sys.addShutdownHook(running.close())
     running.server.awaitTermination()
 
@@ -38,8 +38,21 @@ object GrpcWebBackendServer:
       clock.close()
       server.shutdownNow(): Unit
 
+  /** The provider's round schedule: the network-wide default, unless `ROUND_INTERVAL_MS` and
+    * `ROUND_CUTOFF_MS` override it — for test harnesses only, which must give their devices the SAME
+    * values (a device on a different schedule never hands a live set in). */
+  def scheduleFromEnv(): delegation.RoundSchedule =
+    (sys.env.get("ROUND_INTERVAL_MS"), sys.env.get("ROUND_CUTOFF_MS")) match
+      case (Some(i), Some(c)) =>
+        delegation.RoundSchedule(intervalMillis = i.toLong, cutoffMillis = c.toLong)
+      case (None, None) => delegation.RoundSchedule()
+      case _ =>
+        throw IllegalArgumentException("set both ROUND_INTERVAL_MS and ROUND_CUTOFF_MS, or neither")
+
   /** Bind the store and the provider on `port` (0 ⇒ ephemeral) and start the provider's round clock. */
-  def start(port: Int)(using ec: ExecutionContext): Running =
+  def start(port: Int, schedule: delegation.RoundSchedule = delegation.RoundSchedule())(using
+      ec: ExecutionContext
+  ): Running =
     val store = new DevObliviousStore()
     // The provider's backend: the same dev store, and a dev notify server with a fresh random key
     // (the provider seals notify tokens itself until Phase 4 moves sealing onto the device).
@@ -48,7 +61,7 @@ object GrpcWebBackendServer:
     val provider = _root_.provider.Provider(
       _root_.provider.DevProviderBackend(store, DevNotificationServer(notifyKey))
     )
-    val clock = _root_.provider.ProviderRoundDriver(provider).start()
+    val clock = _root_.provider.ProviderRoundDriver(provider, schedule).start()
     val server = NettyServerBuilder
       .forPort(port)
       .addService(spb.ObliviousStoreGrpc.bindService(new StoreServiceImpl(store), ec))
@@ -57,6 +70,7 @@ object GrpcWebBackendServer:
       .start()
     System.err.println(
       s"[grpc-web-backend] h2c gRPC ObliviousStore + ProviderService on :${server.getPort} — " +
-        s"${store.label} (metadataPrivate=${store.metadataPrivate}); provider rounds on the wall clock"
+        s"${store.label} (metadataPrivate=${store.metadataPrivate}); provider rounds every " +
+        s"${schedule.intervalMillis} ms, cutoff at ${schedule.cutoffMillis} ms"
     )
     Running(server, clock)

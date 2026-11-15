@@ -83,7 +83,10 @@ class ProviderRouting {
     try {
       await _session.step(_now());
       await _engine.pollEvents();
-    } catch (_) {
+    } catch (e) {
+      // Kept out of the round, but never silent: a swallowed failure here once hid a bug that lost
+      // every incoming message. The type only — never a value (Constitution II).
+      debugPrint('provider round step failed: ${e.runtimeType}');
     } finally {
       _inFlight = false;
     }

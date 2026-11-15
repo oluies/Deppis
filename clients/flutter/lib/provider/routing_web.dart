@@ -10,6 +10,7 @@ import '../engine/scalajs_engine.dart';
 import '../generated/provider.pb.dart';
 import 'provider_client.dart';
 import 'provider_routing.dart';
+import 'routing_tuning.dart';
 
 /// The browser's provider routing (`design/offline-delegation.md` §3,
 /// `grpc-web-transport.md`): a PROVIDER-ROUTED Scala.js engine, driven by the
@@ -24,15 +25,8 @@ extension type _RoutedEngine._(JSObject _) implements JSObject {
   external String handle(String input);
 }
 
-/// The bundle's `@JSExportTopLevel("ProviderSession")`.
-@JS('ProviderSession')
+/// The bundle's `@JSExportTopLevel("ProviderSession")`, constructed by [_newSession].
 extension type _JsProviderSession._(JSObject _) implements JSObject {
-  external _JsProviderSession(
-    _RoutedEngine engine,
-    JSObject api,
-    String user,
-    JSUint8Array clientLabel,
-  );
   external JSPromise<JSAny?> startAt(double nowMillis);
   external JSPromise<JSAny?> step(double nowMillis);
   external JSPromise<JSNumber> collectAway();
@@ -51,10 +45,41 @@ class _JsRoutedSession implements RoutedSession {
   Future<int> collectAway() async => (await _s.collectAway().toDart).toDartInt;
 }
 
+/// `new ProviderSession(engine, api, user, label[, tuning…])`. The tuning
+/// arguments are appended only when given; otherwise the session uses the
+/// network-wide defaults defined in `protocol-core`, never a copy of them here.
+_JsProviderSession _newSession(
+  _RoutedEngine engine,
+  JSObject api,
+  String user,
+  JSUint8Array label,
+  RoutingTuning? t,
+) {
+  final args = <JSAny?>[engine, api, user.toJS, label];
+  if (t != null) {
+    args.addAll([
+      t.refreshEveryRounds.toJS,
+      t.horizonRounds.toJS,
+      t.epochMillis.toJS,
+      t.intervalMillis.toJS,
+      t.cutoffMillis.toJS,
+      t.openGraceMillis.toJS,
+      t.closeGraceMillis.toJS,
+      t.submitMarginMillis.toJS,
+    ]);
+  }
+  final ctor = globalContext['ProviderSession'] as JSFunction;
+  return _JsProviderSession._(ctor.callAsConstructorVarArgs<JSObject>(args));
+}
+
 /// A routed engine + session for [provider] (Envoy's gRPC-web listener), with a
 /// fresh notify label and user name for this run (the engine keeps no state
-/// across a reload either).
-EngineSetup routedSetup(Uri provider) {
+/// across a reload either). [tuning] is for test harnesses only.
+EngineSetup routedSetup(
+  Uri provider, {
+  RoutingTuning? tuning,
+  Duration tick = const Duration(milliseconds: 250),
+}) {
   final rng = Random.secure();
   final label = Uint8List.fromList(
     List<int>.generate(16, (_) => rng.nextInt(256)),
@@ -70,15 +95,11 @@ EngineSetup routedSetup(Uri provider) {
   );
   final jsEngine = _RoutedEngine(null, label.toJS);
   final engine = ScalaJsEngine((input) => jsEngine.handle(input));
-  final session = _JsProviderSession(
-    jsEngine,
-    providerApi(client),
-    user,
-    label.toJS,
-  );
+  final session =
+      _newSession(jsEngine, providerApi(client), user, label.toJS, tuning);
   return EngineSetup(
     engine,
-    routing: ProviderRouting(engine, _JsRoutedSession(session)),
+    routing: ProviderRouting(engine, _JsRoutedSession(session), tick: tick),
     notifyLabel: label,
   );
 }

@@ -59,8 +59,12 @@ bridge (`lib/provider/routing_web.dart`: a Dart `JsProviderApi` over `ProviderCl
 `ProviderSession`), `ProviderRouting` stepping the session on a timer and pausing / resuming with the
 app lifecycle, notify-label display and entry in the pairing screen, enabled by
 `--dart-define=PROVIDER_URL=…`. Tested on the Dart VM (routing, lifecycle, pairing); CI compiles the
-web target with routing on. **Not done:** a live browser → Envoy → provider run in the
-`deploy/grpc-web/` harness, and provider routing on native (flutter_js) builds. Labeled
+web target with routing on. **Live browser run (done):** `deploy/grpc-web/run.sh --browser` runs
+the app's self-test build in headless Chrome — two routed devices, through Envoy to the provider —
+and passes both the online and the offline-from-bundle delivery (`ROUTING-SELFTEST-OK`). Its first
+run found and fixed four bugs (see the harness README), notably event round ids emitted as JSON
+strings, which made the Dart client silently drop every incoming message. **Not done:** provider
+routing on native (flutter_js) builds. Labeled
 `DEV, NO METADATA PRIVACY` like everything provider-routed until Phase 4.
 
 ## The path (direct store/notify, superseded for provider routing)

@@ -67,7 +67,16 @@ class ScalaJsEngine implements ProtocolEngine {
       throw EngineException(code, message);
     }
     for (final ev in (resp['events'] as List? ?? const [])) {
-      final translated = _translate(ev as Map<String, dynamic>);
+      // One at a time: the engine has already handed these over (its buffer is drained), so a
+      // malformed event must not take the rest of the batch with it — that once silently dropped
+      // every message of a provider-routed engine. It surfaces as an error instead.
+      final EngineEvent? translated;
+      try {
+        translated = _translate(ev as Map<String, dynamic>);
+      } catch (_) {
+        _emit(const EngineError('bad_event', 'engine event could not be read'));
+        continue;
+      }
       if (translated != null) _emit(translated);
     }
     return resp;

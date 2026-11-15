@@ -4,10 +4,15 @@
 # sbt-2 build yet, so the server is staged as a plain lib/ of jars; see build.sbt). Run `run.sh`, which
 # stages into ./server-lib before building this image. JDK 27 to match the project toolchain.
 FROM eclipse-temurin:27-jre
+# libsodium: the server also runs the service provider, whose dev notify server seals and opens
+# notify tokens with it (crypto.Sodium, FFM). The JVM looks for /usr/local/lib/libsodium.so among
+# its candidates; link the distro library there whatever the architecture's multiarch directory.
+RUN apt-get update && apt-get install -y --no-install-recommends libsodium23 \
+  && ln -s "$(find /usr/lib -name 'libsodium.so.23' | head -1)" /usr/local/lib/libsodium.so \
+  && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY server-lib/ /app/lib/
 ENV PORT=9090
 EXPOSE 9090
-# --enable-native-access is harmless here (the store path loads no native libs) but mirrors the
-# project's run options for parity.
+# --enable-native-access lets the provider's notify server call libsodium (FFM).
 ENTRYPOINT ["java", "--enable-native-access=ALL-UNNAMED", "-cp", "/app/lib/*", "transport.round.GrpcWebBackendServer"]

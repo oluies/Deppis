@@ -10,6 +10,7 @@ import 'package:metadata_messenger/engine/scalajs_engine.dart';
 /// is exercised in pure Dart without needing the real bundle (which is covered separately by the
 /// Node `engine-contract.cjs` e2e). It keeps just enough state to be realistic.
 class FakeHandle {
+  static bool started = false; // lets a test swap in a canned response after construction
   final requests = <Map<String, dynamic>>[]; // every decoded request, in order
   final _pending = <String, String>{}; // pairId -> safetyNumber
   final _confirmed = <String>{};
@@ -97,6 +98,35 @@ void main() {
       final adds = handle.requests.where((r) => r['command'] == 'addBuddy').toList();
       expect((adds[0]['args'] as Map)['peerNotifyLabel'], base64Encode(label));
       expect((adds[1]['args'] as Map).containsKey('peerNotifyLabel'), isFalse);
+    });
+
+    test('a malformed event surfaces as an error; the rest of the batch is still delivered',
+        () async {
+      // The engine once emitted round ids as JSON strings; reading them `as num` threw and the
+      // whole batch — messages included — was lost. One bad event must not cost the others.
+      final engine = ScalaJsEngine((request) {
+        final req = jsonDecode(request) as Map<String, dynamic>;
+        if (req['command'] == 'privacyStatus' && FakeHandle.started) {
+          return jsonEncode({
+            'apiVersion': '1',
+            'result': {'event': 'privacyStatus', 'backend': 'dev', 'metadataPrivate': false,
+              'label': devNoPrivacyLabel},
+            'events': [
+              {'event': 'notified', 'roundId': '7'}, // malformed: a string
+              {'event': 'messageReceived', 'pairId': 'p', 'plaintext': 'hi', 'receivedAt': 7},
+            ],
+          });
+        }
+        return FakeHandle().call(request);
+      });
+      FakeHandle.started = true;
+      final got = <EngineEvent>[];
+      engine.events.listen(got.add);
+      await engine.pollEvents();
+      await _flush();
+      FakeHandle.started = false;
+      expect(got.whereType<EngineError>().single.code, 'bad_event');
+      expect(got.whereType<MessageReceived>().single.plaintext, 'hi');
     });
 
     test('an engine error envelope throws EngineException and emits EngineError', () async {
