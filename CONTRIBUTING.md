@@ -37,7 +37,7 @@ and are not up for debate in a PR:
 | **Rust + cargo** | stable | Builds the `obsd` oblivious sidecar and runs its tests. |
 | **libsodium** | system package | Loaded at runtime by the `crypto` module via FFM (`libsodium-dev` on Debian/Ubuntu; `brew install libsodium` on macOS). |
 | **Node** | 22 | Runs the Scala.js engine tests under Node, and provides the vetted `@noble/hashes` JS crypto dep (`npm ci`). |
-| **Flutter** | 3.44.2 (stable) | Builds and tests the client in `clients/flutter` (presentation only). |
+| **Flutter** | 3.50.0 (stable) | Builds and tests the client in `clients/flutter` (presentation only). |
 | **protoc** | system package | `protobuf-compiler`, needed by the Rust sidecar's `tonic-build` and the gRPC integration test. |
 
 The Scala-side gRPC contracts are compiled by ScalaPB inside sbt (no separate protoc needed

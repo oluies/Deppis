@@ -1,4 +1,4 @@
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 
 import '../state/app_state.dart';
 import 'add_buddy_screen.dart';

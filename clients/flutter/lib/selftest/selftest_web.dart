@@ -2,7 +2,7 @@ import 'dart:async';
 import 'dart:js_interop';
 import 'dart:js_interop_unsafe';
 
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 
 import '../engine/protocol_engine.dart';
 import '../provider/routing_tuning.dart';

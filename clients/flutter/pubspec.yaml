@@ -46,6 +46,9 @@ dependencies:
   grpc: 5.2.0
   protobuf: 6.1.0
   fixnum: 1.1.1 # Int64 round ids in the generated messages; the version protobuf already resolves
+  # Material widgets: `package:flutter/material.dart` is deprecated since Flutter 3.47 in favour of
+  # this package.
+  material_ui: 1.11.0
 
 dev_dependencies:
   flutter_test:
