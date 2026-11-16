@@ -240,8 +240,20 @@ Bytes cross as base64; Dart never sees plaintext or keys. The same
 `test/routing_native_test.dart` runs the real bundle and the real bridge under
 Node (standing in for JavaScriptCore / QuickJS, which `flutter test` cannot host)
 against an in-process gRPC provider. That covers register, bundle upload, the
-live set, receipts and catch-up after an absence. It has not yet been run on a
-device or simulator.
+live set, receipts and catch-up after an absence.
+
+**Live simulator run** (`deploy/native/run-ios-sim.sh`, passes): the self-test
+build on the iOS simulator, with two routed devices in one JavaScriptCore runtime
+and the provider (`GrpcWebBackendServer`) running on the Mac. It runs the same
+scenario as the browser run. Both devices online: Alice → Bob is delivered. Then
+Bob goes away, Alice queues a message and goes away too, and Bob comes back and
+receives it from Alice's standing bundle. The verdict is the
+`ROUTING-SELFTEST-VERDICT` log line. It needs Flutter >= 3.50 under Xcode 27.
+
+The two devices share ONE runtime on purpose. In flutter_js 0.8.7 the
+JavaScriptCore `sendMessage` callback is a static, so with several runtimes in
+one app every message reaches the most recently created one. The bridge
+therefore tags every message with a device id (`NativeRoutingHost`).
 
 Rebuild the asset with `protocol-core-js/build-jsc-bundle.sh` whenever
 `protocol-core` changes. The committed copy had gone stale (it predated provider

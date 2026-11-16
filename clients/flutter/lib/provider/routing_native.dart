@@ -30,23 +30,27 @@ abstract interface class JsHost {
   bool run(String code);
 }
 
-/// The `ProviderSession` living in the runtime, driven from Dart. Construct it with [create] after
-/// the bundle and `provider-bridge.js` are loaded and the host forwards [providerBridgeChannel]
-/// messages to [onMessage].
-class NativeRoutedSession implements RoutedSession {
-  NativeRoutedSession._(this._host, this._client);
+/// The devices hosted in ONE embedded runtime (the app hosts one; the simulator self-test two):
+/// allocates each a device id, and routes the bridge's messages to the right [NativeRoutedSession].
+/// The host must forward every [providerBridgeChannel] message to [onMessage].
+class NativeRoutingHost {
+  NativeRoutingHost(this._host);
 
-  /// Build a PROVIDER-ROUTED engine (`globalThis.__engine`) and its session for [user] with the
-  /// notify [label], in the runtime behind [host]. [tuning] is for test harnesses only; without
-  /// it the session uses the network-wide defaults defined in `protocol-core`.
-  factory NativeRoutedSession.create(
-    JsHost host,
+  final JsHost _host;
+  final _sessions = <int, NativeRoutedSession>{};
+
+  /// Build a PROVIDER-ROUTED engine and its session for [user] with the notify [label]. [tuning]
+  /// is for test harnesses only; without it the session uses the network-wide defaults defined in
+  /// `protocol-core`.
+  NativeRoutedSession add(
     ProviderClient client, {
     required String user,
     required List<int> label,
     RoutingTuning? tuning,
   }) {
-    final s = NativeRoutedSession._(host, client);
+    final dev = _sessions.length;
+    final s = NativeRoutedSession._(_host, client, dev);
+    _sessions[dev] = s;
     final t = tuning == null
         ? null
         : [
@@ -59,11 +63,38 @@ class NativeRoutedSession implements RoutedSession {
             tuning.closeGraceMillis,
             tuning.submitMarginMillis,
           ];
-    host.run(
-      '__routedNew(${jsonEncode(user)}, ${jsonEncode(base64Encode(label))}, ${jsonEncode(t)});',
+    _host.run(
+      '__routedNew($dev, ${jsonEncode(user)}, ${jsonEncode(base64Encode(label))}, ${jsonEncode(t)});',
     );
     return s;
   }
+
+  /// A message from `provider-bridge.js` (a JSON string, or already decoded by the host). Never
+  /// throws: a malformed message, or one for no known device, is dropped. The work is deferred to
+  /// a microtask, so a host that delivers messages synchronously from inside an evaluation is
+  /// never re-entered.
+  void onMessage(Object? message) {
+    final Map<String, dynamic> m;
+    final NativeRoutedSession? s;
+    try {
+      final decoded = message is String ? jsonDecode(message) : message;
+      m = (decoded as Map).cast<String, dynamic>();
+      s = _sessions[(m['dev'] as num).toInt()];
+    } catch (_) {
+      return;
+    }
+    final target = s;
+    if (target != null) scheduleMicrotask(() => target._handle(m));
+  }
+}
+
+/// One device's `ProviderSession`, living in the runtime and driven from Dart. Made by
+/// [NativeRoutingHost.add].
+class NativeRoutedSession implements RoutedSession {
+  NativeRoutedSession._(this._host, this._client, this.dev);
+
+  /// This device's id in the runtime (the `dev` of `provider-bridge.js`).
+  final int dev;
 
   final JsHost _host;
   final ProviderClient _client;
@@ -86,25 +117,15 @@ class NativeRoutedSession implements RoutedSession {
     _done[id] = c;
     // A faulted evaluation never sends 'done': fail the call now, or routing would stall for good
     // (steps never overlap, so one call that never settles stops every later step).
-    if (!_host.run('__sessionRun($id, ${jsonEncode(method)}, ${jsonEncode(arg)});')) {
+    if (!_host.run('__sessionRun($dev, $id, ${jsonEncode(method)}, ${jsonEncode(arg)});')) {
       _done.remove(id);
       c.completeError(StateError('provider session call could not start'));
     }
     return c.future;
   }
 
-  /// A message from `provider-bridge.js` (a JSON string, or already decoded by the host). Never
-  /// throws: a malformed message is dropped. The work is deferred to a microtask, so a host that
-  /// delivers messages synchronously from inside an evaluation is never re-entered.
-  void onMessage(Object? message) {
-    final Map<String, dynamic> m;
+  void _handle(Map<String, dynamic> m) {
     try {
-      final decoded = message is String ? jsonDecode(message) : message;
-      m = (decoded as Map).cast<String, dynamic>();
-    } catch (_) {
-      return;
-    }
-    scheduleMicrotask(() {
       switch (m['t']) {
         case 'done':
           final c = _done.remove((m['id'] as num).toInt());
@@ -117,7 +138,9 @@ class NativeRoutedSession implements RoutedSession {
         case 'call':
           _answer((m['id'] as num).toInt(), m['method'] as String?, m['args']);
       }
-    });
+    } catch (_) {
+      // malformed: dropped
+    }
   }
 
   Future<void> _answer(int id, String? method, Object? args) async {

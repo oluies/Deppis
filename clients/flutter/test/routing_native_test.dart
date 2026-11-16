@@ -79,8 +79,10 @@ void main() async {
   late ClientChannel channel;
   late NodeJsHost host;
   late NativeRoutedSession session;
+  late NativeRoutedSession other; // a second device in the SAME runtime
   final label = Uint8List.fromList(List<int>.generate(16, (i) => 0x40 + i));
   const user = 'native-alice';
+  const otherUser = 'native-bob';
 
   setUp(() async {
     service = FakeProviderService();
@@ -92,10 +94,11 @@ void main() async {
       options: const ChannelOptions(credentials: ChannelCredentials.insecure()),
     );
     final client = ProviderClient(ProviderServiceClient(channel));
-    late NativeRoutedSession s;
-    host = await NodeJsHost.start((m) => s.onMessage(m));
-    s = NativeRoutedSession.create(host, client, user: user, label: label, tuning: tuning);
-    session = s;
+    late NativeRoutingHost routing;
+    host = await NodeJsHost.start((m) => routing.onMessage(m));
+    routing = NativeRoutingHost(host);
+    session = routing.add(client, user: user, label: label, tuning: tuning);
+    other = routing.add(client, user: otherUser, label: label, tuning: tuning);
   });
 
   tearDown(() async {
@@ -111,6 +114,10 @@ void main() async {
       // Round 5 is in progress at 10.5 s (2 s rounds), so the first bundle starts at round 6.
       await session.startAt(10500);
       expect(service.sessions.keys, [user], reason: 'registered with its label');
+      // A second device in the same runtime gets its own replies (routed by device id).
+      await other.startAt(10500);
+      expect(service.sessions.keys, unorderedEquals([user, otherUser]));
+      expect(service.bundles[otherUser]!.first.roundId, Int64(6));
       final bundle = service.bundles[user]!;
       expect(bundle.length, tuning.horizonRounds);
       expect(bundle.first.roundId, Int64(6));
@@ -147,14 +154,19 @@ void main() async {
 
   test('a session call whose evaluation faults fails at once instead of hanging', () async {
     final client = ProviderClient(ProviderServiceClient(channel));
-    final s = NativeRoutedSession.create(_FaultyHost(), client, user: 'u', label: label);
+    final s = NativeRoutingHost(_FaultyHost()).add(client, user: 'u', label: label);
     await expectLater(s.step(0), throwsStateError);
   }, skip: hasNode ? false : 'needs node on PATH to host the JS bundle');
 
-  test('malformed or unknown messages are dropped, never thrown', () {
-    session.onMessage('not json');
-    session.onMessage(42);
-    session.onMessage({'t': 'done', 'id': 999, 'ok': true});
+  test('malformed or unknown messages are dropped, never thrown', () async {
+    final routing = NativeRoutingHost(_FaultyHost());
+    routing.onMessage('not json');
+    routing.onMessage(42);
+    routing.onMessage({'t': 'done', 'dev': 7, 'id': 1, 'ok': true}); // no such device
+    routing.add(ProviderClient(ProviderServiceClient(channel)), user: 'u', label: label);
+    routing.onMessage({'t': 'done', 'dev': 0, 'id': 'x', 'ok': true}); // malformed id
+    routing.onMessage({'t': 'call', 'dev': 0}); // no id
+    await Future<void>.delayed(Duration.zero);
   }, skip: hasNode ? false : 'needs node on PATH to host the JS bundle');
 }
 
