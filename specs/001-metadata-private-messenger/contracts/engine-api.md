@@ -26,6 +26,17 @@ runtime. Messages are JSON; `apiVersion` is mandatory on every call.
 | `privacyStatus` | `{ backend, metadataPrivate: bool, label }` | Drives the mandatory UI label (FR-016). |
 | `error` | `{ code, message }` | Never includes secret-dependent detail (Constitution II). |
 
+### Integers on the wire (`roundId`, `receivedAt`)
+
+JSON numbers are IEEE doubles, exact only within ±2^53. In both directions an integer field is a
+**JSON number** inside that range and a **decimal string** outside it (e.g. `"9007199254740993"`).
+The engine accepts either form for the `tick` command's `roundId`, and emits events that way:
+`notified.roundId` and `messageReceived.receivedAt` are numbers within ±2^53, decimal strings
+beyond it. The engine never rounds such a value, and never fails a response because of one. A client
+reads both forms. A client whose own integer type is a double (Dart compiled to JavaScript, i.e.
+Flutter web) still rounds a value beyond 2^53 after parsing it; real round ids and millisecond
+timestamps stay far below that.
+
 ## Post-quantum pairing prekey (US7, Option A)
 
 An OPTIONAL hybrid-KEM (X25519 + ML-KEM-768) prekey exchange layered onto the pairing flow. Its

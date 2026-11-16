@@ -129,7 +129,10 @@ void main() {
       expect(got.whereType<MessageReceived>().single.plaintext, 'hi');
     });
 
-    test('a round id above 2^53 arrives as a decimal string and is read exactly', () async {
+    // Runs on the Dart VM (`flutter test`), where `int` is 64-bit; on the web the value is rounded
+    // (documented on `_wideInt`), so the exact expectation is native-only.
+    test('a round id above 2^53 arrives as a decimal string and is read exactly (native)',
+        () async {
       final engine = ScalaJsEngine((request) {
         final req = jsonDecode(request) as Map<String, dynamic>;
         if (req['command'] == 'privacyStatus' && FakeHandle.started) {

@@ -139,7 +139,9 @@ class ScalaJsEngine implements ProtocolEngine {
       );
 
   /// An engine integer: a JSON number, or — outside ±2^53, where a double is inexact — a decimal
-  /// string (engine-api.md). Anything else throws, which the caller maps to `bad_event`.
+  /// string (engine-api.md, "Integers on the wire"). Anything else throws, which the caller maps to
+  /// `bad_event`. Exact on native platforms; on the web a Dart `int` is a JS double, so a value
+  /// beyond 2^53 is rounded there (real round ids and timestamps stay far below it).
   static int _wideInt(Object? v) => switch (v) {
         num n => n.toInt(),
         String s => int.parse(s),
