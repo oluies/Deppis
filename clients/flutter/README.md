@@ -215,3 +215,34 @@ iOS platform/simulator (`xcodebuild -downloadPlatform iOS`), plus
 imported ONLY by `engine_factory_io.dart` (web + `flutter test` never load it).
 Android is the same shape (QuickJS) but its `ios/`-equivalent scaffold + SDK are
 not set up here.
+
+### Provider routing on native
+
+A native build with `--dart-define=PROVIDER_URL=https://host:port` gets a
+PROVIDER-ROUTED engine, like the web build (`design/offline-delegation.md` §3).
+Natively the provider is reached over plain HTTP/2 gRPC, so `PROVIDER_URL` points
+at the provider's gRPC port, with no Envoy in between. Labeled `DEV, NO METADATA
+PRIVACY` until Phase 4.
+
+The bundle exports `ProviderSession` (the same session logic the JVM and the
+browser run). Its provider calls return Promises, and an embedded runtime cannot
+await Dart, so the two sides exchange messages through `assets/provider-bridge.js`:
+
+- the session's provider calls reach Dart as `{t: 'call'}` messages on the
+  `deppisProvider` channel; `NativeRoutedSession` (`lib/provider/routing_native.dart`)
+  answers them through `ProviderClient` and evaluates `__providerReply(id, …)`;
+- Dart starts `startAt` / `step` / `collectAway` by evaluating `__sessionRun(id, …)`,
+  and each settles as a `{t: 'done'}` message.
+
+Bytes cross as base64; Dart never sees plaintext or keys. The same
+`ProviderRouting` timer and app-lifecycle pause/resume as on web drive it.
+
+`test/routing_native_test.dart` runs the real bundle and the real bridge under
+Node (standing in for JavaScriptCore / QuickJS, which `flutter test` cannot host)
+against an in-process gRPC provider. That covers register, bundle upload, the
+live set, receipts and catch-up after an absence. It has not yet been run on a
+device or simulator.
+
+Rebuild the asset with `protocol-core-js/build-jsc-bundle.sh` whenever
+`protocol-core` changes. The committed copy had gone stale (it predated provider
+routing) until this change.

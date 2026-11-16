@@ -12,6 +12,7 @@ import 'engine_factory_io.dart'
 /// Async because native platforms load the engine bundle from an asset (web resolves synchronously,
 /// so its implementation simply returns an already-completed future).
 ///
-/// On web, an app built with `--dart-define=PROVIDER_URL=https://host:port` gets a PROVIDER-ROUTED
-/// engine and the [EngineSetup.routing] that drives it (design/offline-delegation.md §3).
+/// An app built with `--dart-define=PROVIDER_URL=https://host:port` gets a PROVIDER-ROUTED engine
+/// and the [EngineSetup.routing] that drives it (design/offline-delegation.md §3): on web through
+/// Envoy's gRPC-web listener, natively over HTTP/2 gRPC through `assets/provider-bridge.js`.
 Future<EngineSetup> createEngine() => createPlatformEngine();
