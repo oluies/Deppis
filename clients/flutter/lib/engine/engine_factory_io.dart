@@ -5,6 +5,9 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:flutter_js/flutter_js.dart';
 
+import '../provider/provider_client.dart';
+import '../provider/provider_routing.dart';
+import '../provider/routing_native.dart';
 import 'dev_engine.dart';
 import 'engine_setup.dart';
 import 'protocol_engine.dart';
@@ -25,44 +28,102 @@ import 'scalajs_engine.dart';
 /// On ANY failure (asset missing, runtime unavailable on the Dart VM under `flutter test`, malformed
 /// bundle) this degrades to the clearly-labeled [DevEngine] — the engine never silently runs without
 /// its real backing, and the reason is logged.
-/// Native platforms: the engine only. Provider routing through the `flutter_js` runtime is not wired
-/// yet (it needs its own bridge for the async host calls), so there is no [EngineSetup.routing] here.
-Future<EngineSetup> createPlatformEngine() async => EngineSetup(await _createNativeEngine());
+///
+/// PROVIDER ROUTING (`design/offline-delegation.md` §3): an app built with
+/// `--dart-define=PROVIDER_URL=https://host:port` (the provider's gRPC endpoint — HTTP/2 natively,
+/// no Envoy needed) gets a PROVIDER-ROUTED engine and the [EngineSetup.routing] that drives it,
+/// bridged through `assets/provider-bridge.js` ([NativeRoutedSession]). If routing cannot be set
+/// up, the app runs the engine without it, exactly as before.
+const _providerUrl = String.fromEnvironment('PROVIDER_URL');
+
+Future<EngineSetup> createPlatformEngine() async {
+  if (_providerUrl.isNotEmpty) {
+    try {
+      return await _createRoutedEngine(Uri.parse(_providerUrl));
+    } catch (e) {
+      debugPrint('provider routing unavailable ($e); running the engine without it.');
+    }
+  }
+  return EngineSetup(await _createNativeEngine());
+}
+
+/// A flutter_js runtime with the OS-CSPRNG pool installed and the engine bundle loaded.
+Future<JavascriptRuntime> _loadRuntime() async {
+  final bundle = await rootBundle.loadString('assets/protocol-engine.bundle.js');
+  final rt = getJavascriptRuntime();
+  await _installSecureRandom(rt); // BEFORE the bundle: construction needs crypto.getRandomValues
+  _checked(rt.evaluate(bundle)); // defines globalThis.ProtocolEngine (and ProviderSession)
+  return rt;
+}
+
+JsEvalResult _checked(JsEvalResult r) {
+  if (r.isError) throw StateError('JS runtime: ${r.stringResult}');
+  return r;
+}
+
+/// [JsHost] over a flutter_js runtime: evaluate, then run any jobs the evaluation queued (QuickJS
+/// leaves Promise reactions pending until asked; JavaScriptCore runs them itself).
+class _FlutterJsHost implements JsHost {
+  _FlutterJsHost(this._rt);
+  final JavascriptRuntime _rt;
+
+  @override
+  bool run(String code) {
+    final r = _rt.evaluate(code);
+    _rt.executePendingJob();
+    if (r.isError) debugPrint('provider bridge: JS fault (${r.stringResult.length} chars)');
+    return !r.isError;
+  }
+}
+
+Future<EngineSetup> _createRoutedEngine(Uri provider) async {
+  final rt = await _loadRuntime();
+  if (_checked(rt.evaluate('typeof ProviderSession')).stringResult != 'function') {
+    throw StateError('the engine bundle has no ProviderSession');
+  }
+  _checked(rt.evaluate(await rootBundle.loadString('assets/provider-bridge.js')));
+  _checked(
+    rt.evaluate(
+      '__installProviderBridge(function (s) { sendMessage("$providerBridgeChannel", s); });',
+    ),
+  );
+
+  final rng = Random.secure();
+  final label = Uint8List.fromList(List<int>.generate(16, (_) => rng.nextInt(256)));
+  final user =
+      'app-${List<int>.generate(8, (_) => rng.nextInt(256)).map((b) => b.toRadixString(16).padLeft(2, '0')).join()}';
+  final client = ProviderClient.connect(
+    host: provider.host,
+    port: provider.hasPort ? provider.port : (provider.scheme == 'https' ? 443 : 80),
+    secure: provider.scheme == 'https',
+  );
+  final host = _FlutterJsHost(rt);
+  late final NativeRoutedSession session;
+  // flutter_js hands the handler the message already JSON-decoded.
+  rt.onMessage(providerBridgeChannel, (dynamic message) {
+    session.onMessage(message);
+    return null;
+  });
+  session = NativeRoutedSession.create(host, client, user: user, label: label);
+
+  final engine = ScalaJsEngine(_handleOn(rt));
+  debugPrint('Native ScalaJsEngine initialized (flutter_js), provider-routed.');
+  return EngineSetup(
+    engine,
+    routing: ProviderRouting(engine, session),
+    notifyLabel: label,
+  );
+}
 
 Future<ProtocolEngine> _createNativeEngine() async {
   try {
-    final bundle = await rootBundle.loadString(
-      'assets/protocol-engine.bundle.js',
-    );
-    final rt = getJavascriptRuntime();
-    await _installSecureRandom(
-      rt,
-    ); // BEFORE the bundle: construction needs crypto.getRandomValues
-    rt.evaluate(bundle); // defines globalThis.ProtocolEngine
+    final rt = await _loadRuntime();
     rt.evaluate('globalThis.__engine = new ProtocolEngine();');
-    // The engine-api boundary: a synchronous String(request)->String(response) call, exactly the
-    // contract ScalaJsEngine speaks. `evaluate` is synchronous in flutter_js.
-    String handle(String request) {
-      final res = rt.evaluate('__engine.handle(${jsonEncode(request)})');
-      if (res.isError) {
-        // A JS RUNTIME fault (e.g. the entropy pool exhausting, or any internal engine fault) — NOT an
-        // engine-api error envelope. Surface it AS that envelope so ScalaJsEngine handles it like any
-        // engine error (typed EngineException + EngineError event) instead of choking on jsonDecode of
-        // raw JS error text. The code is content-independent (Constitution II); the UI never renders it.
-        final code = res.stringResult.contains('ENTROPY_POOL_EXHAUSTED')
-            ? 'ENTROPY_EXHAUSTED'
-            : 'ENGINE_RUNTIME';
-        return jsonEncode({
-          'error': {'code': code, 'message': code},
-        });
-      }
-      return res.stringResult;
-    }
 
     debugPrint(
       'Native ScalaJsEngine initialized (flutter_js) — real protocol-core engine.',
     );
-    return ScalaJsEngine(handle);
+    return ScalaJsEngine(_handleOn(rt));
   } catch (e) {
     debugPrint(
       'Native ScalaJsEngine init failed ($e); using DevEngine (no metadata privacy).',
@@ -70,6 +131,25 @@ Future<ProtocolEngine> _createNativeEngine() async {
     return DevEngine();
   }
 }
+
+/// The engine-api boundary: a synchronous String(request)->String(response) call, exactly the
+/// contract ScalaJsEngine speaks. `evaluate` is synchronous in flutter_js.
+String Function(String) _handleOn(JavascriptRuntime rt) => (String request) {
+  final res = rt.evaluate('__engine.handle(${jsonEncode(request)})');
+  if (res.isError) {
+    // A JS RUNTIME fault (e.g. the entropy pool exhausting, or any internal engine fault) — NOT an
+    // engine-api error envelope. Surface it AS that envelope so ScalaJsEngine handles it like any
+    // engine error (typed EngineException + EngineError event) instead of choking on jsonDecode of
+    // raw JS error text. The code is content-independent (Constitution II); the UI never renders it.
+    final code = res.stringResult.contains('ENTROPY_POOL_EXHAUSTED')
+        ? 'ENTROPY_EXHAUSTED'
+        : 'ENGINE_RUNTIME';
+    return jsonEncode({
+      'error': {'code': code, 'message': code},
+    });
+  }
+  return res.stringResult;
+};
 
 /// Inject `crypto.getRandomValues` backed by the OS CSPRNG, with **on-demand refill**.
 ///

@@ -15,7 +15,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-export JAVA_HOME="${JAVA_HOME:-$(/usr/libexec/java_home -v 26 2>/dev/null || true)}"
+export JAVA_HOME="${JAVA_HOME:-$(/usr/libexec/java_home -v 27 2>/dev/null || true)}"
 echo "[bundle] linking Scala.js (fullLinkJS) ..."
 sbt -batch protocolCoreJS/fullLinkJS >/dev/null
 MAIN="$(find target -path '*protocol-core-js/protocol-core-js-opt/main.js' | head -1)"
@@ -30,6 +30,7 @@ trap 'rm -f "$OUT/.entry.js"' EXIT
 cat > "$OUT/.entry.js" <<EOF
 const m = require("$(cd "$(dirname "$MAIN")" && pwd)/$(basename "$MAIN")");
 globalThis.ProtocolEngine = m.ProtocolEngine;
+globalThis.ProviderSession = m.ProviderSession; // provider routing (assets/provider-bridge.js)
 EOF
 echo "[bundle] bundling self-contained IIFE (esbuild) ..."
 npx --no-install esbuild "$OUT/.entry.js" --bundle --format=iife --platform=browser \
