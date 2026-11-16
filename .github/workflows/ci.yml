@@ -375,8 +375,10 @@ jobs:
         run: |
           set -o pipefail
           sbt -batch -no-colors 'testNative' 2>&1 | tee /tmp/native.out
-          # Fail closed if the suite silently ran nothing (the sbt 2 trap above).
-          grep -qE 'Passed: Total [1-9][0-9]*' /tmp/native.out \
+          # Fail closed if the suite silently ran nothing (the sbt 2 trap above). sbt 2.1 prints
+          # "passed: total N, failed F, errors E, passed P, cached C" — require P >= 1 tests that
+          # actually RAN (not replayed from the cache); sbt 2.0 printed "Passed: Total N".
+          grep -qE ', passed [1-9][0-9]*, cached|Passed: Total [1-9][0-9]*' /tmp/native.out \
             || { echo "::error::the Scala Native suite reported no passing tests"; exit 1; }
 
   scalajs:
