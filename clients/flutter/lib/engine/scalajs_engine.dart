@@ -67,7 +67,16 @@ class ScalaJsEngine implements ProtocolEngine {
       throw EngineException(code, message);
     }
     for (final ev in (resp['events'] as List? ?? const [])) {
-      final translated = _translate(ev as Map<String, dynamic>);
+      // One at a time: the engine has already handed these over (its buffer is drained), so a
+      // malformed event must not take the rest of the batch with it — that once silently dropped
+      // every message of a provider-routed engine. It surfaces as an error instead.
+      final EngineEvent? translated;
+      try {
+        translated = _translate(ev as Map<String, dynamic>);
+      } catch (_) {
+        _emit(const EngineError('bad_event', 'engine event could not be read'));
+        continue;
+      }
       if (translated != null) _emit(translated);
     }
     return resp;
@@ -129,6 +138,16 @@ class ScalaJsEngine implements ProtocolEngine {
         label: j['label'] as String,
       );
 
+  /// An engine integer: a JSON number, or — outside ±2^53, where a double is inexact — a decimal
+  /// string (engine-api.md, "Integers on the wire"). Anything else throws, which the caller maps to
+  /// `bad_event`. Exact on native platforms; on the web a Dart `int` is a JS double, so a value
+  /// beyond 2^53 is rounded there (real round ids and timestamps stay far below it).
+  static int _wideInt(Object? v) => switch (v) {
+        num n => n.toInt(),
+        String s => int.parse(s),
+        _ => throw FormatException('not an engine integer: ${v.runtimeType}'),
+      };
+
   /// Translate an engine event object into a typed [EngineEvent]. Unknown events are ignored
   /// (forward-compat) rather than throwing.
   EngineEvent? _translate(Map<String, dynamic> ev) {
@@ -139,10 +158,10 @@ class ScalaJsEngine implements ProtocolEngine {
         return MessageReceived(
           ev['pairId'] as String,
           ev['plaintext'] as String,
-          DateTime.fromMillisecondsSinceEpoch((ev['receivedAt'] as num).toInt()),
+          DateTime.fromMillisecondsSinceEpoch(_wideInt(ev['receivedAt'])),
         );
       case 'notified':
-        return Notified((ev['roundId'] as num).toInt());
+        return Notified(_wideInt(ev['roundId']));
       case 'privacyStatus':
         return PrivacyStatusChanged(_parsePrivacy(ev));
       default:

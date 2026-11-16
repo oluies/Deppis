@@ -137,10 +137,10 @@ final class EngineCodec(engine: Engine):
         "event" -> "messageReceived",
         "pairId" -> pairId,
         "plaintext" -> plaintext,
-        "receivedAt" -> at
+        "receivedAt" -> jsonNumber(at)
       )
     case EngineEvent.Notified(roundId) =>
-      ujson.Obj("event" -> "notified", "roundId" -> roundId)
+      ujson.Obj("event" -> "notified", "roundId" -> jsonNumber(roundId))
     case EngineEvent.PrivacyStatus(backend, metadataPrivate, label) =>
       ujson.Obj(
         "event" -> "privacyStatus",
@@ -158,6 +158,20 @@ final class EngineCodec(engine: Engine):
     o.obj.get(k).map(v => Base64.getDecoder.decode(v.str))
 
   private def b64e(b: Array[Byte]): String = Base64.getEncoder.encodeToString(b)
+
+  /** A round id as a JSON NUMBER, as engine-api.md specifies. A bare `Long` would render as a JSON
+    * STRING (ujson's precision-safe default), which a client reading `as num` rejects — in the
+    * browser that silently dropped every `notified` / `messageReceived` event of a provider-routed
+    * engine (the event batch was drained before the client's translation threw). Inside ±2^53 the
+    * conversion to a double is exact. Outside it the value is emitted as a decimal STRING — lossless,
+    * the same form the input path accepts for large round ids — never rounded and never thrown:
+    * events are rendered after the drain and outside `handle`'s guard, so a throw here would lose
+    * the whole batch and break "handle never throws". */
+  private def jsonNumber(l: Long): ujson.Value =
+    if l > MaxSafeInteger || l < -MaxSafeInteger then ujson.Str(l.toString)
+    else ujson.Num(l.toDouble)
+
+  private val MaxSafeInteger = 1L << 53
 
   /** `roundId` may arrive as a JSON number or string. JSON numbers are IEEE doubles, so a numeric
     * round id above 2^53 would silently lose precision; callers expecting large round ids should

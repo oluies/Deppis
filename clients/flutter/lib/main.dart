@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'engine/engine_factory.dart';
 import 'engine/protocol_engine.dart';
 import 'provider/provider_routing.dart';
+import 'selftest/selftest.dart';
 import 'state/app_state.dart';
 import 'ui/home_screen.dart';
 
@@ -15,6 +16,11 @@ Future<void> main() async {
   // On web, an app built with `--dart-define=PROVIDER_URL=…` is provider-routed
   // (design/offline-delegation.md §3) and the setup carries the routing that drives it.
   WidgetsFlutterBinding.ensureInitialized();
+  // The live browser self-test build (deploy/grpc-web `run.sh --browser`) runs instead of the app.
+  if (const bool.fromEnvironment('ROUTING_SELFTEST')) {
+    await runRoutingSelfTest();
+    return;
+  }
   final setup = await createEngine();
   runApp(MetadataMessengerApp(
     engine: setup.engine,

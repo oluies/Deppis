@@ -21,6 +21,30 @@ Expected tail: `GRPC-WEB-ROUNDTRIP-OK: WriteBatch(round_id=42) echoed through En
 server + Envoy, and runs a gRPC-web client that POSTs a `WriteBatch(round_id=42)` and asserts the
 echoed `round_id` + `grpc-status: 0` come back through Envoy. It cleans up on exit.
 
+## The live browser run (`./run.sh --browser`)
+
+Runs the round-trip above, then the provider-routed Flutter web app's **self-test build**
+(`--dart-define=ROUTING_SELFTEST=true`) in headless Chrome: two provider-routed devices in one real
+page — each with its own Scala.js engine, `ProviderSession` and Dart gRPC-web client — through Envoy
+to the provider in `GrpcWebBackendServer`. It checks `design/offline-delegation.md`'s case end to end:
+both online, Alice → Bob is delivered; then Bob goes away, Alice queues a message and goes away too,
+and Bob, back, receives it from Alice's standing bundle. Rounds run at 2 s (server
+`ROUND_INTERVAL_MS` / `ROUND_CUTOFF_MS`, same values compiled into the page), so it takes about a
+minute. The verdict is the page title, read from Chrome's debugging endpoint:
+
+```
+[run] browser verdict: ROUTING-SELFTEST-OK
+[run] OK — two browser devices delivered through the provider, including from a bundle while offline.
+```
+
+Needs flutter, npm (esbuild, for the engine bundle) and Chrome or Chromium (`CHROME=…` to pick one; a
+`chromium` shim whose app is not installed is skipped). The first run of this harness found four
+bugs, all fixed: a stale image picked up under a reused tag (each run now builds a unique tag and
+checks the server it started serves the provider); a non-running `chromium` shim; Envoy's CORS
+`allow_headers` missing the `x-user-agent` the Dart gRPC-web client sends (fixed in both committed
+Envoy configs); and the engine emitting event round ids as JSON strings, which made the Dart client
+silently drop every incoming message (fixed in the codec, with a cross-platform regression test).
+
 ## What proves what
 
 - **`GrpcWebBackendServer`** (`transport/.../round/`) binds the `ObliviousStore` gRPC service over plain
