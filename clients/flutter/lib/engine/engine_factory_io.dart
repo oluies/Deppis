@@ -8,6 +8,7 @@ import 'package:flutter_js/flutter_js.dart';
 import '../provider/provider_client.dart';
 import '../provider/provider_routing.dart';
 import '../provider/routing_native.dart';
+import '../provider/routing_tuning.dart';
 import 'dev_engine.dart';
 import 'engine_setup.dart';
 import 'protocol_engine.dart';
@@ -76,7 +77,18 @@ class _FlutterJsHost implements JsHost {
   }
 }
 
-Future<EngineSetup> _createRoutedEngine(Uri provider) async {
+Future<EngineSetup> _createRoutedEngine(Uri provider) async =>
+    (await nativeRoutedSetups(provider)).single;
+
+/// [count] PROVIDER-ROUTED devices (engine + session + label) sharing ONE flutter_js runtime —
+/// the app uses one; the simulator self-test two, which cannot each have a runtime of their own
+/// (see `assets/provider-bridge.js`). [tuning] and [tick] are for test harnesses only.
+Future<List<EngineSetup>> nativeRoutedSetups(
+  Uri provider, {
+  int count = 1,
+  RoutingTuning? tuning,
+  Duration tick = const Duration(milliseconds: 250),
+}) async {
   final rt = await _loadRuntime();
   if (_checked(rt.evaluate('typeof ProviderSession')).stringResult != 'function') {
     throw StateError('the engine bundle has no ProviderSession');
@@ -87,32 +99,37 @@ Future<EngineSetup> _createRoutedEngine(Uri provider) async {
       '__installProviderBridge(function (s) { sendMessage("$providerBridgeChannel", s); });',
     ),
   );
-
-  final rng = Random.secure();
-  final label = Uint8List.fromList(List<int>.generate(16, (_) => rng.nextInt(256)));
-  final user =
-      'app-${List<int>.generate(8, (_) => rng.nextInt(256)).map((b) => b.toRadixString(16).padLeft(2, '0')).join()}';
+  final routing = NativeRoutingHost(_FlutterJsHost(rt));
+  // flutter_js hands the handler the message already JSON-decoded.
+  rt.onMessage(providerBridgeChannel, (dynamic message) {
+    routing.onMessage(message);
+    return null;
+  });
   final client = ProviderClient.connect(
     host: provider.host,
     port: provider.hasPort ? provider.port : (provider.scheme == 'https' ? 443 : 80),
     secure: provider.scheme == 'https',
   );
-  final host = _FlutterJsHost(rt);
-  late final NativeRoutedSession session;
-  // flutter_js hands the handler the message already JSON-decoded.
-  rt.onMessage(providerBridgeChannel, (dynamic message) {
-    session.onMessage(message);
-    return null;
-  });
-  session = NativeRoutedSession.create(host, client, user: user, label: label);
 
-  final engine = ScalaJsEngine(_handleOn(rt));
-  debugPrint('Native ScalaJsEngine initialized (flutter_js), provider-routed.');
-  return EngineSetup(
-    engine,
-    routing: ProviderRouting(engine, session),
-    notifyLabel: label,
-  );
+  final rng = Random.secure();
+  return [
+    for (var i = 0; i < count; i++)
+      () {
+        final label = Uint8List.fromList(List<int>.generate(16, (_) => rng.nextInt(256)));
+        final user =
+            'app-${List<int>.generate(8, (_) => rng.nextInt(256)).map((b) => b.toRadixString(16).padLeft(2, '0')).join()}';
+        final session = routing.add(client, user: user, label: label, tuning: tuning);
+        final engine = ScalaJsEngine(
+          _handleOn(rt, (req) => '__engineHandle(${session.dev}, ${jsonEncode(req)})'),
+        );
+        debugPrint('Native ScalaJsEngine ${session.dev} initialized (flutter_js), provider-routed.');
+        return EngineSetup(
+          engine,
+          routing: ProviderRouting(engine, session, tick: tick),
+          notifyLabel: label,
+        );
+      }(),
+  ];
 }
 
 Future<ProtocolEngine> _createNativeEngine() async {
@@ -134,8 +151,11 @@ Future<ProtocolEngine> _createNativeEngine() async {
 
 /// The engine-api boundary: a synchronous String(request)->String(response) call, exactly the
 /// contract ScalaJsEngine speaks. `evaluate` is synchronous in flutter_js.
-String Function(String) _handleOn(JavascriptRuntime rt) => (String request) {
-  final res = rt.evaluate('__engine.handle(${jsonEncode(request)})');
+String Function(String) _handleOn(
+  JavascriptRuntime rt, [
+  String Function(String request) call = _plainHandle,
+]) => (String request) {
+  final res = rt.evaluate(call(request));
   if (res.isError) {
     // A JS RUNTIME fault (e.g. the entropy pool exhausting, or any internal engine fault) — NOT an
     // engine-api error envelope. Surface it AS that envelope so ScalaJsEngine handles it like any
@@ -150,6 +170,8 @@ String Function(String) _handleOn(JavascriptRuntime rt) => (String request) {
   }
   return res.stringResult;
 };
+
+String _plainHandle(String request) => '__engine.handle(${jsonEncode(request)})';
 
 /// Inject `crypto.getRandomValues` backed by the OS CSPRNG, with **on-demand refill**.
 ///

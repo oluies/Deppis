@@ -6,11 +6,18 @@
 // QuickJS on Android) cannot await Dart, so the two sides exchange MESSAGES instead:
 //
 //   JS → host  `send(json)`  (flutter_js `sendMessage`), one of
-//     { t: 'call', id, method, args }   a provider RPC; the host answers with __providerReply
-//     { t: 'done', id, ok, value }      a session call (__sessionRun) settled
+//     { t: 'call', dev, id, method, args }   a provider RPC; the host answers with __providerReply
+//     { t: 'done', dev, id, ok, value }      a session call (__sessionRun) settled
 //   host → JS  evaluated code
-//     __providerReply(id, result)       resolves the RPC's Promise (`result` already in JS shape)
-//     __sessionRun(id, method, arg)     runs session[method](arg); answers with a 'done' message
+//     __routedNew(dev, user, label, tuning)  a routed engine + session for device `dev`
+//     __engineHandle(dev, request)           that engine's engine-api `handle` (synchronous)
+//     __providerReply(id, result)            resolves the RPC's Promise (`result` already in JS shape)
+//     __sessionRun(dev, id, method, arg)     runs session[method](arg); answers with a 'done'
+//
+// One runtime can host several devices (`dev` = a small integer the host picks): the app runs one,
+// the simulator self-test two. Several flutter_js runtimes in one app do NOT work — on
+// JavaScriptCore its `sendMessage` callback is a static, so every runtime's messages reach the
+// most recently created one.
 //
 // Only opaque bytes cross (base64 here; Uint8Array inside), never plaintext or keys. A host fault
 // resolves to the RPC's safe answer on the Dart side, so nothing here ever rejects a provider
@@ -60,68 +67,76 @@ globalThis.__installProviderBridge = function (send) {
 
   var pending = {};
   var next = 0;
-  function call(method, args, fromHost) {
-    return new Promise(function (resolve) {
-      var id = ++next;
-      pending[id] = function (r) { resolve(fromHost(r)); };
-      send(JSON.stringify({ t: 'call', id: id, method: method, args: args }));
-    });
-  }
+  var devices = {};
   function same(r) { return r; }
 
-  globalThis.__providerApi = {
-    register: function (user, label) {
-      return call('register', [user, encode(label)], same);
-    },
-    uploadBundle: function (user, fromRound, slots) {
-      var out = [];
-      for (var k = 0; k < slots.length; k++) out.push(ops(slots[k]));
-      return call('uploadBundle', [user, fromRound, out], same);
-    },
-    getDigest: function (user, roundId) {
-      return call('getDigest', [user, roundId], function (r) { return r == null ? null : decode(r); });
-    },
-    submitLive: function (user, o) {
-      return call('submitLive', [user, ops(o)], same);
-    },
-    collectReceipt: function (user, roundId) {
-      return call('collectReceipt', [user, roundId], function (r) {
-        if (r == null) return null;
-        return {
-          roundId: r.roundId,
-          ranLive: r.ranLive,
-          writeAccepted: r.writeAccepted,
-          retrieved: r.retrieved == null ? null : decode(r.retrieved)
-        };
+  function apiFor(dev) {
+    function call(method, args, fromHost) {
+      return new Promise(function (resolve) {
+        var id = ++next;
+        pending[id] = function (r) { resolve(fromHost(r)); };
+        send(JSON.stringify({ t: 'call', dev: dev, id: id, method: method, args: args }));
       });
-    },
-    collectAll: function (user) {
-      return call('collectAll', [user], same);
     }
-  };
+    return {
+      register: function (user, label) {
+        return call('register', [user, encode(label)], same);
+      },
+      uploadBundle: function (user, fromRound, slots) {
+        var out = [];
+        for (var k = 0; k < slots.length; k++) out.push(ops(slots[k]));
+        return call('uploadBundle', [user, fromRound, out], same);
+      },
+      getDigest: function (user, roundId) {
+        return call('getDigest', [user, roundId], function (r) { return r == null ? null : decode(r); });
+      },
+      submitLive: function (user, o) {
+        return call('submitLive', [user, ops(o)], same);
+      },
+      collectReceipt: function (user, roundId) {
+        return call('collectReceipt', [user, roundId], function (r) {
+          if (r == null) return null;
+          return {
+            roundId: r.roundId,
+            ranLive: r.ranLive,
+            writeAccepted: r.writeAccepted,
+            retrieved: r.retrieved == null ? null : decode(r.retrieved)
+          };
+        });
+      },
+      collectAll: function (user) {
+        return call('collectAll', [user], same);
+      }
+    };
+  }
 
   globalThis.__providerReply = function (id, result) {
     var k = pending[id];
     if (k) { delete pending[id]; k(result); }
   };
 
-  // A PROVIDER-ROUTED engine (no transport of its own, just its notify label) as `__engine`, and
-  // `new ProviderSession(__engine, api, user, label[, tuning…])` as `__session`; tuning is an array
-  // (the ProviderSession constructor's trailing arguments, in order) or null for the defaults.
-  globalThis.__routedNew = function (user, labelB64, tuning) {
-    globalThis.__engine = new globalThis.ProtocolEngine(null, decode(labelB64));
-    var args = [globalThis.__engine, globalThis.__providerApi, user, decode(labelB64)];
+  // Device `dev`: a PROVIDER-ROUTED engine (no transport of its own, just its notify label) and
+  // `new ProviderSession(engine, api, user, label[, tuning…])`; tuning is an array (the
+  // ProviderSession constructor's trailing arguments, in order) or null for the defaults.
+  globalThis.__routedNew = function (dev, user, labelB64, tuning) {
+    var label = decode(labelB64);
+    var engine = new globalThis.ProtocolEngine(null, label);
+    var args = [engine, apiFor(dev), user, label];
     if (tuning) args = args.concat(tuning);
     var S = globalThis.ProviderSession;
-    globalThis.__session = new (Function.prototype.bind.apply(S, [null].concat(args)))();
+    devices[dev] = { engine: engine, session: new (Function.prototype.bind.apply(S, [null].concat(args)))() };
   };
 
-  globalThis.__sessionRun = function (id, method, arg) {
+  globalThis.__engineHandle = function (dev, request) {
+    return devices[dev].engine.handle(request);
+  };
+
+  globalThis.__sessionRun = function (dev, id, method, arg) {
     var p;
-    try { p = globalThis.__session[method](arg); } catch (e) { p = Promise.reject(e); }
+    try { p = devices[dev].session[method](arg); } catch (e) { p = Promise.reject(e); }
     Promise.resolve(p).then(
-      function (v) { send(JSON.stringify({ t: 'done', id: id, ok: true, value: v === undefined ? null : v })); },
-      function () { send(JSON.stringify({ t: 'done', id: id, ok: false, value: null })); }
+      function (v) { send(JSON.stringify({ t: 'done', dev: dev, id: id, ok: true, value: v === undefined ? null : v })); },
+      function () { send(JSON.stringify({ t: 'done', dev: dev, id: id, ok: false, value: null })); }
     );
   };
 };
