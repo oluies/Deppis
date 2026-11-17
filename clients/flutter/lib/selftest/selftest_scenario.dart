@@ -39,6 +39,8 @@ Future<void> runRoutingScenario({
   runApp(
     MaterialApp(
       home: Scaffold(
+        // Provider routing is DEV until Phase 4 seals what the provider relays (Constitution IV).
+        appBar: AppBar(title: const Text(devNoPrivacyLabel)),
         body: ValueListenableBuilder(
           valueListenable: log,
           builder: (_, lines, _) =>
@@ -48,6 +50,7 @@ Future<void> runRoutingScenario({
     ),
   );
 
+  say(devNoPrivacyLabel);
   const url = String.fromEnvironment('PROVIDER_URL');
   const interval = int.fromEnvironment('ROUND_INTERVAL_MS', defaultValue: 2000);
   const cutoff = int.fromEnvironment('ROUND_CUTOFF_MS', defaultValue: 1200);

@@ -23,7 +23,7 @@ const providerBridgeChannel = 'deppisProvider';
 
 /// What the bridge needs from the embedded runtime: evaluate code for its effects. Results never
 /// come back from an evaluation — they arrive as messages the host passes to
-/// [NativeRoutedSession.onMessage] — so a host may run [run] asynchronously.
+/// [NativeRoutingHost.onMessage] — so a host may run [run] asynchronously.
 abstract interface class JsHost {
   /// Evaluate [code]. Returns false when the host already knows the evaluation faulted (then no
   /// message will ever answer it); a host that evaluates asynchronously returns true.

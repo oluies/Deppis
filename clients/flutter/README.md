@@ -228,11 +228,12 @@ The bundle exports `ProviderSession` (the same session logic the JVM and the
 browser run). Its provider calls return Promises, and an embedded runtime cannot
 await Dart, so the two sides exchange messages through `assets/provider-bridge.js`:
 
-- the session's provider calls reach Dart as `{t: 'call'}` messages on the
-  `deppisProvider` channel; `NativeRoutedSession` (`lib/provider/routing_native.dart`)
-  answers them through `ProviderClient` and evaluates `__providerReply(id, …)`;
-- Dart starts `startAt` / `step` / `collectAway` by evaluating `__sessionRun(id, …)`,
-  and each settles as a `{t: 'done'}` message.
+- the session's provider calls reach Dart as `{t: 'call', dev, …}` messages on the
+  `deppisProvider` channel; `NativeRoutingHost` (`lib/provider/routing_native.dart`)
+  routes each to its device's `NativeRoutedSession`, which answers through
+  `ProviderClient` and evaluates `__providerReply(id, …)`;
+- Dart starts `startAt` / `step` / `collectAway` by evaluating
+  `__sessionRun(dev, id, …)`, and each settles as a `{t: 'done', dev, …}` message.
 
 Bytes cross as base64; Dart never sees plaintext or keys. The same
 `ProviderRouting` timer and app-lifecycle pause/resume as on web drive it.
