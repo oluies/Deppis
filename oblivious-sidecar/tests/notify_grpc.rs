@@ -119,6 +119,27 @@ async fn fifo_eviction_drops_the_oldest_round() {
 }
 
 #[tokio::test]
+async fn an_evicted_round_signalled_again_is_a_new_round() {
+    // `order` and `rounds` must stay in step: re-signalling an evicted round re-inserts it as the
+    // NEWEST round (so it evicts the next-oldest), never leaving a stale `order` entry behind.
+    let svc = NotificationServer::with_limits(KEY, 2, 100); // keep only 2 rounds
+    for r in 1..=3u64 {
+        signal(&svc, r, seal(r, 3, b"alice", r as u8)).await; // round 3 evicts round 1
+    }
+    signal(&svc, 1, seal(1, 5, b"alice", 9)).await; // round 1 again: evicts round 2
+    let one = fetch(&svc, 1, b"alice").await;
+    assert!(bit_set(&one, 5) && !bit_set(&one, 3)); // fresh round 1: only the new signal
+    assert!(fetch(&svc, 2, b"alice").await.iter().all(|&b| b == 0)); // round 2 evicted
+    assert!(bit_set(&fetch(&svc, 3, b"alice").await, 3)); // round 3 kept
+
+    // One more round evicts round 3 (the oldest now), not round 1 — the order is still exact.
+    signal(&svc, 4, seal(4, 3, b"alice", 10)).await;
+    assert!(fetch(&svc, 3, b"alice").await.iter().all(|&b| b == 0));
+    assert!(bit_set(&fetch(&svc, 1, b"alice").await, 5));
+    assert!(bit_set(&fetch(&svc, 4, b"alice").await, 3));
+}
+
+#[tokio::test]
 async fn per_round_cap_drops_excess_signals() {
     let svc = NotificationServer::with_limits(KEY, 100, 2); // cap 2 signals per round
     signal(&svc, 1, seal(1, 3, b"alice", 1)).await;
