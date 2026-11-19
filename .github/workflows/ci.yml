@@ -455,6 +455,9 @@ jobs:
     env:
       # Pinned (Constitution XI) and used in both the cache key and the download URL.
       GITLEAKS_VERSION: 8.21.2
+      # sha256 of gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz, from the release's
+      # gitleaks_${GITLEAKS_VERSION}_checksums.txt. Bump together with the version.
+      GITLEAKS_SHA256: 5bc41815076e6ed6ef8fbecc9d9b75bcae31f39029ceb55da08086315316e3ba
     steps:
       - uses: actions/checkout@v7
         with:
@@ -505,13 +508,17 @@ jobs:
         uses: actions/cache@v6
         with:
           path: ~/.cache/deppis-bin
-          key: gitleaks-${{ env.GITLEAKS_VERSION }}-${{ runner.os }}
+          key: gitleaks-tgz-${{ env.GITLEAKS_VERSION }}-${{ runner.os }}
       - name: Secret scan (gitleaks)
         run: |
+          # The cache holds the release TARBALL, and it is checksum-verified on EVERY run (fresh
+          # download or cache hit) before extraction: the secret scanner itself is pinned.
           mkdir -p ~/.cache/deppis-bin
-          if [ ! -x ~/.cache/deppis-bin/gitleaks ]; then
-            curl -sSfL --retry 6 --retry-all-errors --retry-delay 5 \
-              "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
-              | tar -xz -C ~/.cache/deppis-bin gitleaks
+          tgz=~/.cache/deppis-bin/gitleaks.tar.gz
+          if [ ! -f "$tgz" ]; then
+            curl -sSfL --retry 6 --retry-all-errors --retry-delay 5 -o "$tgz" \
+              "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
           fi
-          ~/.cache/deppis-bin/gitleaks detect --no-git --source . --config .gitleaks.toml --redact --no-banner
+          echo "${GITLEAKS_SHA256}  $tgz" | sha256sum -c -
+          tar -xzf "$tgz" -C "$RUNNER_TEMP" gitleaks
+          "$RUNNER_TEMP/gitleaks" detect --no-git --source . --config .gitleaks.toml --redact --no-banner
