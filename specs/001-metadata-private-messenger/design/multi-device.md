@@ -132,43 +132,90 @@ each can hold about 255 contacts. The notify-bit space needs no change, because 
 pair today: a shared secret by QR code. Both screens are in the same hands, so the safety-number
 comparison is the same step the user already does for buddies. The pair is marked self.
 
-**Introductions.** D2 now needs a pair with every device of every contact. For each contact device
-Bj that D1 is paired with, D1:
+**Introductions.** A device needs a pair with every device of every contact. Introductions
+create them. One introduction of device X to contact device Y by an introducer D:
 
-1. draws a fresh random pairing secret `s` (32 bytes, OS CSPRNG);
-2. sends `INTRO(s, role = responder, label = D2's label)` to Bj over the D1–Bj pair;
-3. sends `INTRO(s, role = initiator, label = Bj's label, contact = B)` to D2 over the D1–D2 pair.
+1. D draws a fresh random pairing secret `s` (32 bytes, OS CSPRNG);
+2. D sends `INTRO(s, role = responder, label = X's label)` to Y over the D–Y pair;
+3. D sends `INTRO(s, role = initiator, label = Y's label, contact = Y's contact)` to X over the
+   D–X self pair.
 
-Bj and D2 each run `addBuddy(s, role, peerNotifyLabel)` and confirm. The new pair's root comes from
+X and Y each run `addBuddy(s, role, peerNotifyLabel)` and confirm. The new pair's root comes from
 `s`, which travelled only inside two authenticated, encrypted pairs.
 
-- **Authentication.** Bj trusts "this is the user's new device" exactly as much as it trusts D1,
+**When to introduce: a standing rule, not a one-shot.** Introductions are not a loop run once at
+link time, because the set of devices keeps changing on both sides. Each device D applies this rule
+whenever its view changes:
+
+- **D introduces sibling X to contact device Y** when D holds verified pairs to both X (self) and Y
+  (contact), the synced pair lists (§4.6) show no X–Y pair, and no X–Y introduction is in flight.
+- **Exactly one side introduces.** When both a sibling of X and a sibling of Y could introduce the
+  same X–Y pair, only a sibling of whichever of X and Y has the lexicographically smaller label
+  does. Both sides compute this from labels they already know.
+- **Receivers deduplicate.** A device that already has a pair with the named peer label ignores a
+  further `INTRO` for it, which covers races where the rule ran on stale pair lists.
+
+This one rule covers every case: linking a device (D1 introduces the new D2 to each contact
+device), a contact linking a device (B1 introduces B2 to each of the user's devices), both at once
+(the D2–B2 pair appears once D1–B2 or B1–D2 exists, introduced by one side only), and a contact
+added after linking (D1 pairs with C1 by QR, then introduces D2 to C1).
+
+**Authority.** An introduction or revocation is honoured only within the scope of the pair it
+arrives on:
+
+- An `INTRO` arriving on **contact C's pair** files the new pair under C, whatever its `contact`
+  field says. A contact can introduce its own devices to the user, never a device claiming to be
+  the user's, and never another contact's.
+- The `contact` field is honoured only on a **self pair**: a sibling may name any contact, or
+  self. A device becomes a self device only by the QR link or by an `INTRO` that arrives on a self
+  pair.
+- Each receiver rejects an `INTRO` that breaks these rules, and tells its user.
+
+**Erasure of `s`.** The introducer is the one party besides X and Y that ever holds `s`, and `s`
+roots the pair's addressing key, which lasts for the pair's whole life
+(`KeySchedule.addrKey`, `Engine.scala:1071`). So:
+
+- D holds `s` only inside the two `INTRO` heads. It wipes `s`, the heads' retained plaintext and
+  their retained `(MK, HK)` (`offline-delegation.md` §4.1) as soon as both heads are acked.
+- If either head is still unacked after H rounds (the same bound as a standing bundle), D cancels
+  the introduction: it wipes everything above and sends `REVOKE` for the half-made pair to the side
+  that accepted. The standing rule introduces the pair afresh, with a new `s`, when both sides are
+  next live.
+- X and Y wipe `s` as soon as `addBuddy` has derived the pair's keys from it.
+
+What remains is a residual (§6): while an introduction is in flight, a compromise of D exposes the
+new pair's addressing key and initial content root.
+
+- **Authentication.** Y trusts "this is the user's new device" exactly as much as it trusts D,
   because the introduction arrives on a pair it has already verified. The new pair is recorded as
-  **verified by introduction**, with D1 as the introducer, and its safety number is still derived
+  **verified by introduction**, with D as the introducer, and its safety number is still derived
   and can be shown.
-- **Visibility.** Bj's app tells its user "Alice added a device". That is a feature: it is the
+- **Visibility.** Y's app tells its user "Alice added a device". That is a feature: it is the
   check against an introduction the user didn't make.
-- **Both sides multi-device.** When contact B has several devices, D1 is paired with each of them,
-  so the loop above covers the full mesh. When **B** adds a device, B's existing device introduces
-  it to every device of every contact, including all of the user's.
 - **Wire.** `INTRO` is a new control kind in the existing control-frame path (the one `KEM_CHUNK` and
-  `EPOCH_COMMIT` use), delivered with ARQ like any head. Its payload is about 80 bytes, so several
-  fit in one 256-byte frame for D2, and `ChunkStream` already carries longer payloads.
+  `EPOCH_COMMIT` use), delivered with ARQ like any head. A control envelope carries 156 bytes
+  (`ChunkStream.EnvelopeBytes` = `ArqFrame.PayloadBytes`), so one introduction of about 80 bytes fits
+  per frame. Batching several into one chunked object (145 bytes per chunk, up to
+  `MaxObjectBytes`) needs a new chunked envelope kind; today only `KEM_CHUNK` uses one.
 - **Post-quantum.** `s` is as quantum-safe as the pairs that carry it. Once the continuous PQ
   ratchet runs on every pair, that holds. Until then an introduced pair can run the existing PQ
-  pairing prekey (`addBuddy` with `pqPrekey`) over the same introduction. That is open question 3.
+  pairing prekey (`addBuddy` with `initiatePqPrekey = true`) through the introducer. That relays a
+  1,216-byte KEM public key and a 1,120-byte ciphertext per new pair, about 16 chunks. That is open
+  question 3.
 
-**Time to link.** Introductions are ordinary messages at one write per round. Introducing D2 to
-200 contact devices takes about 200 rounds on the B side, spread across D1's pairs, plus about 70
-frames to D2. That is roughly an hour at 15 s rounds, during which D2 already works for the
-contacts introduced so far. The UI shows progress.
+**Time to link.** Introductions are ordinary messages, and D1 makes one write per round across all
+its pairs. Introducing D2 to 200 contact devices takes 200 writes on the contact side plus, to D2,
+200 single-introduction frames, or about 111 chunks of a batched 16 KB object. With stop-and-wait
+on the D1–D2 pair as well, that is roughly **80–100 minutes** at 15 s rounds. D2 works for each
+contact as soon as that contact's introduction lands, and the UI shows progress.
 
 ### 4.4 Sending, and sent-copies
 
 When the user sends text to contact B from device D1, the engine enqueues:
 
 - one copy per pair to B's devices, each encrypted under its own pair (FR-006: these are
-  independent conversations, so a slow device of B never blocks the others; T033 shows this);
+  independent conversations, so a slow device of B never blocks the others, as T033's
+  `ConcurrentConversationsSpec` shows over a real server round);
 - one **sent-copy** per self pair, a sync item saying "sent to B at t: text", so the user's other
   devices show the conversation in full.
 
@@ -184,7 +231,8 @@ over self pairs. Optional read markers ("read up to n on D1") are sync items too
 ### 4.6 Divergent state (the edge case)
 
 What can diverge between devices: sent history, the contact list (adds, removals, renames), the
-device list, and read markers. Received messages can't diverge: each device receives its own copy.
+device list, each device's list of pairs (the peer labels it holds, which the §4.3 standing rule
+reads), and read markers. Received messages can't diverge: each device receives its own copy.
 
 - **Every change is a sync item** sent over the self pairs, with ARQ and standing-bundle coverage.
   So a partition just means the items wait, exactly like messages to an offline buddy.
@@ -198,7 +246,11 @@ device list, and read markers. Received messages can't diverge: each device rece
 
 A lost or retired device is removed by any remaining device. It sends `REVOKE(label)` to every
 contact device and to every self device. Each receiver runs `removeBuddy` on its pair with the
-revoked device, with the existing FR-018 removal semantics. The revoked device's bundle runs out
+revoked device, with the existing FR-018 removal semantics.
+
+A `REVOKE` is honoured only within the scope of the pair it arrives on, as for `INTRO` (§4.3). On
+contact C's pair it can remove only one of C's devices. On a self pair it can remove only a self
+device. Labels are not secret, so without this rule any contact could cut pairs it doesn't own. The revoked device's bundle runs out
 within H rounds, and its provider account can be dropped.
 
 A stolen device can revoke the legitimate ones just as easily. Who may revoke whom is open
@@ -237,11 +289,18 @@ the case `offline-delegation.md` §4.6 already closes for any two buddies on one
 - **Co-presence on a shared provider.** A provider serving two of a user's devices as unrelated
   accounts sees their presence patterns, which may correlate (same commute, same sleep). That is a
   statistical signal, not a protocol link. Separate providers remove it; the app may offer that.
-- **Pair budget.** `MaxBuddies` = 512 now counts device pairs (§4.2).
+- **Pair budget.** `MaxBuddies` = 512 now counts device pairs (§4.2). That falls short of FR-015
+  and SC-005 (512 buddies per user) as written. Open question 6.
 - **Throughput.** Each device still makes one write per round. A message to a contact with m
   devices from a user with n devices takes m + n − 1 writes across the sender's rounds,
   stop-and-wait per pair.
-- **Linking time.** §4.3: on the order of an hour for a few hundred contact devices.
+- **Linking time.** §4.3: roughly 80–100 minutes for 200 contact devices.
+- **The introducer held the pair's root.** While an introduction is in flight (§4.3: until both
+  heads are acked, or at most H rounds), the introducer holds `s`, from which the new pair's
+  addressing key and initial content root derive. A compromise of the introducer in that window
+  can link that pair's traffic for the pair's whole life, because the addressing key never rotates.
+  The pair's DH ratchet and any PQ rekey still protect content after the first exchange. Open
+  question 5 has a way to remove this.
 - **Trust in introductions.** A compromised device can introduce a device the user doesn't
   control. Contacts are told (§4.3), but a user who ignores the notice is exposed. The same holds
   for Signal's linked devices.
@@ -260,6 +319,11 @@ provider needs no new code:
     no token, frame or label, and each device makes exactly one operation set per round.
   - **Partition:** both devices change the contact list while apart, and after the partition they
     converge with no change in traffic shape.
+  - **Introductions:** concurrent linking on both sides, and a contact added after linking, each
+    end with exactly one pair per device pair. After linking completes, the introducer holds
+    nothing from which a token of an introduced pair can be derived.
+  - **Authority (negative):** an `INTRO` claiming self, or naming another contact, that arrives on
+    a contact's pair is rejected. So is a `REVOKE` for a label outside the sending contact.
   - **Provider compromise:** structural in dev builds; the real guarantee lands with
     offline-delegation Phase 4.
 
@@ -293,3 +357,13 @@ until offline-delegation Phase 4:
 4. **Research D6/D9 (Groove).** Groove's per-epoch OPRF key evolution and circuit tagging exist to
    make shared-identity devices safe without coordination. Option 3 needs neither for multi-device.
    D6 remains a candidate for epoch forward secrecy on its own merits.
+5. **Keep the introducer from learning the root.** Instead of drawing `s`, the introducer relays
+   key-agreement public values between X and Y (an ephemeral X25519 share, or a KEM public key and
+   ciphertext, from vetted libraries per Constitution I). The introducer then sees only public
+   values and a later compromise of it learns nothing. It still vouches for the keys, so it could
+   substitute its own at introduction time, which is the trust §6 already accepts. It costs a
+   round trip per pair and, with ML-KEM, the frame cost in §4.3.
+6. **FR-015/SC-005 against the pair cap.** Either amend FR-015, SC-005 and T033a to a per-device
+   pair cap of 512, or raise `MaxBuddies` and the notify digest (`NotifyDigest`, 512 bits) so that
+   a user keeps 512 contacts with several devices each. The second grows the digest and the PING
+   enclave's per-round state.
