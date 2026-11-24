@@ -761,4 +761,6 @@ Each phase is reviewable on its own and keeps the labeling rule: provider routin
 4. **Multi-device (US5, T043–T045).** With all traffic through the provider, two devices of one
    user can share one per-user schedule at the provider: one operation set per user per round, fed
    by whichever device is live. That is likely the FR-011 non-coordination mechanism, which is why
-   Phase 3 keys storage by user. Out of scope here.
+   Phase 3 keys storage by user. Out of scope here. `multi-device.md` takes this up and rejects the shared
+   schedule: two devices sharing one pair's ratchet state can fork it, and only the untrusted
+   provider could coordinate them. It makes every device a full client instead.

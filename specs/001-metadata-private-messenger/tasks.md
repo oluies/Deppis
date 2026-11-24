@@ -158,6 +158,10 @@ messages all arrive in order.
 **Independent Test**: Two devices both receive a buddy's message via the provider; a compromised
 provider learns zero buddies/activity; two non-coordinating devices emit no linkable traffic.
 
+**Design**: `design/multi-device.md` (PROPOSED) — every device a full client, pairs per device,
+devices introduced to buddies over existing pairs. No shared ratchet state, so T044 moves from
+`server/provider/` into protocol-core (§7 there).
+
 - [ ] T043 [P] [US5] Integration test: 2-device delivery + provider-compromise yields nothing + non-coordination (FR-010/FR-011) in `server/provider/src/test/scala/multidevice/` (write first, MUST fail)
 - [ ] T044 [US5] Implement provider-mediated device sync (buffer + reconcile divergent state) in `server/provider/src/main/scala/sync/` (FR-010)
 - [ ] T045 [US5] Implement oblivious delegation so two non-coordinating devices don't emit duplicate/linkable traffic in `protocol-core/shared/src/main/scala/delegation/` (FR-011) [hardening continues in Phase D]
