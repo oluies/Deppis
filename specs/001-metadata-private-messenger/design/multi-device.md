@@ -165,13 +165,19 @@ D's encrypted pairs, never in the clear.
 link time, because the set of devices keeps changing on both sides. Each device D applies this rule
 whenever its view changes:
 
-- **D introduces sibling X to contact device Y** when D holds verified pairs to both X (self) and Y
-  (contact), the synced pair lists (§4.6) show no X–Y pair, and no X–Y introduction is in flight.
-- **Exactly one side introduces.** When both a sibling of X and a sibling of Y could introduce the
-  same X–Y pair, only a sibling of whichever of X and Y has the lexicographically smaller label
-  does. Both sides compute this from labels they already know.
-- **Receivers deduplicate.** A device that already has a pair with the named peer label ignores a
-  further `INTRO` for it, which covers races where the rule ran on stale pair lists.
+- **D introduces device X to device Y** when D holds verified pairs to both, at least one of X
+  and Y is a sibling of D, and the synced pair lists (§4.6) show no confirmed X–Y pair. This covers
+  a sibling and a contact device, and also two siblings: a third device linked to D1 is introduced
+  to D3 the same way, so the user's own devices always form a full mesh of self pairs.
+- **One introducer.** Of all devices that could introduce X–Y, only the one with the smallest label
+  does. Every candidate computes this from labels it already knows.
+- **Races resolve the same way at both ends.** Pair lists can be stale, so two introductions of
+  the same X–Y can still happen. Each receiver keeps the introduction whose introducer has the
+  smaller label, replacing an unconfirmed pair from the other one. X and Y apply the same rule to
+  the same two introductions, so they always keep the same one.
+- **Pair lists report confirmed pairs only.** An introduction counts as done when the new pair has
+  confirmed (its first frame decrypted at both ends), not when D's messages are acked. A failed
+  introduction therefore never shows up as a pair, and the rule tries again.
 
 This one rule covers every case: linking a device (D1 introduces the new D2 to each contact
 device), a contact linking a device (B1 introduces B2 to each of the user's devices), both at once
@@ -192,7 +198,9 @@ arrives on:
 **Erasure.** X and Y hold their ephemeral private key only until the peer's share arrives, and
 `s` only until `addBuddy` has derived the pair's keys. D holds public shares only. If either side
 hasn't answered after H rounds (the same bound as a standing bundle), D drops the introduction and
-tells the side that did answer to discard its private key. The standing rule introduces the pair
+sends `INTRO_CANCEL(id)` to the side that did answer, which discards its private key. Only the
+device that sent `INTRO(id)` may cancel it. No pair exists yet at that point, because neither side
+runs `addBuddy` until it has the other's share. The standing rule introduces the pair
 afresh when both are next live.
 
 - **Authentication.** Y trusts "this is the user's new device" exactly as much as it trusts D,
@@ -201,7 +209,7 @@ afresh when both are next live.
   and can be shown.
 - **Visibility.** Y's app tells its user "Alice added a device". That is a feature: it is the
   check against an introduction the user didn't make.
-- **Wire.** `INTRO`, `INTRO_SHARE` and `INTRO_PEER` are new control kinds in the existing
+- **Wire.** `INTRO`, `INTRO_SHARE`, `INTRO_PEER` and `INTRO_CANCEL` are new control kinds in the existing
   control-frame path (the one `KEM_CHUNK` and `EPOCH_COMMIT` use), delivered with ARQ like any head.
   Each is well under 100 bytes, inside the 156-byte control envelope (`ChunkStream.EnvelopeBytes` =
   `ArqFrame.PayloadBytes`), so one fits per frame. Batching several into one chunked object
@@ -329,8 +337,9 @@ provider needs no new code:
     no token, frame or label, and each device makes exactly one operation set per round.
   - **Partition:** both devices change the contact list while apart, and after the partition they
     converge with no change in traffic shape.
-  - **Introductions:** concurrent linking on both sides, and a contact added after linking, each
-    end with exactly one pair per device pair. The introducer never holds anything
+  - **Introductions:** concurrent linking on both sides, a contact added after linking, a third
+    device linked (full self mesh), and two introducers racing on one pair each end with exactly
+    one working pair per device pair. The introducer never holds anything
     from which a token of an introduced pair can be derived, at any point.
   - **Authority (negative):** an `INTRO` claiming self, or naming another contact, that arrives on
     a contact's pair is rejected. So is a `REVOKE` for a label outside the sending contact.
